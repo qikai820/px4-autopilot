@@ -1,0 +1,9 @@
+menuconfig MODULES_GEO_CONTROL
+	bool "geo_control"
+	default n
+	---help---
+		Enable support for fw_att_control
+
+menuconfig USER_GEO_CONTROL
+	bool "geo_control running as userspace module"
+	default n
