@@ -54,6 +54,7 @@
 #include <ActuatorEffectivenessHelicopter.hpp>
 #include <ActuatorEffectivenessHelicopterCoaxial.hpp>
 #include <ActuatorEffectivenessSpacecraft.hpp>
+#include <ActuatorEffectivenessMorphQuad.hpp>
 
 #include <ControlAllocation.hpp>
 #include <ControlAllocationPseudoInverse.hpp>
@@ -161,6 +162,7 @@ private:
 		HELICOPTER_COAXIAL = 12,
 		SPACECRAFT_2D = 13,
 		SPACECRAFT_3D = 14,
+		MORPH_QUAD = 15, // 新增：MorphQuad 构型
 	};
 
 	enum class FailureMode {
