@@ -89,6 +89,7 @@ private:
     // uORB Subscriptions
     uORB::SubscriptionCallbackWorkItem _sub_vehicle_local_position{this, ORB_ID(vehicle_local_position)};
     uORB::Subscription _sub_vehicle_attitude{ORB_ID(vehicle_attitude)};
+    uORB::Subscription _sub_vehicle_attitude_setpoint{ORB_ID(vehicle_attitude_setpoint)};
     uORB::Subscription _sub_vehicle_angular_velocity{ORB_ID(vehicle_angular_velocity)};
     uORB::Subscription _sub_local_pos_sp{ORB_ID(vehicle_local_position_setpoint)};
     uORB::SubscriptionInterval _parameter_update_sub{ORB_ID(parameter_update), 1_s};
@@ -107,7 +108,10 @@ private:
         (ParamFloat<px4::params::GC_RP_P>) _param_gc_rp_p,
         (ParamFloat<px4::params::GC_YAW_P>) _param_gc_yaw_p,
         (ParamFloat<px4::params::GC_RP_RATE_P>) _param_gc_rp_rate_p,
-        (ParamFloat<px4::params::GC_YAW_RATE_P>) _param_gc_yaw_rate_p
+        (ParamFloat<px4::params::GC_YAW_RATE_P>) _param_gc_yaw_rate_p,
+        (ParamFloat<px4::params::GC_INERTIA_XX>) _param_gc_inertia_xx,
+        (ParamFloat<px4::params::GC_INERTIA_YY>) _param_gc_inertia_yy,
+        (ParamFloat<px4::params::GC_INERTIA_ZZ>) _param_gc_inertia_zz
     )
 
     hrt_abstime _last_run{0};

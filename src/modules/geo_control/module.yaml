@@ -1,0 +1,128 @@
+module_name: Geometric Controller (MorphQuad)
+
+parameters:
+  - group: Geometric Controller
+    definitions:
+      GC_MASS:
+        description:
+          short: Vehicle mass
+        type: float
+        unit: kg
+        min: 0.1
+        max: 50.0
+        increment: 0.01
+        decimal: 2
+        default: 4.56
+
+      GC_XY_P:
+        description:
+          short: Position proportional gain (XY)
+        type: float
+        min: 0
+        max: 100
+        increment: 0.1
+        decimal: 1
+        default: 1.0
+
+      GC_XY_VEL_P:
+        description:
+          short: Velocity proportional gain (XY)
+        type: float
+        min: 0
+        max: 100
+        increment: 0.1
+        decimal: 1
+        default: 0.5
+
+      GC_Z_P:
+        description:
+          short: Position proportional gain (Z)
+        type: float
+        min: 0
+        max: 100
+        increment: 0.1
+        decimal: 1
+        default: 1.0
+
+      GC_Z_VEL_P:
+        description:
+          short: Velocity proportional gain (Z)
+        type: float
+        min: 0
+        max: 100
+        increment: 0.1
+        decimal: 1
+        default: 0.5
+
+      GC_RP_P:
+        description:
+          short: Attitude proportional gain (Roll/Pitch)
+        type: float
+        min: 0
+        max: 100
+        increment: 0.1
+        decimal: 1
+        default: 6.0
+
+      GC_YAW_P:
+        description:
+          short: Attitude proportional gain (Yaw)
+        type: float
+        min: 0
+        max: 100
+        increment: 0.1
+        decimal: 1
+        default: 2.5
+
+      GC_RP_RATE_P:
+        description:
+          short: Angular rate proportional gain (Roll/Pitch)
+        type: float
+        min: 0
+        max: 100
+        increment: 0.1
+        decimal: 1
+        default: 0.5
+
+      GC_YAW_RATE_P:
+        description:
+          short: Angular rate proportional gain (Yaw)
+        type: float
+        min: 0
+        max: 100
+        increment: 0.1
+        decimal: 1
+        default: 0.5
+
+      GC_INERTIA_XX:
+        description:
+          short: Inertia matrix diagonal (XX)
+        type: float
+        unit: kg m^2
+        min: 0.001
+        max: 10.0
+        increment: 0.001
+        decimal: 3
+        default: 0.1
+
+      GC_INERTIA_YY:
+        description:
+          short: Inertia matrix diagonal (YY)
+        type: float
+        unit: kg m^2
+        min: 0.001
+        max: 10.0
+        increment: 0.001
+        decimal: 3
+        default: 0.1
+
+      GC_INERTIA_ZZ:
+        description:
+          short: Inertia matrix diagonal (ZZ)
+        type: float
+        unit: kg m^2
+        min: 0.001
+        max: 10.0
+        increment: 0.001
+        decimal: 3
+        default: 0.2

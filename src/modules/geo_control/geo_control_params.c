@@ -43,60 +43,84 @@
  * @unit kg
  * @group Geometric Controller
  */
-PARAM_DEFINE_FLOAT(GC_MASS, 4.56f);
+PARAM_DEFINE_FLOAT(GC_MASS, 4.56);
 
 /**
  * Geometric Controller Position Proportional Gain (XY)
  *
  * @group Geometric Controller
  */
-PARAM_DEFINE_FLOAT(GC_XY_P, 1.0f);
+PARAM_DEFINE_FLOAT(GC_XY_P, 1.0);
 
 /**
  * Geometric Controller Velocity Proportional Gain (XY)
  *
  * @group Geometric Controller
  */
-PARAM_DEFINE_FLOAT(GC_XY_VEL_P, 0.5f);
+PARAM_DEFINE_FLOAT(GC_XY_VEL_P, 0.5);
 
 /**
  * Geometric Controller Position Proportional Gain (Z)
  *
  * @group Geometric Controller
  */
-PARAM_DEFINE_FLOAT(GC_Z_P, 1.0f);
+PARAM_DEFINE_FLOAT(GC_Z_P, 1.0);
 
 /**
  * Geometric Controller Velocity Proportional Gain (Z)
  *
  * @group Geometric Controller
  */
-PARAM_DEFINE_FLOAT(GC_Z_VEL_P, 0.5f);
+PARAM_DEFINE_FLOAT(GC_Z_VEL_P, 0.5);
 
 /**
  * Geometric Controller Attitude Proportional Gain (Roll/Pitch)
  *
  * @group Geometric Controller
  */
-PARAM_DEFINE_FLOAT(GC_RP_P, 6.0f);
+PARAM_DEFINE_FLOAT(GC_RP_P, 6.0);
 
 /**
  * Geometric Controller Attitude Proportional Gain (Yaw)
  *
  * @group Geometric Controller
  */
-PARAM_DEFINE_FLOAT(GC_YAW_P, 2.5f);
+PARAM_DEFINE_FLOAT(GC_YAW_P, 2.5);
 
 /**
  * Geometric Controller Angular Rate Proportional Gain (Roll/Pitch)
  *
  * @group Geometric Controller
  */
-PARAM_DEFINE_FLOAT(GC_RP_RATE_P, 0.5f);
+PARAM_DEFINE_FLOAT(GC_RP_RATE_P, 0.5);
 
 /**
  * Geometric Controller Angular Rate Proportional Gain (Yaw)
  *
  * @group Geometric Controller
  */
-PARAM_DEFINE_FLOAT(GC_YAW_RATE_P, 0.5f);
+PARAM_DEFINE_FLOAT(GC_YAW_RATE_P, 0.5);
+
+/**
+ * Geometric Controller Inertia Matrix XX
+ *
+ * @unit kg m^2
+ * @group Geometric Controller
+ */
+PARAM_DEFINE_FLOAT(GC_INERTIA_XX, 0.1);
+
+/**
+ * Geometric Controller Inertia Matrix YY
+ *
+ * @unit kg m^2
+ * @group Geometric Controller
+ */
+PARAM_DEFINE_FLOAT(GC_INERTIA_YY, 0.1);
+
+/**
+ * Geometric Controller Inertia Matrix ZZ
+ *
+ * @unit kg m^2
+ * @group Geometric Controller
+ */
+PARAM_DEFINE_FLOAT(GC_INERTIA_ZZ, 0.2);
