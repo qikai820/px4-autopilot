@@ -1,0 +1,27 @@
+#!/bin/sh
+#
+# Apps for MorphQuad (vector-thrust) vehicles.
+# Starts the geometric controller and control allocator.
+#
+# NOTE: Script variables are declared/initialized/unset in the rcS script.
+#
+
+#
+# Start Control Allocator (uses ActuatorEffectivenessMorphQuad)
+#
+control_allocator start
+
+#
+# Start Geometric Controller (SE(3) tracking on body frame)
+#
+geo_control start
+
+#
+# Start flight mode manager (handles setpoint generation)
+#
+flight_mode_manager start
+
+#
+# Start land detector
+#
+land_detector start multicopter

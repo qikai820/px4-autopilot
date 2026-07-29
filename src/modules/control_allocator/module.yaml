@@ -33,6 +33,7 @@ parameters:
                 13: Rover (Mecanum)
                 14: Spacecraft 2D
                 15: Spacecraft 3D
+                16: MorphQuad
             default: 0
 
         CA_METHOD:
@@ -1251,3 +1252,13 @@ mixer:
                             function: 'axisz'
                           - name: 'CA_ROTOR${i}_CT'
                             label: "Thrust\nCoefficient"
+
+            16: # MorphQuad
+                title: 'MorphQuad'
+                actuators:
+                  - actuator_type: 'motor'
+                    group_label: 'Motors'
+                    count: 4
+                  - actuator_type: 'servo'
+                    group_label: 'Outer Gimbal Servos'
+                    count: 4

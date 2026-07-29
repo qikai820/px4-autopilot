@@ -1,0 +1,34 @@
+#!/bin/sh
+#
+# MorphQuad (vector-thrust) default parameters.
+#
+# NOTE: Script variables are declared/initialized/unset in the rcS script.
+#
+
+set VEHICLE_TYPE vector
+
+# MAV_TYPE_GENERIC = 0, use generic multicopter type for GCS compatibility
+param set-default MAV_TYPE 2
+
+# --- Vehicle physical parameters ---
+param set-default GC_MASS 4.56
+param set-default GC_INERTIA_XX 0.1
+param set-default GC_INERTIA_YY 0.1
+param set-default GC_INERTIA_ZZ 0.2
+
+# --- Position control gains ---
+param set-default GC_XY_P 1.0
+param set-default GC_XY_VEL_P 0.5
+param set-default GC_Z_P 1.0
+param set-default GC_Z_VEL_P 0.5
+
+# --- Attitude control gains ---
+param set-default GC_RP_P 6.0
+param set-default GC_YAW_P 2.5
+param set-default GC_RP_RATE_P 0.5
+param set-default GC_YAW_RATE_P 0.5
+
+# --- Navigation / safety defaults (inherit from MC) ---
+param set-default NAV_ACC_RAD 2
+param set-default RTL_RETURN_ALT 30
+param set-default RTL_DESCEND_ALT 10

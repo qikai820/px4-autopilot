@@ -25,9 +25,9 @@
  * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
  * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
  * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
- * ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE) ARISING IN ANY WAY OUT
+ * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
+ * OF SUCH DAMAGE.
  *
  ****************************************************************************/
 
@@ -40,31 +40,54 @@
 class ActuatorEffectivenessMorphQuad : public ModuleParams, public ActuatorEffectiveness
 {
 public:
-    ActuatorEffectivenessMorphQuad(ModuleParams *parent);
-    virtual ~ActuatorEffectivenessMorphQuad() = default;
+	ActuatorEffectivenessMorphQuad(ModuleParams *parent);
+	virtual ~ActuatorEffectivenessMorphQuad() = default;
 
-    bool getEffectivenessMatrix(Configuration &configuration, EffectivenessUpdateReason external_update) override;
-    void updateSetpoint(const matrix::Vector<float, NUM_AXES> &control_sp, int matrix_index, ActuatorVector &actuator_sp, const ActuatorVector &actuator_min, const ActuatorVector &actuator_max) override;
+	bool getEffectivenessMatrix(Configuration &configuration,
+				    EffectivenessUpdateReason external_update) override;
 
-    const char *name() const override { return "MorphQuad"; }
+	void updateSetpoint(const matrix::Vector<float, NUM_AXES> &control_sp, int matrix_index,
+			    ActuatorVector &actuator_sp,
+			    const ActuatorVector &actuator_min,
+			    const ActuatorVector &actuator_max) override;
+
+	const char *name() const override { return "MorphQuad"; }
 
 private:
-    // 论文中的物理参数
-    float _mass{1.5f};           ///< 飞行器质量 (kg)
-    float _arm_length{0.25f};    ///< 机臂长度 (m)
-    float _motor_to_servo_arm{0.05f}; ///< 电机到舵机摇臂的距离 (m)
+	static constexpr int NUM_ROTORS = 4;
+	static constexpr int NR = 2;
 
-    // 论文中的控制增益
-    float _k_p{1.0f};            ///< 位置环比例增益
-    float _k_d{0.5f};            ///< 位置环微分增益
-    float _k_rp{5.0f};           ///< 姿态环比例增益
-    float _k_rd{1.0f};           ///< 姿态环微分增益
+	// Geometry
+	float _half_length{0.17f};    ///< l: half arm length in x direction [m]
+	float _half_width{0.17f};     ///< b: half arm width in y direction [m]
+	float _thrust_coeff{1.0f};    ///< c_t: thrust coefficient [N/(rad/s)^2]
+	float _omega_max{1200.0f};    ///< max motor angular velocity [rad/s]
 
-    // 中间计算变量
-    matrix::Vector3f _desired_force_b; ///< 机体坐标系下的期望合力
-    float _total_thrust;               ///< 四个电机的总推力
-    float _delta_tilt;                 ///< 倾转舵机的偏转角度
+	// Null-space correction gains
+	float _gimbal_lock_gain{0.3f};
+	float _downwash_gain{0.2f};
 
-    // 辅助函数：根据论文公式计算期望的机体合力和倾转角度
-    void _computeForceAndTilt(const matrix::Vector<float, NUM_AXES> &control_sp);
+	// Previous servo angles for minimal-motion selection
+	float _alpha_prev[NUM_ROTORS] {};
+	float _beta_prev[NUM_ROTORS] {};
+
+	/**
+	 * Compute 4 thrust vectors from desired wrench (Eq.12 + Eq.15-16).
+	 * @param f_des  desired force in body frame [N]
+	 * @param tau_des desired torque in body frame [Nm]
+	 * @param t_out  output 4x3 thrust vectors
+	 */
+	void computeThrustVectors(const matrix::Vector3f &f_des, const matrix::Vector3f &tau_des,
+				  float t_out[NUM_ROTORS][3]);
+
+	/**
+	 * Recover servo angles and motor speed from a thrust vector (Eq.14).
+	 * @param t         3D thrust vector for one rotor
+	 * @param idx       rotor index (0-3)
+	 * @param alpha_out outer servo angle [rad]
+	 * @param beta_out  inner servo angle [rad]
+	 * @param omega_out motor angular velocity [rad/s]
+	 */
+	void recoverServoAngles(const float t[3], int idx,
+				float &alpha_out, float &beta_out, float &omega_out);
 };

@@ -25,115 +25,235 @@
  * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
  * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
  * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
- * ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE) ARISING IN ANY WAY OUT
+ * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
+ * OF SUCH DAMAGE.
  *
  ****************************************************************************/
 
+/**
+ * @file ActuatorEffectivenessMorphQuad.cpp
+ *
+ * Thrust allocation for MorphQuad morphable quadrotor.
+ * Implements the algorithm from:
+ *   "MorphQuad: Morphable Quadrotor for Superhuman Maneuverability"
+ *   (arXiv:2607.02764)
+ *
+ * Uses Pattern B: registers zero effectiveness matrix and performs
+ * all allocation logic in updateSetpoint().
+ */
+
 #include "ActuatorEffectivenessMorphQuad.hpp"
+
 #include <lib/mathlib/mathlib.h>
+#include <px4_platform_common/log.h>
+
+#include <cmath>
 
 using namespace matrix;
 
 ActuatorEffectivenessMorphQuad::ActuatorEffectivenessMorphQuad(ModuleParams *parent) :
-    ModuleParams(parent)
+	ModuleParams(parent)
 {
-    // 从参数服务器加载参数（此处为示例，实际应使用 DEFINE_PARAMETERS 宏）
-    // 例如: _mass = param_find("MQ_MASS");
 }
 
-bool ActuatorEffectivenessMorphQuad::getEffectivenessMatrix(Configuration &configuration, EffectivenessUpdateReason external_update)
+bool ActuatorEffectivenessMorphQuad::getEffectivenessMatrix(
+	Configuration &configuration, EffectivenessUpdateReason external_update)
 {
-    if (external_update == EffectivenessUpdateReason::NO_EXTERNAL_UPDATE) {
-        return false;
-    }
+	// Register 4 motors (thrust direction placeholder — actual allocation in updateSetpoint)
+	for (int i = 0; i < NUM_ROTORS; ++i) {
+		configuration.addActuator(ActuatorType::MOTORS, Vector3f{}, Vector3f{0.f, 0.f, -1.f});
+	}
 
-    // 1. 添加4个电机
-    // 电机只产生推力，其反扭矩效应由控制分配算法处理
-    for (int i = 0; i < 4; ++i) {
-        configuration.addActuator(ActuatorType::MOTORS, Vector3f{}, Vector3f{});
-    }
+	// Register 8 servos (4 outer alpha + 4 inner beta)
+	for (int i = 0; i < 2 * NUM_ROTORS; ++i) {
+		configuration.addActuator(ActuatorType::SERVOS, Vector3f{}, Vector3f{});
+	}
 
-    // 2. 添加4个舵机 (用于倾转)
-    // 舵机产生力矩，其具体效应由算法计算
-    for (int i = 0; i < 4; ++i) {
-        configuration.addActuator(ActuatorType::SERVOS, Vector3f{}, Vector3f{});
-    }
-
-    return true;
+	return true;
 }
 
-void ActuatorEffectivenessMorphQuad::updateSetpoint(const matrix::Vector<float, NUM_AXES> &control_sp, int matrix_index, ActuatorVector &actuator_sp, const ActuatorVector &actuator_min, const ActuatorVector &actuator_max)
+void ActuatorEffectivenessMorphQuad::updateSetpoint(
+	const matrix::Vector<float, NUM_AXES> &control_sp, int matrix_index,
+	ActuatorVector &actuator_sp,
+	const ActuatorVector &actuator_min,
+	const ActuatorVector &actuator_max)
 {
-    // 1. 根据高层控制器输出的期望力/力矩，计算总推力和倾转角度
-    // control_sp 包含了 [Roll Torque, Pitch Torque, Yaw Torque, Thrust X, Thrust Y, Thrust Z]
-    _computeForceAndTilt(control_sp);
+	// Extract desired wrench from control setpoint
+	// control_sp: [roll_torque, pitch_torque, yaw_torque, thrust_x, thrust_y, thrust_z]
+	Vector3f f_des(control_sp(ControlAxis::THRUST_X),
+		       control_sp(ControlAxis::THRUST_Y),
+		       control_sp(ControlAxis::THRUST_Z));
+	Vector3f tau_des(control_sp(ControlAxis::ROLL),
+			 control_sp(ControlAxis::PITCH),
+			 control_sp(ControlAxis::YAW));
 
-    // 2. 将总推力和倾转角度分配给4个电机和4个舵机
-    // 这是一个简化的分配模型，具体取决于 MorphQuad 的机械结构
-    // 假设是 X 型布局，电机编号为 0, 1, 2, 3
+	// Step 1+2: Compute thrust vectors (minimum-norm + null-space correction)
+	float t[NUM_ROTORS][3];
+	computeThrustVectors(f_des, tau_des, t);
 
-    // 每个电机的基础推力是总推力的一半（假设两两一组）
-    float motor_thrust_base = _total_thrust / 4.0f;
+	// Step 3: Recover servo angles and motor speeds
+	for (int i = 0; i < NUM_ROTORS; ++i) {
+		float alpha, beta, omega;
+		recoverServoAngles(t[i], i, alpha, beta, omega);
 
-    // 根据期望的滚转和俯仰力矩，对电机推力进行微调
-    // 这里简化处理，实际应根据论文中的力矩平衡方程精确计算
-    float roll_torque = control_sp(ControlAxis::ROLL);
-    float pitch_torque = control_sp(ControlAxis::PITCH);
+		// Normalize motor output: omega / omega_max -> [0, 1]
+		actuator_sp(i) = omega / _omega_max;
 
-    // 电机推力分配 (示例)
-    actuator_sp(0) = motor_thrust_base + roll_torque * _k_rp + pitch_torque * _k_rp; // 前右
-    actuator_sp(1) = motor_thrust_base - roll_torque * _k_rp + pitch_torque * _k_rp; // 前左
-    actuator_sp(2) = motor_thrust_base - roll_torque * _k_rp - pitch_torque * _k_rp; // 后左
-    actuator_sp(3) = motor_thrust_base + roll_torque * _k_rp - pitch_torque * _k_rp; // 后右
+		// Normalize outer servo: alpha / pi -> [-1, 1]
+		actuator_sp(NUM_ROTORS + i) = alpha / M_PI_F;
+	}
 
-    // 3. 舵机角度分配
-    // 舵机角度由倾转角度 _delta_tilt 和偏航力矩决定
-    float yaw_torque = control_sp(ControlAxis::YAW);
-
-    // 舵机角度分配 (示例)
-    // 倾转舵机用于产生滚转和俯仰力矩
-    actuator_sp(4) = _delta_tilt + yaw_torque * _k_rp; // 前右舵机
-    actuator_sp(5) = _delta_tilt - yaw_torque * _k_rp; // 前左舵机
-    actuator_sp(6) = _delta_tilt + yaw_torque * _k_rp; // 后左舵机
-    actuator_sp(7) = _delta_tilt - yaw_torque * _k_rp; // 后右舵机
-
-    // 4. 饱和处理
-    for (int i = 0; i < 8; ++i) {
-        if (actuator_sp(i) > actuator_max(i)) {
-            actuator_sp(i) = actuator_max(i);
-        } else if (actuator_sp(i) < actuator_min(i)) {
-            actuator_sp(i) = actuator_min(i);
-        }
-    }
+	// Saturate all actuator outputs
+	for (int i = 0; i < NUM_ROTORS + 2 * NUM_ROTORS; ++i) {
+		actuator_sp(i) = math::constrain(actuator_sp(i), actuator_min(i), actuator_max(i));
+	}
 }
 
-void ActuatorEffectivenessMorphQuad::_computeForceAndTilt(const matrix::Vector<float, NUM_AXES> &control_sp)
+void ActuatorEffectivenessMorphQuad::computeThrustVectors(
+	const Vector3f &f_des, const Vector3f &tau_des,
+	float t_out[NUM_ROTORS][3])
 {
-    // 从控制设定点中提取期望的力和力矩
-    float desired_torque_roll = control_sp(ControlAxis::ROLL);
-    float desired_torque_pitch = control_sp(ControlAxis::PITCH);
-    float desired_thrust_z = control_sp(ControlAxis::THRUST_Z); // 期望的Z轴推力
+	const float l = _half_length;
+	const float b = _half_width;
+	const float r = sqrtf(l * l + b * b);
 
-    // 论文中的核心算法：计算总推力和倾转角度
-    // 这是一个简化的示例，实际公式会更复杂
+	// X-layout sign patterns (rotor order: FR=0, FL=1, BL=2, BR=3)
+	// roll_sign:  +1 for rotors on the -y side (FR, BR), -1 for +y side (FL, BL)
+	const float roll_sign[NUM_ROTORS]  = {+1.0f, -1.0f, -1.0f, +1.0f};
+	// pitch_sign: -1 for front (+x), +1 for back (-x)
+	const float pitch_sign[NUM_ROTORS] = {-1.0f, -1.0f, +1.0f, +1.0f};
 
-    // 1. 计算机体坐标系下的期望合力
-    // 假设期望的合力主要在Z轴，X和Y轴由倾转产生
-    _desired_force_b(0) = 0.0f; // 简化处理
-    _desired_force_b(1) = 0.0f; // 简化处理
-    _desired_force_b(2) = -desired_thrust_z; // 期望的升力
+	// Yaw unit vectors (Eq.13): perpendicular to rotor arm in xy-plane
+	// e_psi_i = [-l_iy/r, +l_ix/r, 0]
+	// Rotor positions: FR(+l,-b), FL(+l,+b), BL(-l,+b), BR(-l,-b)
+	const float eps_x[NUM_ROTORS] = {-b / r,  b / r,  b / r, -b / r};
+	const float eps_y[NUM_ROTORS] = { l / r,  l / r, -l / r, -l / r};
 
-    // 2. 计算总推力
-    // 总推力需要克服重力并提供期望的加速度
-    _total_thrust = _desired_force_b.norm();
+	// Step 1: Minimum-norm decomposition (Eq.12)
+	for (int i = 0; i < NUM_ROTORS; ++i) {
+		// Force sharing + roll torque + yaw torque (tangential)
+		t_out[i][0] = f_des(0) / 4.0f
+			      + roll_sign[i] * tau_des(0) / (4.0f * b)
+			      + tau_des(2) * eps_x[i] / (4.0f * r);
 
-    // 3. 计算倾转角度
-    // 倾转角度由期望的滚转和俯仰力矩决定
-    // 这是一个简化的计算，实际应根据论文中的公式
-    _delta_tilt = atan2f(sqrtf(desired_torque_roll * desired_torque_roll + desired_torque_pitch * desired_torque_pitch), _total_thrust * _arm_length);
+		// Force sharing + pitch torque + yaw torque (tangential)
+		// Corrected sign: pitch contribution uses -pitch_sign to match
+		// the wrench equation tau_y = sum(l_ix * t_iz - l_iz * t_ix)
+		t_out[i][1] = f_des(1) / 4.0f
+			      - pitch_sign[i] * tau_des(1) / (4.0f * l)
+			      + tau_des(2) * eps_y[i] / (4.0f * r);
 
-    // 限制倾转角度在合理范围内
-    _delta_tilt = math::constrain(_delta_tilt, -0.5f, 0.5f); // 限制在 +/- 30度左右
+		// z-component: only force sharing (torque from z-force is coupled
+		// with roll/pitch through arm offsets, handled by the above terms)
+		t_out[i][2] = f_des(2) / 4.0f;
+	}
+
+	// Step 2: Null-space correction (Eq.15-16)
+	const float f_norm = f_des.norm();
+
+	if (f_norm > 0.01f) {
+		const float f_hat_y = f_des(1) / f_norm;
+		const float f_hat_x = f_des(0) / f_norm;
+
+		// (a) Gimbal lock avoidance: repel beta_i away from +/-pi/2
+		// When f is aligned with j^B (y-axis), inner servo loses control.
+		// Add alternating y-component correction proportional to |f_hat . j^B|.
+		const float y_corr = _gimbal_lock_gain * fabsf(f_hat_y) * f_norm / 4.0f;
+
+		for (int i = 0; i < NUM_ROTORS; ++i) {
+			// Alternating sign: (-1)^i
+			const float sign = (i % 2 == 0) ? 1.0f : -1.0f;
+			t_out[i][1] += sign * y_corr;
+		}
+
+		// (b) Downwash avoidance: break thrust collinearity when f || i^B
+		// When |f_hat . i^B| > 0.7, add alternating x-component to front/back pairs.
+		if (fabsf(f_hat_x) > 0.7f) {
+			const float x_corr = _downwash_gain * fabsf(f_hat_x) * f_norm / 10.0f;
+
+			for (int i = 0; i < NUM_ROTORS; ++i) {
+				// Front pair (0,1): +x_corr, Back pair (2,3): -x_corr
+				const float sign = (i < 2) ? 1.0f : -1.0f;
+				t_out[i][0] += sign * x_corr;
+			}
+		}
+	}
+}
+
+void ActuatorEffectivenessMorphQuad::recoverServoAngles(
+	const float t[3], int idx,
+	float &alpha_out, float &beta_out, float &omega_out)
+{
+	const float t_norm = sqrtf(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]);
+
+	// Motor speed: Omega = ||t|| / c_t
+	omega_out = t_norm / _thrust_coeff;
+
+	// If thrust is negligible, keep previous angles to avoid jitter
+	if (t_norm < 0.01f) {
+		alpha_out = _alpha_prev[idx];
+		beta_out = _beta_prev[idx];
+		omega_out = 0.f;
+		return;
+	}
+
+	// Unit thrust direction
+	const float t_hat_x = t[0] / t_norm;
+	const float t_hat_y = t[1] / t_norm;
+	const float t_hat_z = t[2] / t_norm;
+
+	// Two-branch solution (Eq.14)
+	// Branch 1: beta in [-pi/2, pi/2]
+	const float beta1 = asinf(math::constrain(-t_hat_y, -1.0f, 1.0f));
+	const float alpha1 = atan2f(t_hat_x, t_hat_z);
+
+	// Branch 2: beta in [pi/2, 3*pi/2]
+	const float beta2 = M_PI_F - beta1;
+	const float alpha2 = M_PI_F + alpha1;
+
+	// Minimal-motion selection
+	const float d1 = fabsf(alpha1 - _alpha_prev[idx]) + fabsf(beta1 - _beta_prev[idx]);
+	const float d2 = fabsf(alpha2 - _alpha_prev[idx]) + fabsf(beta2 - _beta_prev[idx]);
+
+	float alpha, beta;
+
+	if (d2 < d1) {
+		alpha = alpha2;
+		beta = beta2;
+
+	} else {
+		alpha = alpha1;
+		beta = beta1;
+	}
+
+	// Multi-revolution wrap check: find the wrapping that minimizes motion
+	float best_dist = fabsf(alpha - _alpha_prev[idx]) + fabsf(beta - _beta_prev[idx]);
+	float best_alpha = alpha;
+
+	for (int k = -NR; k <= NR; ++k) {
+		if (k == 0) {
+			continue;
+		}
+
+		const float alpha_wrap = alpha + 2.0f * M_PI_F * k;
+		const float dist = fabsf(alpha_wrap - _alpha_prev[idx]) + fabsf(beta - _beta_prev[idx]);
+
+		if (dist < best_dist) {
+			best_dist = dist;
+			best_alpha = alpha_wrap;
+		}
+	}
+
+	alpha = best_alpha;
+
+	// Clamp beta to mechanical limits [-pi/2, 3*pi/2]
+	beta = math::constrain(beta, -M_PI_F / 2.0f, 3.0f * M_PI_F / 2.0f);
+
+	// Update history
+	_alpha_prev[idx] = alpha;
+	_beta_prev[idx] = beta;
+
+	alpha_out = alpha;
+	beta_out = beta;
 }

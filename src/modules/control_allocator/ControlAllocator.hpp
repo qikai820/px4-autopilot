@@ -162,7 +162,7 @@ private:
 		HELICOPTER_COAXIAL = 12,
 		SPACECRAFT_2D = 13,
 		SPACECRAFT_3D = 14,
-		MORPH_QUAD = 15, // 新增：MorphQuad 构型
+		MORPH_QUAD = 16,
 	};
 
 	enum class FailureMode {

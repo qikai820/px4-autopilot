@@ -95,6 +95,13 @@ then
 	. ${R}etc/init.d/rc.uuv_apps
 fi
 
+#
+# Vector-thrust (MorphQuad) setup
+#
+if [ $VEHICLE_TYPE = vector ]
+then
+	. ${R}etc/init.d/rc.vector_apps
+fi
 
 
 #

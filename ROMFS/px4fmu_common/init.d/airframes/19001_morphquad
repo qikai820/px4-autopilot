@@ -1,0 +1,29 @@
+#!/bin/sh
+#
+# @name MorphQuad - Morphable Quadrotor
+#
+# @type MorphQuad
+# @class Copter
+#
+# MorphQuad: a quadrotor with independently tilting rotors via
+# dual-axis gimbal servos. Each rotor can point thrust in an
+# arbitrary direction, making it a fully-actuated 6DOF system.
+#
+# Actuator mapping:
+#   Motors 0-3:  rotor speeds (Omega_0 .. Omega_3)
+#   Servos 0-3:  outer gimbal servos (alpha_0 .. alpha_3)
+#
+# Control allocation is handled by ActuatorEffectivenessMorphQuad
+# using Pattern B (custom updateSetpoint override).
+#
+
+. ${R}etc/init.d/rc.vector_defaults
+
+# --- Airframe type: MorphQuad (CA_AIRFRAME = 16) ---
+param set-default CA_AIRFRAME 16
+
+# --- Control allocation method: Pseudo-inverse ---
+param set-default CA_METHOD 0
+
+# --- Enable geo_control module ---
+param set-default SYS_HAS_MC 1

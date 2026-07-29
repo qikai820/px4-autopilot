@@ -106,6 +106,9 @@ if(CONFIG_MODULES_MC_RATE_CONTROL)
 		16001_helicopter
 
 		24001_dodeca_cox
+
+		# [19000, 19999] MorphQuad
+		19001_morphquad
 	)
 endif()
 
