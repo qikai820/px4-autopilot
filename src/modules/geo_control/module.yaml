@@ -126,3 +126,45 @@ parameters:
         increment: 0.001
         decimal: 3
         default: 0.2
+
+      GC_MAN_RATE_MAX:
+        description:
+          short: Manual mode max angular rate
+          long: |
+            Stick deflection of +/-1 maps to +/- this angular rate.
+            roll/pitch/yaw sticks control body-frame angular rates.
+        type: float
+        unit: rad/s
+        min: 0.1
+        max: 10.0
+        increment: 0.1
+        decimal: 1
+        default: 1.5
+
+      GC_MAN_VEL_MAX:
+        description:
+          short: Manual mode max velocity
+          long: |
+            Stick deflection of +/-1 maps to +/- this velocity.
+            aux1/aux2/aux3 sticks control body-frame x/y/z velocity.
+        type: float
+        unit: m/s
+        min: 0.1
+        max: 20.0
+        increment: 0.5
+        decimal: 1
+        default: 5.0
+
+      GC_MAN_DZ:
+        description:
+          short: Manual mode stick deadzone
+          long: |
+            Deadzone applied to all stick inputs in manual mode.
+            Stick values within [-dz, +dz] are treated as zero.
+            Values outside are rescaled linearly to maintain full range.
+        type: float
+        min: 0
+        max: 0.9
+        increment: 0.01
+        decimal: 2
+        default: 0.1

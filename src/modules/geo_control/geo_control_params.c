@@ -124,3 +124,39 @@ PARAM_DEFINE_FLOAT(GC_INERTIA_YY, 0.1);
  * @group Geometric Controller
  */
 PARAM_DEFINE_FLOAT(GC_INERTIA_ZZ, 0.2);
+
+/**
+ * Geometric Controller Manual Mode Max Angular Rate
+ *
+ * Maximum angular rate for manual mode stick input.
+ * Stick deflection of +/-1 maps to +/- this value.
+ *
+ * @unit rad/s
+ * @group Geometric Controller
+ */
+PARAM_DEFINE_FLOAT(GC_MAN_RATE_MAX, 1.5);
+
+/**
+ * Geometric Controller Manual Mode Max Velocity
+ *
+ * Maximum velocity for manual mode aux stick input.
+ * Stick deflection of +/-1 maps to +/- this value.
+ *
+ * @unit m/s
+ * @group Geometric Controller
+ */
+PARAM_DEFINE_FLOAT(GC_MAN_VEL_MAX, 5.0);
+
+/**
+ * Geometric Controller Manual Mode Stick Deadzone
+ *
+ * Deadzone applied to all stick inputs in manual mode.
+ * Stick values within [-dz, +dz] are treated as zero.
+ * Values outside are rescaled linearly to maintain full range.
+ *
+ * @min 0
+ * @max 0.9
+ * @decimal 2
+ * @group Geometric Controller
+ */
+PARAM_DEFINE_FLOAT(GC_MAN_DZ, 0.1);

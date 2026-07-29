@@ -25,17 +25,11 @@
  * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
  * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
  * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
- * ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE) ARISING IN ANY WAY OUT
+ * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
+ * OF SUCH DAMAGE.
  *
  ****************************************************************************/
-
-/**
- * @file geo_control.cpp
- *
- * Geometric Controller for MorphQuad.
- */
 
 #include "geo_control.hpp"
 
@@ -47,206 +41,383 @@
 using namespace matrix;
 
 GeoControl::GeoControl() :
-    ModuleParams(nullptr),
-    ScheduledWorkItem(MODULE_NAME, px4::wq_configurations::nav_and_controllers),
-    _loop_perf(perf_alloc(PC_ELAPSED, MODULE_NAME": cycle"))
+	ModuleParams(nullptr),
+	ScheduledWorkItem(MODULE_NAME, px4::wq_configurations::nav_and_controllers),
+	_loop_perf(perf_alloc(PC_ELAPSED, MODULE_NAME": cycle"))
 {
 }
 
 bool GeoControl::init()
 {
-    if (!_sub_vehicle_local_position.registerCallback()) {
-        PX4_ERR("callback registration failed");
-        return false;
-    }
+	if (!_sub_vehicle_local_position.registerCallback()) {
+		PX4_ERR("callback registration failed");
+		return false;
+	}
 
-    return true;
+	return true;
 }
 
 void GeoControl::parameters_update(bool force)
 {
-    // check for parameter updates
-    if (_parameter_update_sub.updated() || force) {
-        // clear update
-        parameter_update_s pupdate;
-        _parameter_update_sub.copy(&pupdate);
-        // update parameters from storage
-        updateParams();
-    }
+	if (_parameter_update_sub.updated() || force) {
+		parameter_update_s pupdate;
+		_parameter_update_sub.copy(&pupdate);
+		updateParams();
+	}
 }
 
+void GeoControl::publish_wrench(const Vector3f &f_des_body, const Vector3f &tau_des,
+				uint64_t timestamp_sample)
+{
+	const hrt_abstime now = hrt_absolute_time();
+
+	vehicle_thrust_setpoint_s thrust_msg{};
+	thrust_msg.timestamp = now;
+	thrust_msg.timestamp_sample = timestamp_sample;
+	thrust_msg.xyz[0] = f_des_body(0);
+	thrust_msg.xyz[1] = f_des_body(1);
+	thrust_msg.xyz[2] = f_des_body(2);
+	_thrust_pub.publish(thrust_msg);
+
+	vehicle_torque_setpoint_s torque_msg{};
+	torque_msg.timestamp = now;
+	torque_msg.timestamp_sample = timestamp_sample;
+	torque_msg.xyz[0] = tau_des(0);
+	torque_msg.xyz[1] = tau_des(1);
+	torque_msg.xyz[2] = tau_des(2);
+	_torque_pub.publish(torque_msg);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Manual mode: RC sticks → angular rate + velocity references
+// ─────────────────────────────────────────────────────────────────────────────
+void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &vel,
+				     const Vector3f &omega, uint64_t timestamp_sample)
+{
+	manual_control_setpoint_s manual_sp;
+
+	if (!_sub_manual_control_sp.update(&manual_sp) || !manual_sp.valid) {
+		return;
+	}
+
+	const float dt = math::constrain(static_cast<float>((hrt_absolute_time() - _last_run) * 1e-6f),
+					 0.001f, 0.05f);
+
+	const float rate_max = _param_gc_man_rate_max.get();
+	const float vel_max = _param_gc_man_vel_max.get();
+	const float dz = _param_gc_man_dz.get();
+	const float mass = _param_gc_mass.get();
+
+	// Apply deadzone then scale: stick [-1,1] → angular rate [rad/s]
+	const float p_sp = math::deadzone(manual_sp.roll,  dz) * rate_max;
+	const float q_sp = math::deadzone(manual_sp.pitch, dz) * rate_max;
+	const float r_sp = math::deadzone(manual_sp.yaw,   dz) * rate_max;
+	Vector3f omega_sp(p_sp, q_sp, r_sp);
+
+	// Apply deadzone then scale: aux stick [-1,1] → body velocity [m/s]
+	const float vx_sp_b = math::deadzone(manual_sp.aux1, dz) * vel_max;
+	const float vy_sp_b = math::deadzone(manual_sp.aux2, dz) * vel_max;
+	const float vz_sp_b = math::deadzone(manual_sp.aux3, dz) * vel_max;
+	Vector3f vel_sp_body(vx_sp_b, vy_sp_b, vz_sp_b);
+
+	// Convert velocity setpoint to NED world frame
+	const Dcmf R(R_q);
+	Vector3f vel_sp_world = R * vel_sp_body;
+
+	// Integrate rate commands into attitude reference (quaternion integration)
+	// q_dot = 0.5 * q * omega_quat
+	const Vector3f omega_vec(omega_sp(0), omega_sp(1), omega_sp(2));
+	const float omega_norm = omega_vec.norm();
+
+	if (omega_norm > 1e-6f) {
+		const float angle = omega_norm * dt;
+		const Vector3f axis = omega_vec / omega_norm;
+		const float ha = angle * 0.5f;
+		const float sha = sinf(ha);
+		const float cha = cosf(ha);
+		Quatf dq(cha, axis(0) * sha, axis(1) * sha, axis(2) * sha);
+		_q_att_ref = _q_att_ref * dq;
+		_q_att_ref.normalize();
+	}
+
+	// ── Velocity loop → desired force ──
+	Vector3f kp(_param_gc_xy_vel_p.get(), _param_gc_xy_vel_p.get(), _param_gc_z_vel_p.get());
+	Vector3f e_v = vel - vel_sp_world;
+	Vector3f g(0.f, 0.f, 9.81f);
+	Vector3f f_des_world = -kp.emult(e_v) + mass * g;
+	Vector3f f_des_body = R.transpose() * f_des_world;
+
+	// ── Attitude loop → desired torque ──
+	const Dcmf R_sp(_q_att_ref);
+	const Dcmf e_R_mat = (R_sp.transpose() * R - R.transpose() * R_sp) * 0.5f;
+	Vector3f e_R(e_R_mat(2, 1), e_R_mat(0, 2), e_R_mat(1, 0));
+
+	Vector3f kR(_param_gc_rp_p.get(), _param_gc_rp_p.get(), _param_gc_yaw_p.get());
+	Vector3f kOmega(_param_gc_rp_rate_p.get(), _param_gc_rp_rate_p.get(), _param_gc_yaw_rate_p.get());
+
+	Matrix3f J = matrix::diag(Vector3f(
+					   _param_gc_inertia_xx.get(),
+					   _param_gc_inertia_yy.get(),
+					   _param_gc_inertia_zz.get()));
+
+	// omega_d in body frame from attitude reference
+	Vector3f omega_d_in_B = R.transpose() * R_sp * omega_sp;
+	Vector3f e_omega = omega - omega_d_in_B;
+
+	Vector3f tau_des = -kR.emult(e_R) - kOmega.emult(e_omega) + omega.cross(J * omega);
+
+	publish_wrench(f_des_body, tau_des, timestamp_sample);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Offboard mode: trajectory_setpoint → geometric control law
+// ─────────────────────────────────────────────────────────────────────────────
+void GeoControl::control_step_offboard(const Quatf &R_q, const Vector3f &pos,
+				       const Vector3f &vel, const Vector3f &omega,
+				       uint64_t timestamp_sample)
+{
+	trajectory_setpoint_s traj_sp;
+
+	if (!_sub_trajectory_sp.update(&traj_sp)) {
+		return;
+	}
+
+	const float mass = _param_gc_mass.get();
+	const Dcmf R(R_q);
+
+	// Position / velocity / acceleration setpoints (NaN = don't control)
+	Vector3f pos_sp(traj_sp.position[0], traj_sp.position[1], traj_sp.position[2]);
+	Vector3f vel_sp(traj_sp.velocity[0], traj_sp.velocity[1], traj_sp.velocity[2]);
+	Vector3f acc_sp(traj_sp.acceleration[0], traj_sp.acceleration[1], traj_sp.acceleration[2]);
+
+	// Desired yaw → desired attitude
+	const float yaw_sp = traj_sp.yaw;
+	const Eulerf euler_sp(0.f, 0.f, yaw_sp);
+	const Dcmf R_sp(euler_sp);
+
+	// Replace NaN with current state (don't control that axis)
+	for (int i = 0; i < 3; i++) {
+		if (!PX4_ISFINITE(pos_sp(i))) { pos_sp(i) = pos(i); }
+
+		if (!PX4_ISFINITE(vel_sp(i))) { vel_sp(i) = vel(i); }
+
+		if (!PX4_ISFINITE(acc_sp(i))) { acc_sp(i) = 0.f; }
+	}
+
+	// ── Position + velocity loop → desired force ──
+	Vector3f kp(_param_gc_xy_p.get(), _param_gc_xy_p.get(), _param_gc_z_p.get());
+	Vector3f kv(_param_gc_xy_vel_p.get(), _param_gc_xy_vel_p.get(), _param_gc_z_vel_p.get());
+	Vector3f e_p = pos - pos_sp;
+	Vector3f e_v = vel - vel_sp;
+	Vector3f g(0.f, 0.f, 9.81f);
+	Vector3f f_des_world = -kp.emult(e_p) - kv.emult(e_v) + mass * g + mass * acc_sp;
+	Vector3f f_des_body = R.transpose() * f_des_world;
+
+	// ── Attitude loop → desired torque ──
+	const Dcmf e_R_mat = (R_sp.transpose() * R - R.transpose() * R_sp) * 0.5f;
+	Vector3f e_R(e_R_mat(2, 1), e_R_mat(0, 2), e_R_mat(1, 0));
+
+	Vector3f kR(_param_gc_rp_p.get(), _param_gc_rp_p.get(), _param_gc_yaw_p.get());
+	Vector3f kOmega(_param_gc_rp_rate_p.get(), _param_gc_rp_rate_p.get(), _param_gc_yaw_rate_p.get());
+
+	Vector3f omega_sp(0.f, 0.f, traj_sp.yawspeed);
+	Vector3f omega_d_in_B = R.transpose() * R_sp * omega_sp;
+	Vector3f e_omega = omega - omega_d_in_B;
+
+	Matrix3f J = matrix::diag(Vector3f(
+					   _param_gc_inertia_xx.get(),
+					   _param_gc_inertia_yy.get(),
+					   _param_gc_inertia_zz.get()));
+
+	Vector3f tau_des = -kR.emult(e_R) - kOmega.emult(e_omega) + omega.cross(J * omega);
+
+	publish_wrench(f_des_body, tau_des, timestamp_sample);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auto mode: flight_mode_manager setpoints → geometric control law
+// ─────────────────────────────────────────────────────────────────────────────
+void GeoControl::control_step_auto(const Quatf &R_q, const Vector3f &pos,
+				   const Vector3f &vel, const Vector3f &omega,
+				   uint64_t timestamp_sample)
+{
+	vehicle_local_position_setpoint_s local_pos_sp;
+	vehicle_attitude_setpoint_s att_sp;
+
+	if (!_sub_local_pos_sp.update(&local_pos_sp) ||
+	    !_sub_vehicle_attitude_setpoint.update(&att_sp)) {
+		return;
+	}
+
+	const float mass = _param_gc_mass.get();
+	const Dcmf R(R_q);
+
+	Vector3f pos_sp(local_pos_sp.x, local_pos_sp.y, local_pos_sp.z);
+	Vector3f vel_sp(local_pos_sp.vx, local_pos_sp.vy, local_pos_sp.vz);
+	Vector3f acc_sp(local_pos_sp.acceleration[0],
+			local_pos_sp.acceleration[1],
+			local_pos_sp.acceleration[2]);
+
+	const Dcmf R_sp(Quatf(att_sp.q_d));
+
+	// ── Position + velocity loop → desired force ──
+	Vector3f kp(_param_gc_xy_p.get(), _param_gc_xy_p.get(), _param_gc_z_p.get());
+	Vector3f kv(_param_gc_xy_vel_p.get(), _param_gc_xy_vel_p.get(), _param_gc_z_vel_p.get());
+	Vector3f e_p = pos - pos_sp;
+	Vector3f e_v = vel - vel_sp;
+	Vector3f g(0.f, 0.f, 9.81f);
+	Vector3f f_des_world = -kp.emult(e_p) - kv.emult(e_v) + mass * g + mass * acc_sp;
+	Vector3f f_des_body = R.transpose() * f_des_world;
+
+	// ── Attitude loop → desired torque ──
+	const Dcmf e_R_mat = (R_sp.transpose() * R - R.transpose() * R_sp) * 0.5f;
+	Vector3f e_R(e_R_mat(2, 1), e_R_mat(0, 2), e_R_mat(1, 0));
+
+	Vector3f kR(_param_gc_rp_p.get(), _param_gc_rp_p.get(), _param_gc_yaw_p.get());
+	Vector3f kOmega(_param_gc_rp_rate_p.get(), _param_gc_rp_rate_p.get(), _param_gc_yaw_rate_p.get());
+
+	Vector3f omega_sp(0.f, 0.f, 0.f);
+	Vector3f omega_d_in_B = R.transpose() * R_sp * omega_sp;
+	Vector3f e_omega = omega - omega_d_in_B;
+
+	Matrix3f J = matrix::diag(Vector3f(
+					   _param_gc_inertia_xx.get(),
+					   _param_gc_inertia_yy.get(),
+					   _param_gc_inertia_zz.get()));
+
+	Vector3f tau_des = -kR.emult(e_R) - kOmega.emult(e_omega) + omega.cross(J * omega);
+
+	publish_wrench(f_des_body, tau_des, timestamp_sample);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main control dispatch
+// ─────────────────────────────────────────────────────────────────────────────
 void GeoControl::control_step()
 {
-    vehicle_attitude_s att;
-    vehicle_angular_velocity_s angular_vel;
-    vehicle_local_position_s local_pos;
-    vehicle_local_position_setpoint_s local_pos_sp;
-    vehicle_attitude_setpoint_s att_sp;
+	vehicle_attitude_s att;
+	vehicle_angular_velocity_s angular_vel;
+	vehicle_local_position_s local_pos;
+	vehicle_status_s vehicle_status{};
 
-    if (!_sub_vehicle_local_position.update(&local_pos) ||
-        !_sub_vehicle_attitude.update(&att) ||
-        !_sub_vehicle_angular_velocity.update(&angular_vel) ||
-        !_sub_local_pos_sp.update(&local_pos_sp)) {
-        return;
-    }
+	if (!_sub_vehicle_local_position.update(&local_pos) ||
+	    !_sub_vehicle_attitude.update(&att) ||
+	    !_sub_vehicle_angular_velocity.update(&angular_vel)) {
+		return;
+	}
 
-    _sub_vehicle_attitude_setpoint.update(&att_sp);
+	_sub_vehicle_status.update(&vehicle_status);
 
-    // State vectors (NED frame)
-    Vector3f pos(local_pos.x, local_pos.y, local_pos.z);
-    Vector3f vel(local_pos.vx, local_pos.vy, local_pos.vz);
-    Vector3f pos_sp(local_pos_sp.x, local_pos_sp.y, local_pos_sp.z);
-    Vector3f vel_sp(local_pos_sp.vx, local_pos_sp.vy, local_pos_sp.vz);
-    Vector3f acc_sp(local_pos_sp.acceleration[0],
-                    local_pos_sp.acceleration[1],
-                    local_pos_sp.acceleration[2]);
+	// State vectors
+	const Quatf R_q(att.q);
+	const Dcmf R(R_q);
+	const Vector3f pos(local_pos.x, local_pos.y, local_pos.z);
+	const Vector3f vel(local_pos.vx, local_pos.vy, local_pos.vz);
+	const Vector3f omega(angular_vel.xyz[0], angular_vel.xyz[1], angular_vel.xyz[2]);
 
-    // Current attitude: rotation from body (FRD) to world (NED)
-    matrix::Dcmf R(matrix::Quatf(att.q));
+	// Determine control mode from nav_state
+	ControlMode mode = ControlMode::AUTO;
 
-    // Angular velocity in body frame
-    Vector3f omega(angular_vel.xyz[0], angular_vel.xyz[1], angular_vel.xyz[2]);
+	if (vehicle_status.nav_state == vehicle_status.NAVIGATION_STATE_MANUAL) {
+		mode = ControlMode::MANUAL;
 
-    // Desired attitude
-    matrix::Dcmf R_sp(matrix::Quatf(att_sp.q_d));
+	} else if (vehicle_status.nav_state == vehicle_status.NAVIGATION_STATE_OFFBOARD) {
+		mode = ControlMode::OFFBOARD;
+	}
 
-    // Position and velocity errors
-    Vector3f e_p = pos - pos_sp;
-    Vector3f e_v = vel - vel_sp;
+	switch (mode) {
+	case ControlMode::MANUAL:
+		control_step_manual(R_q, vel, omega, local_pos.timestamp_sample);
+		break;
 
-    // Attitude error via vee map: e_R = vee(0.5 * (R_sp^T R - R^T R_sp))
-    matrix::Dcmf e_R_mat = (R_sp.transpose() * R - R.transpose() * R_sp) * 0.5f;
-    Vector3f e_R(e_R_mat(2, 1), e_R_mat(0, 2), e_R_mat(1, 0));
+	case ControlMode::OFFBOARD:
+		control_step_offboard(R_q, pos, vel, omega, local_pos.timestamp_sample);
+		break;
 
-    // Angular velocity error
-    Vector3f omega_sp(0.f, 0.f, 0.f);
-    Vector3f omega_d_in_B = R.transpose() * R_sp * omega_sp;
-    Vector3f e_omega = omega - omega_d_in_B;
-
-    // Gains
-    Vector3f kp(_param_gc_xy_p.get(), _param_gc_xy_p.get(), _param_gc_z_p.get());
-    Vector3f kv(_param_gc_xy_vel_p.get(), _param_gc_xy_vel_p.get(), _param_gc_z_vel_p.get());
-    Vector3f kR(_param_gc_rp_p.get(), _param_gc_rp_p.get(), _param_gc_yaw_p.get());
-    Vector3f kOmega(_param_gc_rp_rate_p.get(), _param_gc_rp_rate_p.get(), _param_gc_yaw_rate_p.get());
-
-    float mass = _param_gc_mass.get();
-
-    // Inertia matrix (diagonal, from parameters)
-    Matrix3f J = matrix::diag(Vector3f(
-        _param_gc_inertia_xx.get(),
-        _param_gc_inertia_yy.get(),
-        _param_gc_inertia_zz.get()));
-
-    // Geometric control law on SE(3) — NED convention
-    // Gravity in NED: g = [0, 0, +9.81]^T
-    // f_des_world = -Kp*e_p - Kv*e_v + m*g + m*a_sp
-    //   (g compensates gravity downward, a_sp is feedforward)
-    Vector3f g(0.f, 0.f, 9.81f);
-    Vector3f f_des_world = -kp.emult(e_p) - kv.emult(e_v) + mass * g + mass * acc_sp;
-
-    // Transform to body frame
-    Vector3f f_des_body = R.transpose() * f_des_world;
-
-    // Publish body-frame thrust (the full vector for MorphQuad allocator)
-    vehicle_thrust_setpoint_s thrust_msg{};
-    thrust_msg.timestamp = hrt_absolute_time();
-    thrust_msg.timestamp_sample = local_pos.timestamp_sample;
-    thrust_msg.xyz[0] = f_des_body(0);
-    thrust_msg.xyz[1] = f_des_body(1);
-    thrust_msg.xyz[2] = f_des_body(2);
-    _thrust_pub.publish(thrust_msg);
-
-    // Desired torque: tau = -K_R*e_R - K_Omega*e_omega + Omega x (J*Omega)
-    Vector3f tau_des = -kR.emult(e_R) - kOmega.emult(e_omega) + omega.cross(J * omega);
-
-    vehicle_torque_setpoint_s torque_msg{};
-    torque_msg.timestamp = hrt_absolute_time();
-    torque_msg.timestamp_sample = local_pos.timestamp_sample;
-    torque_msg.xyz[0] = tau_des(0);
-    torque_msg.xyz[1] = tau_des(1);
-    torque_msg.xyz[2] = tau_des(2);
-    _torque_pub.publish(torque_msg);
+	case ControlMode::AUTO:
+		control_step_auto(R_q, pos, vel, omega, local_pos.timestamp_sample);
+		break;
+	}
 }
 
 void GeoControl::Run()
 {
-    if (should_exit()) {
-        _sub_vehicle_local_position.unregisterCallback();
-        exit_and_cleanup();
-        return;
-    }
+	if (should_exit()) {
+		_sub_vehicle_local_position.unregisterCallback();
+		exit_and_cleanup();
+		return;
+	}
 
-    perf_begin(_loop_perf);
+	perf_begin(_loop_perf);
 
-    // update parameters from storage
-    parameters_update();
+	parameters_update();
 
-    vehicle_local_position_s local_pos;
+	vehicle_local_position_s local_pos;
 
-    if (_sub_vehicle_local_position.update(&local_pos)) {
-        //const float dt = math::constrain(((local_pos.timestamp_sample - _last_run) * 1e-6f), 0.0002f, 0.02f);
-        _last_run = local_pos.timestamp_sample;
+	if (_sub_vehicle_local_position.update(&local_pos)) {
+		_last_run = local_pos.timestamp_sample;
+		control_step();
+	}
 
-        // 执行控制步骤
-        control_step();
-    }
-
-    perf_end(_loop_perf);
+	perf_end(_loop_perf);
 }
 
 int GeoControl::task_spawn(int argc, char *argv[])
 {
-    GeoControl *instance = new GeoControl();
-    if (instance) {
-        _object.store(instance);
-        _task_id = task_id_is_work_queue;
-        if (instance->init()) {
-            return PX4_OK;
-        }
-    }
-    return PX4_ERROR;
+	GeoControl *instance = new GeoControl();
+
+	if (instance) {
+		_object.store(instance);
+		_task_id = task_id_is_work_queue;
+
+		if (instance->init()) {
+			return PX4_OK;
+		}
+	}
+
+	return PX4_ERROR;
 }
 
 GeoControl *GeoControl::instantiate(int argc, char *argv[])
 {
-    // 直接创建实例，init 在 task_spawn 中调用
-    return new GeoControl();
+	return new GeoControl();
 }
 
 int GeoControl::custom_command(int argc, char *argv[])
 {
-    return print_usage("unknown command");
+	return print_usage("unknown command");
 }
 
 int GeoControl::print_usage(const char *reason)
 {
-    if (reason) {
-        PX4_WARN("%s\n", reason);
-    }
+	if (reason) {
+		PX4_WARN("%s\n", reason);
+	}
 
-    PRINT_MODULE_DESCRIPTION(
-        R"DESCR_STR(
+	PRINT_MODULE_DESCRIPTION(
+		R"DESCR_STR(
 ### Description
 Geometric controller for MorphQuad, outputting thrust and torque setpoints.
 
 ### Implementation
-Implements a geometric tracking controller on SE(3) as described in "Geometric Tracking Control of a Quadrotor UAV on SE(3)".
-Publishes `vehicle_thrust_setpoint` and `vehicle_torque_setpoint` messages.
+Implements a geometric tracking controller on SE(3) with three input modes:
+- **Manual**: RC sticks (roll/pitch/yaw → angular rate, aux1/2/3 → body velocity)
+- **Offboard**: trajectory_setpoint from companion computer
+- **Auto**: flight_mode_manager setpoints (posctl, loiter, mission, ...)
 
 ### Examples
-CLI usage example:
 $ geo_control start
 $ geo_control status
 $ geo_control stop
 )DESCR_STR");
 
-    PRINT_MODULE_USAGE_NAME("geo_control", "controller");
-    PRINT_MODULE_USAGE_COMMAND("start");
-    PRINT_MODULE_USAGE_DEFAULT_COMMANDS();
-    return 0;
+	PRINT_MODULE_USAGE_NAME("geo_control", "controller");
+	PRINT_MODULE_USAGE_COMMAND("start");
+	PRINT_MODULE_USAGE_DEFAULT_COMMANDS();
+	return 0;
 }
 
 extern "C" __EXPORT int geo_control_main(int argc, char *argv[])
 {
-    return GeoControl::main(argc, argv);
+	return GeoControl::main(argc, argv);
 }
