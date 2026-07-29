@@ -160,3 +160,39 @@ PARAM_DEFINE_FLOAT(GC_MAN_VEL_MAX, 5.0);
  * @group Geometric Controller
  */
 PARAM_DEFINE_FLOAT(GC_MAN_DZ, 0.1);
+
+/**
+ * Geometric Controller Rate/Angle Integral Gain
+ *
+ * Integral gain for the attitude/rate error integrator (torque loop).
+ *
+ * @group Geometric Controller
+ */
+PARAM_DEFINE_FLOAT(GC_RATE_I, 0.1);
+
+/**
+ * Geometric Controller Rate Integrator Limit
+ *
+ * Maximum absolute value of the rate/torque integrator.
+ *
+ * @group Geometric Controller
+ */
+PARAM_DEFINE_FLOAT(GC_RATE_INT_LIM, 0.3);
+
+/**
+ * Geometric Controller Velocity Integral Gain
+ *
+ * Integral gain for the velocity error integrator (force loop).
+ *
+ * @group Geometric Controller
+ */
+PARAM_DEFINE_FLOAT(GC_VEL_I, 0.5);
+
+/**
+ * Geometric Controller Velocity Integrator Limit
+ *
+ * Maximum absolute value of the velocity/force integrator.
+ *
+ * @group Geometric Controller
+ */
+PARAM_DEFINE_FLOAT(GC_VEL_INT_LIM, 2.0);

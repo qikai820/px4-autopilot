@@ -49,8 +49,10 @@
 #include <uORB/topics/vehicle_thrust_setpoint.h>
 #include <uORB/topics/vehicle_torque_setpoint.h>
 #include <uORB/topics/vehicle_status.h>
+#include <uORB/topics/vehicle_land_detected.h>
 #include <uORB/topics/manual_control_setpoint.h>
 #include <uORB/topics/trajectory_setpoint.h>
+#include <uORB/topics/control_allocator_status.h>
 #include <uORB/topics/parameter_update.h>
 #include <matrix/matrix/math.hpp>
 
@@ -72,42 +74,43 @@ public:
 
 private:
 	enum class ControlMode {
-		MANUAL = 0,    ///< RC sticks: roll/pitch/yaw → rate, aux1/2/3 → velocity
-		OFFBOARD = 1,  ///< trajectory_setpoint from companion computer
-		AUTO = 2       ///< flight_mode_manager setpoints (posctl, loiter, mission, ...)
+		MANUAL = 0,
+		OFFBOARD = 1,
+		AUTO = 2
 	};
 
 	void Run() override;
 	void parameters_update(bool force = false);
 	void control_step();
 
-	/**
-	 * Manual mode: RC sticks → angular rate + velocity references
-	 * roll/pitch/yaw → body-frame angular rate [rad/s]
-	 * aux1/aux2/aux3 → body-frame velocity [m/s]
-	 */
 	void control_step_manual(const matrix::Quatf &R_q, const matrix::Vector3f &vel,
 				 const matrix::Vector3f &omega, uint64_t timestamp_sample);
 
-	/**
-	 * Offboard mode: trajectory_setpoint → geometric control law
-	 */
 	void control_step_offboard(const matrix::Quatf &R_q, const matrix::Vector3f &pos,
 				   const matrix::Vector3f &vel, const matrix::Vector3f &omega,
 				   uint64_t timestamp_sample);
 
-	/**
-	 * Auto mode: flight_mode_manager setpoints → geometric control law
-	 */
 	void control_step_auto(const matrix::Quatf &R_q, const matrix::Vector3f &pos,
 			       const matrix::Vector3f &vel, const matrix::Vector3f &omega,
 			       uint64_t timestamp_sample);
 
-	/**
-	 * Publish thrust and torque setpoints.
-	 */
 	void publish_wrench(const matrix::Vector3f &f_des_body, const matrix::Vector3f &tau_des,
 			    uint64_t timestamp_sample);
+
+	/**
+	 * Update integrators with anti-windup from actuator saturation feedback.
+	 * Follows the RateControl pattern from mc_rate_control.
+	 * @param e_omega angular velocity error (body frame)
+	 * @param e_v_world velocity error (NED world frame)
+	 * @param dt time step [s]
+	 */
+	void updateIntegrators(const matrix::Vector3f &e_omega, const matrix::Vector3f &e_v_world,
+			       float dt);
+
+	/**
+	 * Reset all integrators to zero.
+	 */
+	void resetIntegrators();
 
 	// uORB Subscriptions
 	uORB::SubscriptionCallbackWorkItem _sub_vehicle_local_position{this, ORB_ID(vehicle_local_position)};
@@ -116,8 +119,10 @@ private:
 	uORB::Subscription _sub_vehicle_angular_velocity{ORB_ID(vehicle_angular_velocity)};
 	uORB::Subscription _sub_local_pos_sp{ORB_ID(vehicle_local_position_setpoint)};
 	uORB::Subscription _sub_vehicle_status{ORB_ID(vehicle_status)};
+	uORB::Subscription _sub_vehicle_land_detected{ORB_ID(vehicle_land_detected)};
 	uORB::Subscription _sub_manual_control_sp{ORB_ID(manual_control_setpoint)};
 	uORB::Subscription _sub_trajectory_sp{ORB_ID(trajectory_setpoint)};
+	uORB::Subscription _sub_control_allocator_status{ORB_ID(control_allocator_status)};
 	uORB::SubscriptionInterval _parameter_update_sub{ORB_ID(parameter_update), 1_s};
 
 	// uORB Publications
@@ -140,8 +145,26 @@ private:
 		(ParamFloat<px4::params::GC_INERTIA_ZZ>) _param_gc_inertia_zz,
 		(ParamFloat<px4::params::GC_MAN_RATE_MAX>) _param_gc_man_rate_max,
 		(ParamFloat<px4::params::GC_MAN_VEL_MAX>) _param_gc_man_vel_max,
-		(ParamFloat<px4::params::GC_MAN_DZ>) _param_gc_man_dz
+		(ParamFloat<px4::params::GC_MAN_DZ>) _param_gc_man_dz,
+		(ParamFloat<px4::params::GC_RATE_I>) _param_gc_rate_i,
+		(ParamFloat<px4::params::GC_RATE_INT_LIM>) _param_gc_rate_int_lim,
+		(ParamFloat<px4::params::GC_VEL_I>) _param_gc_vel_i,
+		(ParamFloat<px4::params::GC_VEL_INT_LIM>) _param_gc_vel_int_lim
 	)
+
+	// Integrator states
+	matrix::Vector3f _rate_int{};   ///< attitude/rate error integrator (torque loop)
+	matrix::Vector3f _vel_int{};    ///< velocity error integrator (force loop)
+
+	// Actuator saturation feedback from control allocator
+	matrix::Vector<bool, 3> _torque_sat_pos{};
+	matrix::Vector<bool, 3> _torque_sat_neg{};
+	matrix::Vector<bool, 3> _thrust_sat_pos{};
+	matrix::Vector<bool, 3> _thrust_sat_neg{};
+
+	// State flags
+	bool _landed{true};
+	bool _armed{false};
 
 	// Manual mode: integrated attitude reference from rate commands
 	matrix::Quatf _q_att_ref{1.f, 0.f, 0.f, 0.f};

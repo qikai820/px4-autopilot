@@ -66,6 +66,64 @@ void GeoControl::parameters_update(bool force)
 	}
 }
 
+void GeoControl::resetIntegrators()
+{
+	_rate_int.zero();
+	_vel_int.zero();
+}
+
+void GeoControl::updateIntegrators(const Vector3f &e_omega, const Vector3f &e_v_world, float dt)
+{
+	const float rate_i_gain = _param_gc_rate_i.get();
+	const float rate_int_lim = _param_gc_rate_int_lim.get();
+	const float vel_i_gain = _param_gc_vel_i.get();
+	const float vel_int_lim = _param_gc_vel_int_lim.get();
+
+	// ── Rate/torque integrator with anti-windup ──
+	for (int i = 0; i < 3; i++) {
+		float rate_error = e_omega(i);
+
+		// Anti-windup: prevent further integration in the saturated direction
+		if (_torque_sat_pos(i)) {
+			rate_error = math::min(rate_error, 0.f);
+		}
+
+		if (_torque_sat_neg(i)) {
+			rate_error = math::max(rate_error, 0.f);
+		}
+
+		// Nonlinear I-factor: reduce gain for large errors (prevents windup during flips)
+		float i_factor = rate_error / math::radians(400.f);
+		i_factor = math::max(0.f, 1.f - i_factor * i_factor);
+
+		float rate_i = _rate_int(i) + i_factor * rate_i_gain * rate_error * dt;
+
+		if (PX4_ISFINITE(rate_i)) {
+			_rate_int(i) = math::constrain(rate_i, -rate_int_lim, rate_int_lim);
+		}
+	}
+
+	// ── Velocity/force integrator with anti-windup ──
+	for (int i = 0; i < 3; i++) {
+		float vel_error = e_v_world(i);
+
+		// Anti-windup from thrust saturation
+		if (_thrust_sat_pos(i)) {
+			vel_error = math::min(vel_error, 0.f);
+		}
+
+		if (_thrust_sat_neg(i)) {
+			vel_error = math::max(vel_error, 0.f);
+		}
+
+		float vel_i = _vel_int(i) + vel_i_gain * vel_error * dt;
+
+		if (PX4_ISFINITE(vel_i)) {
+			_vel_int(i) = math::constrain(vel_i, -vel_int_lim, vel_int_lim);
+		}
+	}
+}
+
 void GeoControl::publish_wrench(const Vector3f &f_des_body, const Vector3f &tau_des,
 				uint64_t timestamp_sample)
 {
@@ -125,7 +183,6 @@ void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &vel,
 	Vector3f vel_sp_world = R * vel_sp_body;
 
 	// Integrate rate commands into attitude reference (quaternion integration)
-	// q_dot = 0.5 * q * omega_quat
 	const Vector3f omega_vec(omega_sp(0), omega_sp(1), omega_sp(2));
 	const float omega_norm = omega_vec.norm();
 
@@ -144,7 +201,7 @@ void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &vel,
 	Vector3f kp(_param_gc_xy_vel_p.get(), _param_gc_xy_vel_p.get(), _param_gc_z_vel_p.get());
 	Vector3f e_v = vel - vel_sp_world;
 	Vector3f g(0.f, 0.f, 9.81f);
-	Vector3f f_des_world = -kp.emult(e_v) + mass * g;
+	Vector3f f_des_world = -kp.emult(e_v) - _vel_int + mass * g;
 	Vector3f f_des_body = R.transpose() * f_des_world;
 
 	// ── Attitude loop → desired torque ──
@@ -160,11 +217,15 @@ void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &vel,
 					   _param_gc_inertia_yy.get(),
 					   _param_gc_inertia_zz.get()));
 
-	// omega_d in body frame from attitude reference
 	Vector3f omega_d_in_B = R.transpose() * R_sp * omega_sp;
 	Vector3f e_omega = omega - omega_d_in_B;
 
-	Vector3f tau_des = -kR.emult(e_R) - kOmega.emult(e_omega) + omega.cross(J * omega);
+	// Update integrators (only when airborne)
+	if (!_landed) {
+		updateIntegrators(e_omega, e_v, dt);
+	}
+
+	Vector3f tau_des = -kR.emult(e_R) - kOmega.emult(e_omega) + _rate_int + omega.cross(J * omega);
 
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
 }
@@ -182,20 +243,19 @@ void GeoControl::control_step_offboard(const Quatf &R_q, const Vector3f &pos,
 		return;
 	}
 
+	const float dt = math::constrain(static_cast<float>((hrt_absolute_time() - _last_run) * 1e-6f),
+					 0.001f, 0.05f);
 	const float mass = _param_gc_mass.get();
 	const Dcmf R(R_q);
 
-	// Position / velocity / acceleration setpoints (NaN = don't control)
 	Vector3f pos_sp(traj_sp.position[0], traj_sp.position[1], traj_sp.position[2]);
 	Vector3f vel_sp(traj_sp.velocity[0], traj_sp.velocity[1], traj_sp.velocity[2]);
 	Vector3f acc_sp(traj_sp.acceleration[0], traj_sp.acceleration[1], traj_sp.acceleration[2]);
 
-	// Desired yaw → desired attitude
 	const float yaw_sp = traj_sp.yaw;
 	const Eulerf euler_sp(0.f, 0.f, yaw_sp);
 	const Dcmf R_sp(euler_sp);
 
-	// Replace NaN with current state (don't control that axis)
 	for (int i = 0; i < 3; i++) {
 		if (!PX4_ISFINITE(pos_sp(i))) { pos_sp(i) = pos(i); }
 
@@ -210,7 +270,7 @@ void GeoControl::control_step_offboard(const Quatf &R_q, const Vector3f &pos,
 	Vector3f e_p = pos - pos_sp;
 	Vector3f e_v = vel - vel_sp;
 	Vector3f g(0.f, 0.f, 9.81f);
-	Vector3f f_des_world = -kp.emult(e_p) - kv.emult(e_v) + mass * g + mass * acc_sp;
+	Vector3f f_des_world = -kp.emult(e_p) - kv.emult(e_v) - _vel_int + mass * g + mass * acc_sp;
 	Vector3f f_des_body = R.transpose() * f_des_world;
 
 	// ── Attitude loop → desired torque ──
@@ -229,7 +289,11 @@ void GeoControl::control_step_offboard(const Quatf &R_q, const Vector3f &pos,
 					   _param_gc_inertia_yy.get(),
 					   _param_gc_inertia_zz.get()));
 
-	Vector3f tau_des = -kR.emult(e_R) - kOmega.emult(e_omega) + omega.cross(J * omega);
+	if (!_landed) {
+		updateIntegrators(e_omega, e_v, dt);
+	}
+
+	Vector3f tau_des = -kR.emult(e_R) - kOmega.emult(e_omega) + _rate_int + omega.cross(J * omega);
 
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
 }
@@ -249,6 +313,8 @@ void GeoControl::control_step_auto(const Quatf &R_q, const Vector3f &pos,
 		return;
 	}
 
+	const float dt = math::constrain(static_cast<float>((hrt_absolute_time() - _last_run) * 1e-6f),
+					 0.001f, 0.05f);
 	const float mass = _param_gc_mass.get();
 	const Dcmf R(R_q);
 
@@ -266,7 +332,7 @@ void GeoControl::control_step_auto(const Quatf &R_q, const Vector3f &pos,
 	Vector3f e_p = pos - pos_sp;
 	Vector3f e_v = vel - vel_sp;
 	Vector3f g(0.f, 0.f, 9.81f);
-	Vector3f f_des_world = -kp.emult(e_p) - kv.emult(e_v) + mass * g + mass * acc_sp;
+	Vector3f f_des_world = -kp.emult(e_p) - kv.emult(e_v) - _vel_int + mass * g + mass * acc_sp;
 	Vector3f f_des_body = R.transpose() * f_des_world;
 
 	// ── Attitude loop → desired torque ──
@@ -285,7 +351,11 @@ void GeoControl::control_step_auto(const Quatf &R_q, const Vector3f &pos,
 					   _param_gc_inertia_yy.get(),
 					   _param_gc_inertia_zz.get()));
 
-	Vector3f tau_des = -kR.emult(e_R) - kOmega.emult(e_omega) + omega.cross(J * omega);
+	if (!_landed) {
+		updateIntegrators(e_omega, e_v, dt);
+	}
+
+	Vector3f tau_des = -kR.emult(e_R) - kOmega.emult(e_omega) + _rate_int + omega.cross(J * omega);
 
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
 }
@@ -307,6 +377,52 @@ void GeoControl::control_step()
 	}
 
 	_sub_vehicle_status.update(&vehicle_status);
+
+	// Update landed/armed state
+	vehicle_land_detected_s land_detected{};
+
+	if (_sub_vehicle_land_detected.update(&land_detected)) {
+		_landed = land_detected.landed;
+	}
+
+	_armed = vehicle_status.arming_state == vehicle_status.ARMING_STATE_ARMED;
+
+	// Reset integrators when disarmed
+	if (!_armed) {
+		resetIntegrators();
+	}
+
+	// Update saturation feedback from control allocator
+	control_allocator_status_s ca_status;
+
+	if (_sub_control_allocator_status.update(&ca_status)) {
+		_torque_sat_pos = Vector3<bool>(false, false, false);
+		_torque_sat_neg = Vector3<bool>(false, false, false);
+		_thrust_sat_pos = Vector3<bool>(false, false, false);
+		_thrust_sat_neg = Vector3<bool>(false, false, false);
+
+		if (!ca_status.torque_setpoint_achieved) {
+			for (size_t i = 0; i < 3; i++) {
+				if (ca_status.unallocated_torque[i] > FLT_EPSILON) {
+					_torque_sat_pos(i) = true;
+
+				} else if (ca_status.unallocated_torque[i] < -FLT_EPSILON) {
+					_torque_sat_neg(i) = true;
+				}
+			}
+		}
+
+		if (!ca_status.thrust_setpoint_achieved) {
+			for (size_t i = 0; i < 3; i++) {
+				if (ca_status.unallocated_thrust[i] > FLT_EPSILON) {
+					_thrust_sat_pos(i) = true;
+
+				} else if (ca_status.unallocated_thrust[i] < -FLT_EPSILON) {
+					_thrust_sat_neg(i) = true;
+				}
+			}
+		}
+	}
 
 	// State vectors
 	const Quatf R_q(att.q);
@@ -404,6 +520,12 @@ Implements a geometric tracking controller on SE(3) with three input modes:
 - **Manual**: RC sticks (roll/pitch/yaw → angular rate, aux1/2/3 → body velocity)
 - **Offboard**: trajectory_setpoint from companion computer
 - **Auto**: flight_mode_manager setpoints (posctl, loiter, mission, ...)
+
+Integrator with anti-windup:
+- Rate/torque integrator: accumulates attitude error, clamped by GC_RATE_INT_LIM
+- Velocity/force integrator: accumulates velocity error, clamped by GC_VEL_INT_LIM
+- Anti-windup via control_allocator_status saturation feedback
+- Integrator frozen when landed, reset when disarmed
 
 ### Examples
 $ geo_control start

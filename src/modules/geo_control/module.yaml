@@ -168,3 +168,43 @@ parameters:
         increment: 0.01
         decimal: 2
         default: 0.1
+
+      GC_RATE_I:
+        description:
+          short: Rate/angle integral gain (torque loop)
+        type: float
+        min: 0
+        max: 10
+        increment: 0.01
+        decimal: 3
+        default: 0.1
+
+      GC_RATE_INT_LIM:
+        description:
+          short: Rate integrator limit (anti-windup clamp)
+        type: float
+        min: 0
+        max: 10
+        increment: 0.05
+        decimal: 2
+        default: 0.3
+
+      GC_VEL_I:
+        description:
+          short: Velocity integral gain (force loop)
+        type: float
+        min: 0
+        max: 10
+        increment: 0.05
+        decimal: 2
+        default: 0.5
+
+      GC_VEL_INT_LIM:
+        description:
+          short: Velocity integrator limit (anti-windup clamp)
+        type: float
+        min: 0
+        max: 20
+        increment: 0.5
+        decimal: 1
+        default: 2.0
