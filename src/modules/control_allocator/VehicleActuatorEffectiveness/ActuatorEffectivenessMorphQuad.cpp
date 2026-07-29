@@ -93,21 +93,47 @@ void ActuatorEffectivenessMorphQuad::updateSetpoint(
 	computeThrustVectors(f_des, tau_des, t);
 
 	// Step 3: Recover servo angles and motor speeds
+	float omega_raw[NUM_ROTORS];
+	float alpha_raw[NUM_ROTORS];
+
 	for (int i = 0; i < NUM_ROTORS; ++i) {
 		float alpha, beta, omega;
 		recoverServoAngles(t[i], i, alpha, beta, omega);
 
-		// Normalize motor output: omega / omega_max -> [0, 1]
-		actuator_sp(i) = omega / _omega_max;
-
-		// Normalize outer servo: alpha / pi -> [-1, 1]
-		actuator_sp(NUM_ROTORS + i) = alpha / M_PI_F;
+		omega_raw[i] = omega / _omega_max;
+		alpha_raw[i] = alpha / M_PI_F;
 	}
 
-	// Saturate all actuator outputs
-	for (int i = 0; i < NUM_ROTORS + 2 * NUM_ROTORS; ++i) {
-		actuator_sp(i) = math::constrain(actuator_sp(i), actuator_min(i), actuator_max(i));
+	// Write raw (pre-saturation) values, then detect and record saturation
+	_motor_saturated = false;
+	_servo_saturated = false;
+
+	for (int i = 0; i < NUM_ROTORS; ++i) {
+		// Motor saturation check
+		const float motor_clamped = math::constrain(omega_raw[i], actuator_min(i), actuator_max(i));
+
+		if (fabsf(motor_clamped - omega_raw[i]) > FLT_EPSILON) {
+			_motor_saturated = true;
+		}
+
+		actuator_sp(i) = motor_clamped;
+
+		// Servo saturation check
+		const int sv_idx = NUM_ROTORS + i;
+		const float servo_clamped = math::constrain(alpha_raw[i], actuator_min(sv_idx), actuator_max(sv_idx));
+
+		if (fabsf(servo_clamped - alpha_raw[i]) > FLT_EPSILON) {
+			_servo_saturated = true;
+		}
+
+		actuator_sp(sv_idx) = servo_clamped;
 	}
+
+	// Compute unallocated wrench from saturation
+	// When saturated, the actual output differs from the requested output.
+	// The ratio of actual/requested gives the achieved fraction per axis.
+	computeUnallocatedWrench(f_des, tau_des, omega_raw, alpha_raw,
+				 actuator_sp, actuator_min, actuator_max);
 }
 
 void ActuatorEffectivenessMorphQuad::computeThrustVectors(
@@ -256,4 +282,77 @@ void ActuatorEffectivenessMorphQuad::recoverServoAngles(
 
 	alpha_out = alpha;
 	beta_out = beta;
+}
+
+void ActuatorEffectivenessMorphQuad::getUnallocatedControl(int matrix_index,
+		control_allocator_status_s &status)
+{
+	// Override the framework's default unallocated control with our
+	// saturation-aware computation from computeUnallocatedWrench().
+	for (int i = 0; i < 3; i++) {
+		status.unallocated_torque[i] = _unallocated_torque[i];
+		status.unallocated_thrust[i] = _unallocated_thrust[i];
+	}
+}
+
+void ActuatorEffectivenessMorphQuad::computeUnallocatedWrench(
+	const Vector3f &f_des, const Vector3f &tau_des,
+	const float omega_raw[NUM_ROTORS], const float alpha_raw[NUM_ROTORS],
+	const ActuatorVector &actuator_sp,
+	const ActuatorVector &actuator_min,
+	const ActuatorVector &actuator_max)
+{
+	// Initialize as zero (no unallocated control)
+	for (int i = 0; i < 3; i++) {
+		_unallocated_torque[i] = 0.f;
+		_unallocated_thrust[i] = 0.f;
+	}
+
+	// If nothing saturated, the full wrench was achieved
+	if (!_motor_saturated && !_servo_saturated) {
+		return;
+	}
+
+	// Reconstruct the actually achieved wrench from the clipped actuator outputs.
+	// For each rotor, compute the actual thrust vector from the saturated outputs.
+	const float l = _half_length;
+	const float b = _half_width;
+
+	Vector3f f_achieved(0.f, 0.f, 0.f);
+	Vector3f tau_achieved(0.f, 0.f, 0.f);
+
+	// Rotor positions (X-layout: FR, FL, BL, BR)
+	const float lx[NUM_ROTORS] = { l,  l, -l, -l};
+	const float ly[NUM_ROTORS] = {-b,  b,  b, -b};
+
+	for (int i = 0; i < NUM_ROTORS; ++i) {
+		// Recover actual omega and alpha from saturated actuator outputs
+		const float omega_actual = actuator_sp(i) * _omega_max;
+		const float alpha_actual = actuator_sp(NUM_ROTORS + i) * M_PI_F;
+
+		// Thrust magnitude from actual motor speed: t = c_t * Omega^2
+		const float t_mag = _thrust_coeff * omega_actual * omega_actual;
+
+		// Thrust direction from actual servo angle (simplified: only outer servo alpha)
+		// G_i(alpha) = [sin(alpha), 0, cos(alpha)] (NED, ignoring beta for saturation estimate)
+		const float sa = sinf(alpha_actual);
+		const float ca = cosf(alpha_actual);
+		Vector3f t_vec(t_mag * sa, 0.f, t_mag * ca);
+
+		// Accumulate force
+		f_achieved += t_vec;
+
+		// Accumulate torque: tau = l_i x t_i
+		Vector3f l_i(lx[i], ly[i], 0.f);
+		tau_achieved += l_i.cross(t_vec);
+	}
+
+	// Unallocated = requested - achieved
+	const Vector3f unalloc_f = f_des - f_achieved;
+	const Vector3f unalloc_tau = tau_des - tau_achieved;
+
+	for (int i = 0; i < 3; i++) {
+		_unallocated_thrust[i] = unalloc_f(i);
+		_unallocated_torque[i] = unalloc_tau(i);
+	}
 }

@@ -51,6 +51,8 @@ public:
 			    const ActuatorVector &actuator_min,
 			    const ActuatorVector &actuator_max) override;
 
+	void getUnallocatedControl(int matrix_index, control_allocator_status_s &status) override;
+
 	const char *name() const override { return "MorphQuad"; }
 
 private:
@@ -71,6 +73,12 @@ private:
 	float _alpha_prev[NUM_ROTORS] {};
 	float _beta_prev[NUM_ROTORS] {};
 
+	// Saturation tracking for anti-windup feedback to geo_control
+	bool _motor_saturated{false};     ///< any motor hit omega_max limit
+	bool _servo_saturated{false};     ///< any servo hit angle limit
+	float _unallocated_torque[3] {};  ///< residual torque not achieved
+	float _unallocated_thrust[3] {};  ///< residual thrust not achieved
+
 	/**
 	 * Compute 4 thrust vectors from desired wrench (Eq.12 + Eq.15-16).
 	 * @param f_des  desired force in body frame [N]
@@ -90,4 +98,15 @@ private:
 	 */
 	void recoverServoAngles(const float t[3], int idx,
 				float &alpha_out, float &beta_out, float &omega_out);
+
+	/**
+	 * Compute the unallocated wrench when actuators are saturated.
+	 * Compares requested vs achieved actuator outputs to determine
+	 * how much of the requested force/torque could not be delivered.
+	 */
+	void computeUnallocatedWrench(const matrix::Vector3f &f_des, const matrix::Vector3f &tau_des,
+				      const float omega_raw[NUM_ROTORS], const float alpha_raw[NUM_ROTORS],
+				      const ActuatorVector &actuator_sp,
+				      const ActuatorVector &actuator_min,
+				      const ActuatorVector &actuator_max);
 };
