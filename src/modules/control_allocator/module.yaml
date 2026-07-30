@@ -597,6 +597,119 @@ parameters:
                 1: Remove first failed motor from effectiveness
             default: 0
 
+    - group: MorphQuad
+      definitions:
+        CA_MQ_L:
+            description:
+                short: Half arm length (x-direction)
+                long: |
+                  Half of the distance between front and rear rotors (x-direction).
+                  Used for torque computation in the MorphQuad thrust allocator.
+            type: float
+            decimal: 3
+            increment: 0.01
+            unit: m
+            min: 0.01
+            max: 1.0
+            default: 0.17
+
+        CA_MQ_B:
+            description:
+                short: Half arm width (y-direction)
+                long: |
+                  Half of the distance between left and right rotors (y-direction).
+                  Used for torque computation in the MorphQuad thrust allocator.
+            type: float
+            decimal: 3
+            increment: 0.01
+            unit: m
+            min: 0.01
+            max: 1.0
+            default: 0.17
+
+        CA_MQ_CT:
+            description:
+                short: Thrust coefficient
+                long: |
+                  Relates motor angular velocity to thrust force: thrust = CA_MQ_CT * Omega^2.
+            type: float
+            decimal: 4
+            increment: 0.01
+            min: 0.001
+            max: 10.0
+            default: 1.0
+
+        CA_MQ_OMAX:
+            description:
+                short: Maximum motor angular velocity
+                long: |
+                  Maximum allowed motor angular velocity. Used for normalizing
+                  motor output and computing thrust limits.
+            type: float
+            decimal: 0
+            increment: 50
+            unit: rad/s
+            min: 100
+            max: 5000
+            default: 1200
+
+        CA_MQ_ALPM:
+            description:
+                short: Maximum outer servo angle (alpha)
+                long: |
+                  Mechanical limit of the outer gimbal servo (alpha).
+                  The servo angle is clamped to [-CA_MQ_ALPM, +CA_MQ_ALPM].
+            type: float
+            decimal: 1
+            increment: 5
+            unit: deg
+            min: 10
+            max: 180
+            default: 180
+
+        CA_MQ_BETM:
+            description:
+                short: Maximum inner servo angle (beta)
+                long: |
+                  Mechanical limit of the inner gimbal servo (beta).
+                  The servo angle is clamped to [-CA_MQ_BETM, +CA_MQ_BETM].
+            type: float
+            decimal: 1
+            increment: 5
+            unit: deg
+            min: 10
+            max: 180
+            default: 180
+
+        CA_MQ_GLG:
+            description:
+                short: Gimbal lock avoidance gain
+                long: |
+                  Null-space correction gain that repels the inner servo angle
+                  away from +/-90 deg to avoid gimbal lock singularity.
+                  Set to 0 to disable.
+            type: float
+            decimal: 2
+            increment: 0.05
+            min: 0
+            max: 1.0
+            default: 0.3
+
+        CA_MQ_DWG:
+            description:
+                short: Downwash avoidance gain
+                long: |
+                  Null-space correction gain that breaks thrust collinearity
+                  when the desired force is aligned with the x-body axis,
+                  reducing downwash interference between rotors.
+                  Set to 0 to disable.
+            type: float
+            decimal: 2
+            increment: 0.05
+            min: 0
+            max: 1.0
+            default: 0.2
+
 # Mixer
 mixer:
     actuator_types:
@@ -1260,5 +1373,8 @@ mixer:
                     group_label: 'Motors'
                     count: 4
                   - actuator_type: 'servo'
-                    group_label: 'Outer Gimbal Servos'
+                    group_label: 'Outer Gimbal Servos (alpha)'
+                    count: 4
+                  - actuator_type: 'servo'
+                    group_label: 'Inner Gimbal Servos (beta)'
                     count: 4

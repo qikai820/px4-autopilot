@@ -95,13 +95,17 @@ void ActuatorEffectivenessMorphQuad::updateSetpoint(
 	// Step 3: Recover servo angles and motor speeds
 	float omega_raw[NUM_ROTORS];
 	float alpha_raw[NUM_ROTORS];
+	float beta_raw[NUM_ROTORS];
+
+	const float omega_max = _param_ca_mq_omax.get();
 
 	for (int i = 0; i < NUM_ROTORS; ++i) {
 		float alpha, beta, omega;
 		recoverServoAngles(t[i], i, alpha, beta, omega);
 
-		omega_raw[i] = omega / _omega_max;
+		omega_raw[i] = omega / omega_max;
 		alpha_raw[i] = alpha / M_PI_F;
+		beta_raw[i] = beta / M_PI_F;
 	}
 
 	// Write raw (pre-saturation) values, then detect and record saturation
@@ -118,21 +122,30 @@ void ActuatorEffectivenessMorphQuad::updateSetpoint(
 
 		actuator_sp(i) = motor_clamped;
 
-		// Servo saturation check
-		const int sv_idx = NUM_ROTORS + i;
-		const float servo_clamped = math::constrain(alpha_raw[i], actuator_min(sv_idx), actuator_max(sv_idx));
+		// Outer servo (alpha) saturation check
+		const int alpha_idx = NUM_ROTORS + i;
+		const float alpha_clamped = math::constrain(alpha_raw[i], actuator_min(alpha_idx), actuator_max(alpha_idx));
 
-		if (fabsf(servo_clamped - alpha_raw[i]) > FLT_EPSILON) {
+		if (fabsf(alpha_clamped - alpha_raw[i]) > FLT_EPSILON) {
 			_servo_saturated = true;
 		}
 
-		actuator_sp(sv_idx) = servo_clamped;
+		actuator_sp(alpha_idx) = alpha_clamped;
+
+		// Inner servo (beta) saturation check
+		const int beta_idx = 2 * NUM_ROTORS + i;
+		const float beta_clamped = math::constrain(beta_raw[i], actuator_min(beta_idx), actuator_max(beta_idx));
+
+		if (fabsf(beta_clamped - beta_raw[i]) > FLT_EPSILON) {
+			_servo_saturated = true;
+		}
+
+		actuator_sp(beta_idx) = beta_clamped;
 	}
 
 	// Compute unallocated wrench from saturation
 	// When saturated, the actual output differs from the requested output.
-	// The ratio of actual/requested gives the achieved fraction per axis.
-	computeUnallocatedWrench(f_des, tau_des, omega_raw, alpha_raw,
+	computeUnallocatedWrench(f_des, tau_des, omega_raw, alpha_raw, beta_raw,
 				 actuator_sp, actuator_min, actuator_max);
 }
 
@@ -140,9 +153,11 @@ void ActuatorEffectivenessMorphQuad::computeThrustVectors(
 	const Vector3f &f_des, const Vector3f &tau_des,
 	float t_out[NUM_ROTORS][3])
 {
-	const float l = _half_length;
-	const float b = _half_width;
+	const float l = _param_ca_mq_l.get();
+	const float b = _param_ca_mq_b.get();
 	const float r = sqrtf(l * l + b * b);
+	const float gimbal_lock_gain = _param_ca_mq_glg.get();
+	const float downwash_gain = _param_ca_mq_dwg.get();
 
 	// X-layout sign patterns (rotor order: FR=0, FL=1, BL=2, BR=3)
 	// roll_sign:  +1 for rotors on the -y side (FR, BR), -1 for +y side (FL, BL)
@@ -185,7 +200,7 @@ void ActuatorEffectivenessMorphQuad::computeThrustVectors(
 		// (a) Gimbal lock avoidance: repel beta_i away from +/-pi/2
 		// When f is aligned with j^B (y-axis), inner servo loses control.
 		// Add alternating y-component correction proportional to |f_hat . j^B|.
-		const float y_corr = _gimbal_lock_gain * fabsf(f_hat_y) * f_norm / 4.0f;
+		const float y_corr = gimbal_lock_gain * fabsf(f_hat_y) * f_norm / 4.0f;
 
 		for (int i = 0; i < NUM_ROTORS; ++i) {
 			// Alternating sign: (-1)^i
@@ -196,7 +211,7 @@ void ActuatorEffectivenessMorphQuad::computeThrustVectors(
 		// (b) Downwash avoidance: break thrust collinearity when f || i^B
 		// When |f_hat . i^B| > 0.7, add alternating x-component to front/back pairs.
 		if (fabsf(f_hat_x) > 0.7f) {
-			const float x_corr = _downwash_gain * fabsf(f_hat_x) * f_norm / 10.0f;
+			const float x_corr = downwash_gain * fabsf(f_hat_x) * f_norm / 10.0f;
 
 			for (int i = 0; i < NUM_ROTORS; ++i) {
 				// Front pair (0,1): +x_corr, Back pair (2,3): -x_corr
@@ -211,10 +226,11 @@ void ActuatorEffectivenessMorphQuad::recoverServoAngles(
 	const float t[3], int idx,
 	float &alpha_out, float &beta_out, float &omega_out)
 {
+	const float ct = _param_ca_mq_ct.get();
 	const float t_norm = sqrtf(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]);
 
 	// Motor speed: Omega = ||t|| / c_t
-	omega_out = t_norm / _thrust_coeff;
+	omega_out = t_norm / ct;
 
 	// If thrust is negligible, keep previous angles to avoid jitter
 	if (t_norm < 0.01f) {
@@ -273,8 +289,11 @@ void ActuatorEffectivenessMorphQuad::recoverServoAngles(
 
 	alpha = best_alpha;
 
-	// Clamp beta to mechanical limits [-pi/2, 3*pi/2]
-	beta = math::constrain(beta, -M_PI_F / 2.0f, 3.0f * M_PI_F / 2.0f);
+	// Clamp to mechanical limits from parameters
+	const float alpha_max_rad = math::radians(_param_ca_mq_alpm.get());
+	const float beta_max_rad = math::radians(_param_ca_mq_betm.get());
+	alpha = math::constrain(alpha, -alpha_max_rad, alpha_max_rad);
+	beta = math::constrain(beta, -beta_max_rad, beta_max_rad);
 
 	// Update history
 	_alpha_prev[idx] = alpha;
@@ -298,6 +317,7 @@ void ActuatorEffectivenessMorphQuad::getUnallocatedControl(int matrix_index,
 void ActuatorEffectivenessMorphQuad::computeUnallocatedWrench(
 	const Vector3f &f_des, const Vector3f &tau_des,
 	const float omega_raw[NUM_ROTORS], const float alpha_raw[NUM_ROTORS],
+	const float beta_raw[NUM_ROTORS],
 	const ActuatorVector &actuator_sp,
 	const ActuatorVector &actuator_min,
 	const ActuatorVector &actuator_max)
@@ -315,8 +335,10 @@ void ActuatorEffectivenessMorphQuad::computeUnallocatedWrench(
 
 	// Reconstruct the actually achieved wrench from the clipped actuator outputs.
 	// For each rotor, compute the actual thrust vector from the saturated outputs.
-	const float l = _half_length;
-	const float b = _half_width;
+	const float l = _param_ca_mq_l.get();
+	const float b = _param_ca_mq_b.get();
+	const float ct = _param_ca_mq_ct.get();
+	const float omega_max = _param_ca_mq_omax.get();
 
 	Vector3f f_achieved(0.f, 0.f, 0.f);
 	Vector3f tau_achieved(0.f, 0.f, 0.f);
@@ -326,18 +348,21 @@ void ActuatorEffectivenessMorphQuad::computeUnallocatedWrench(
 	const float ly[NUM_ROTORS] = {-b,  b,  b, -b};
 
 	for (int i = 0; i < NUM_ROTORS; ++i) {
-		// Recover actual omega and alpha from saturated actuator outputs
-		const float omega_actual = actuator_sp(i) * _omega_max;
+		// Recover actual omega, alpha, beta from saturated actuator outputs
+		const float omega_actual = actuator_sp(i) * omega_max;
 		const float alpha_actual = actuator_sp(NUM_ROTORS + i) * M_PI_F;
+		const float beta_actual = actuator_sp(2 * NUM_ROTORS + i) * M_PI_F;
 
 		// Thrust magnitude from actual motor speed: t = c_t * Omega^2
-		const float t_mag = _thrust_coeff * omega_actual * omega_actual;
+		const float t_mag = ct * omega_actual * omega_actual;
 
-		// Thrust direction from actual servo angle (simplified: only outer servo alpha)
-		// G_i(alpha) = [sin(alpha), 0, cos(alpha)] (NED, ignoring beta for saturation estimate)
+		// Thrust direction from dual-axis gimbal angles (alpha=outer/Yaw, beta=inner/Pitch)
+		// Forward kinematics: R = Ry(alpha) * Rx(beta), thrust along local z
 		const float sa = sinf(alpha_actual);
 		const float ca = cosf(alpha_actual);
-		Vector3f t_vec(t_mag * sa, 0.f, t_mag * ca);
+		const float sb = sinf(beta_actual);
+		const float cb = cosf(beta_actual);
+		Vector3f t_vec(t_mag * sa * cb, -t_mag * sb, t_mag * ca * cb);
 
 		// Accumulate force
 		f_achieved += t_vec;

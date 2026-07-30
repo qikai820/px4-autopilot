@@ -59,15 +59,16 @@ private:
 	static constexpr int NUM_ROTORS = 4;
 	static constexpr int NR = 2;
 
-	// Geometry
-	float _half_length{0.17f};    ///< l: half arm length in x direction [m]
-	float _half_width{0.17f};     ///< b: half arm width in y direction [m]
-	float _thrust_coeff{1.0f};    ///< c_t: thrust coefficient [N/(rad/s)^2]
-	float _omega_max{1200.0f};    ///< max motor angular velocity [rad/s]
-
-	// Null-space correction gains
-	float _gimbal_lock_gain{0.3f};
-	float _downwash_gain{0.2f};
+	DEFINE_PARAMETERS(
+		(ParamFloat<px4::params::CA_MQ_L>)     _param_ca_mq_l,      ///< half arm length [m]
+		(ParamFloat<px4::params::CA_MQ_B>)     _param_ca_mq_b,      ///< half arm width [m]
+		(ParamFloat<px4::params::CA_MQ_CT>)    _param_ca_mq_ct,     ///< thrust coefficient [N/(rad/s)^2]
+		(ParamFloat<px4::params::CA_MQ_OMAX>)  _param_ca_mq_omax,   ///< max motor speed [rad/s]
+		(ParamFloat<px4::params::CA_MQ_ALPM>)  _param_ca_mq_alpm,   ///< max alpha servo angle [deg]
+		(ParamFloat<px4::params::CA_MQ_BETM>)  _param_ca_mq_betm,   ///< max beta servo angle [deg]
+		(ParamFloat<px4::params::CA_MQ_GLG>)   _param_ca_mq_glg,    ///< gimbal lock avoidance gain
+		(ParamFloat<px4::params::CA_MQ_DWG>)   _param_ca_mq_dwg     ///< downwash avoidance gain
+	)
 
 	// Previous servo angles for minimal-motion selection
 	float _alpha_prev[NUM_ROTORS] {};
@@ -106,6 +107,7 @@ private:
 	 */
 	void computeUnallocatedWrench(const matrix::Vector3f &f_des, const matrix::Vector3f &tau_des,
 				      const float omega_raw[NUM_ROTORS], const float alpha_raw[NUM_ROTORS],
+				      const float beta_raw[NUM_ROTORS],
 				      const ActuatorVector &actuator_sp,
 				      const ActuatorVector &actuator_min,
 				      const ActuatorVector &actuator_max);

@@ -26,8 +26,15 @@ SRC_DIR=$PWD/../
 CCACHE_DIR=${HOME}/.ccache
 mkdir -p "${CCACHE_DIR}"
 
+# Auto-detect serial devices for firmware upload
+SERIAL_DEVICES=""
+for dev in /dev/ttyACM* /dev/ttyUSB*; do
+	[ -e "$dev" ] && SERIAL_DEVICES="${SERIAL_DEVICES} --device=${dev}"
+done
+
 docker run -it --rm -w "${SRC_DIR}" \
 	--user="$(id -u):$(id -g)" \
+	--group-add=20 \
 	--env=AWS_ACCESS_KEY_ID \
 	--env=AWS_SECRET_ACCESS_KEY \
 	--env=BRANCH_NAME \
@@ -44,4 +51,5 @@ docker run -it --rm -w "${SRC_DIR}" \
 	--publish 14556:14556/udp \
 	--volume=${CCACHE_DIR}:${CCACHE_DIR}:rw \
 	--volume=${SRC_DIR}:${SRC_DIR}:rw \
+	${SERIAL_DEVICES} \
 	${PX4_DOCKER_REPO} /bin/bash -c "$1 $2 $3"
