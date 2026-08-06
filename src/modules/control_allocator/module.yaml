@@ -710,6 +710,23 @@ parameters:
             max: 1.0
             default: 0.2
 
+        CA_MQ_TMAX:
+            description:
+                short: Max per-rotor thrust at full throttle
+                long: |
+                  Thrust produced by a single rotor pair at esc-cmd-norm = 1.0,
+                  matching the JSBSim morphquad model thrust table
+                  (esc=1.0 -> 6.182 lbf = 27.5 N). Used to normalize the motor
+                  actuator output into the [0,1] throttle fraction the model
+                  expects (esc=0.4 -> hover thrust).
+            type: float
+            decimal: 3
+            increment: 0.5
+            unit: N
+            min: 1.0
+            max: 200.0
+            default: 27.5
+
 # Mixer
 mixer:
     actuator_types:

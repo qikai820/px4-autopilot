@@ -67,7 +67,8 @@ private:
 		(ParamFloat<px4::params::CA_MQ_ALPM>)  _param_ca_mq_alpm,   ///< max alpha servo angle [deg]
 		(ParamFloat<px4::params::CA_MQ_BETM>)  _param_ca_mq_betm,   ///< max beta servo angle [deg]
 		(ParamFloat<px4::params::CA_MQ_GLG>)   _param_ca_mq_glg,    ///< gimbal lock avoidance gain
-		(ParamFloat<px4::params::CA_MQ_DWG>)   _param_ca_mq_dwg     ///< downwash avoidance gain
+		(ParamFloat<px4::params::CA_MQ_DWG>)   _param_ca_mq_dwg,    ///< downwash avoidance gain
+		(ParamFloat<px4::params::CA_MQ_TMAX>)  _param_ca_mq_tmax    ///< max per-rotor thrust at full throttle [N]
 	)
 
 	// Previous servo angles for minimal-motion selection
@@ -90,15 +91,16 @@ private:
 				  float t_out[NUM_ROTORS][3]);
 
 	/**
-	 * Recover servo angles and motor speed from a thrust vector (Eq.14).
+	 * Recover servo angles from a thrust vector (Eq.14). The motor speed is
+	 * no longer derived here; the caller normalizes the thrust magnitude into
+	 * the [0,1] throttle fraction expected by the JSBSim morphquad model.
 	 * @param t         3D thrust vector for one rotor
 	 * @param idx       rotor index (0-3)
 	 * @param alpha_out outer servo angle [rad]
 	 * @param beta_out  inner servo angle [rad]
-	 * @param omega_out motor angular velocity [rad/s]
 	 */
 	void recoverServoAngles(const float t[3], int idx,
-				float &alpha_out, float &beta_out, float &omega_out);
+				float &alpha_out, float &beta_out);
 
 	/**
 	 * Compute the unallocated wrench when actuators are saturated.

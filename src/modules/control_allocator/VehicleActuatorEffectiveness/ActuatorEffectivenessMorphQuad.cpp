@@ -97,13 +97,19 @@ void ActuatorEffectivenessMorphQuad::updateSetpoint(
 	float alpha_raw[NUM_ROTORS];
 	float beta_raw[NUM_ROTORS];
 
-	const float omega_max = _param_ca_mq_omax.get();
+	const float tmax = _param_ca_mq_tmax.get();
 
 	for (int i = 0; i < NUM_ROTORS; ++i) {
-		float alpha, beta, omega;
-		recoverServoAngles(t[i], i, alpha, beta, omega);
+		float alpha, beta;
+		recoverServoAngles(t[i], i, alpha, beta);
 
-		omega_raw[i] = omega / omega_max;
+		// Motor command = normalized thrust fraction in [0,1] that the JSBSim
+		// morphquad model expects for fcs/esc-cmd-norm (esc=0.4 -> hover thrust,
+		// esc=1.0 -> TMAX per-rotor thrust). Previously this was omega/omega_max
+		// (~0.009 at hover), which the model interpreted as ~zero thrust and
+		// made the motors appear idle regardless of throttle.
+		const float t_norm = sqrtf(t[i][0] * t[i][0] + t[i][1] * t[i][1] + t[i][2] * t[i][2]);
+		omega_raw[i] = (t_norm < 0.01f) ? 0.f : (t_norm / tmax);
 		alpha_raw[i] = alpha / M_PI_F;
 		beta_raw[i] = beta / M_PI_F;
 	}
@@ -224,19 +230,14 @@ void ActuatorEffectivenessMorphQuad::computeThrustVectors(
 
 void ActuatorEffectivenessMorphQuad::recoverServoAngles(
 	const float t[3], int idx,
-	float &alpha_out, float &beta_out, float &omega_out)
+	float &alpha_out, float &beta_out)
 {
-	const float ct = _param_ca_mq_ct.get();
 	const float t_norm = sqrtf(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]);
-
-	// Motor speed: Omega = ||t|| / c_t
-	omega_out = t_norm / ct;
 
 	// If thrust is negligible, keep previous angles to avoid jitter
 	if (t_norm < 0.01f) {
 		alpha_out = _alpha_prev[idx];
 		beta_out = _beta_prev[idx];
-		omega_out = 0.f;
 		return;
 	}
 
@@ -247,8 +248,8 @@ void ActuatorEffectivenessMorphQuad::recoverServoAngles(
 
 	// Two-branch solution (Eq.14)
 	// Branch 1: beta in [-pi/2, pi/2]
-	const float beta1 = asinf(math::constrain(-t_hat_y, -1.0f, 1.0f));
-	const float alpha1 = atan2f(t_hat_x, t_hat_z);
+	const float beta1 = asinf(math::constrain(t_hat_y, -1.0f, 1.0f));
+	const float alpha1 = atan2f(t_hat_x, -t_hat_z);
 
 	// Branch 2: beta in [pi/2, 3*pi/2]
 	const float beta2 = M_PI_F - beta1;
@@ -337,8 +338,7 @@ void ActuatorEffectivenessMorphQuad::computeUnallocatedWrench(
 	// For each rotor, compute the actual thrust vector from the saturated outputs.
 	const float l = _param_ca_mq_l.get();
 	const float b = _param_ca_mq_b.get();
-	const float ct = _param_ca_mq_ct.get();
-	const float omega_max = _param_ca_mq_omax.get();
+	const float tmax = _param_ca_mq_tmax.get();
 
 	Vector3f f_achieved(0.f, 0.f, 0.f);
 	Vector3f tau_achieved(0.f, 0.f, 0.f);
@@ -348,13 +348,13 @@ void ActuatorEffectivenessMorphQuad::computeUnallocatedWrench(
 	const float ly[NUM_ROTORS] = {-b,  b,  b, -b};
 
 	for (int i = 0; i < NUM_ROTORS; ++i) {
-		// Recover actual omega, alpha, beta from saturated actuator outputs
-		const float omega_actual = actuator_sp(i) * omega_max;
+		// Recover actual alpha, beta from saturated actuator outputs
 		const float alpha_actual = actuator_sp(NUM_ROTORS + i) * M_PI_F;
 		const float beta_actual = actuator_sp(2 * NUM_ROTORS + i) * M_PI_F;
 
-		// Thrust magnitude from actual motor speed: t = c_t * Omega^2
-		const float t_mag = ct * omega_actual * omega_actual;
+		// Achieved thrust magnitude: actuator_sp(i) is the normalized thrust
+		// fraction in [0,1] (esc-cmd-norm), so T = fraction * TMAX.
+		const float t_mag = actuator_sp(i) * tmax;
 
 		// Thrust direction from dual-axis gimbal angles (alpha=outer/Yaw, beta=inner/Pitch)
 		// Forward kinematics: R = Ry(alpha) * Rx(beta), thrust along local z
@@ -362,7 +362,7 @@ void ActuatorEffectivenessMorphQuad::computeUnallocatedWrench(
 		const float ca = cosf(alpha_actual);
 		const float sb = sinf(beta_actual);
 		const float cb = cosf(beta_actual);
-		Vector3f t_vec(t_mag * sa * cb, -t_mag * sb, t_mag * ca * cb);
+		Vector3f t_vec(t_mag * sa * cb, t_mag * sb, -t_mag * ca * cb);
 
 		// Accumulate force
 		f_achieved += t_vec;
