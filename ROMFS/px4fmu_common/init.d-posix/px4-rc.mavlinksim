@@ -8,10 +8,17 @@ param set-default SENS_IMU_MODE 0
 
 simulator_tcp_port=$((4560+px4_instance))
 
+# If PX4_SIM_UDP_PORT is set, connect to the simulator over UDP on that port.
+# This is used for the JSBSim bridge (px4-jsbsim-bridge), which speaks UDP
+# HIL MAVLink on 14550/14560 rather than the default TCP 4560.
+if [ -n "${PX4_SIM_UDP_PORT}" ]; then
+	echo "INFO  [init] PX4_SIM_UDP_PORT: ${PX4_SIM_UDP_PORT} (UDP simulator link)"
+	simulator_mavlink start -u ${PX4_SIM_UDP_PORT}
+
 # Check if PX4_SIM_HOSTNAME environment variable is empty
 # If empty check if PX4_SIM_HOST_ADDR environment variable is empty
 # If both are empty use localhost for simulator
-if [ -z "${PX4_SIM_HOSTNAME}" ]; then
+elif [ -z "${PX4_SIM_HOSTNAME}" ]; then
 
 	if [ -z "${PX4_SIM_HOST_ADDR}" ]; then
 		echo "INFO  [init] PX4_SIM_HOSTNAME: localhost"

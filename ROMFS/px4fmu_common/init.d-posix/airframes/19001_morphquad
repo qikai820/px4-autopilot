@@ -1,0 +1,48 @@
+#!/bin/sh
+#
+# @name MorphQuad - Morphable Quadrotor
+#
+# @type MorphQuad
+# @class Copter
+#
+# MorphQuad: a quadrotor with independently tilting rotors via
+# dual-axis gimbal servos. Each rotor can point thrust in an
+# arbitrary direction, making it a fully-actuated 6DOF system.
+#
+# Actuator mapping:
+#   Motors 0-3:  rotor speeds (Omega_0 .. Omega_3)
+#   Servos 0-3:  outer gimbal servos (alpha_0 .. alpha_3)
+#   Servos 4-7:  inner gimbal servos (beta_0 .. beta_3)
+#
+# Control allocation is handled by ActuatorEffectivenessMorphQuad
+# using Pattern B (custom updateSetpoint override).
+#
+
+. ${R}etc/init.d/rc.vector_defaults
+
+# --- Airframe type: MorphQuad (CA_AIRFRAME = 16) ---
+param set-default CA_AIRFRAME 16
+
+# --- Control allocation method: Pseudo-inverse ---
+param set-default CA_METHOD 0
+
+# --- Disable supply/battery power preflight: HIL (jsbsim_bridge) does not
+#     publish system_power, so this check must be bypassed for SITL. ---
+param set-default CBRK_SUPPLY_CHK 894281
+
+# --- PWM output channel mapping ---
+# Motors: channels 1-4
+param set-default PWM_MAIN_FUNC1 101
+param set-default PWM_MAIN_FUNC2 102
+param set-default PWM_MAIN_FUNC3 103
+param set-default PWM_MAIN_FUNC4 104
+# Outer gimbal servos (alpha): channels 5-8
+param set-default PWM_MAIN_FUNC5 201
+param set-default PWM_MAIN_FUNC6 202
+param set-default PWM_MAIN_FUNC7 203
+param set-default PWM_MAIN_FUNC8 204
+# Inner gimbal servos (beta): channels 9-12
+param set-default PWM_MAIN_FUNC9 205
+param set-default PWM_MAIN_FUNC10 206
+param set-default PWM_MAIN_FUNC11 207
+param set-default PWM_MAIN_FUNC12 208
