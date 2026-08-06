@@ -94,9 +94,10 @@ $$\mathbf{w}_d = \begin{bmatrix} \mathbf{f}_d \\ \boldsymbol{\tau}_d \end{bmatri
 - $\alpha_i$：外舵机，绕机体 $j^B$（y 轴）旋转
 - $\beta_i$：内舵机，绕旋转后的 $i^B$（x 轴）旋转
 
-推力方向向量（论文 Eq. 3，适配 NED 坐标系）：
+推力方向向量（论文 Eq. 3 在机体 FRD / NED，Z 向下 坐标系下的物理正确形式，
+中性舵 $\alpha_i=\beta_i=0$ 时推力沿 $-Z$ 即向上）：
 
-$$\mathbf{G}_i(\alpha_i, \beta_i) = \begin{bmatrix} \sin\alpha_i \cos\beta_i \\ -\sin\beta_i \\ \cos\alpha_i \cos\beta_i \end{bmatrix}$$
+$$\mathbf{G}_i(\alpha_i, \beta_i) = \begin{bmatrix} \sin\alpha_i \cos\beta_i \\ +\sin\beta_i \\ -\cos\alpha_i \cos\beta_i \end{bmatrix}$$
 
 ### 3.2 Wrench 方程
 
@@ -178,9 +179,9 @@ $$\Omega_i = \|\mathbf{t}_i\| / c_t$$
 
 **舵机角度**（双分支解）：
 
-$$\text{分支 1:} \quad \beta_i = \arcsin(-\hat{t}_{i,y}), \quad \alpha_i = \text{atan2}(\hat{t}_{i,x}, \hat{t}_{i,z})$$
+$$\text{分支 1:} \quad \beta_i = \arcsin(\hat{t}_{i,y}), \quad \alpha_i = \text{atan2}(\hat{t}_{i,x}, -\hat{t}_{i,z})$$
 
-$$\text{分支 2:} \quad \beta_i = \pi - \arcsin(\hat{t}_{i,y}), \quad \alpha_i = \pi + \text{atan2}(\hat{t}_{i,x}, \hat{t}_{i,z})$$
+$$\text{分支 2:} \quad \beta_i = \pi - \arcsin(\hat{t}_{i,y}), \quad \alpha_i = \pi + \text{atan2}(\hat{t}_{i,x}, -\hat{t}_{i,z})$$
 
 **最小运动选择**：比较两个分支与上一时刻舵机位置 $(\alpha_i', \beta_i')$ 的距离，选择运动量最小的分支。同时检查 $\pm 2k\pi$ 缠绕（$|k| \leq n_r$），支持连续多圈旋转。
 
@@ -192,27 +193,52 @@ $$\text{分支 2:} \quad \beta_i = \pi - \arcsin(\hat{t}_{i,y}), \quad \alpha_i 
 
 | 模式 | nav_state | 输入来源 | 控制逻辑 |
 |------|-----------|---------|---------|
-| Manual | MANUAL (0) | `manual_control_setpoint` | 摇杆→角速率+速度 |
+| Manual | MANUAL (0) | `manual_control_setpoint` | **力开环**：roll/pitch→机体 x/y 力，throttle→机体 z 力（含悬停配平）；aux1/aux2→姿态角速率 |
+| Position | POSCTL (3) | `manual_control_setpoint` | **位置闭环**：aux1/aux2→水平速度，throttle→垂向速度，摇杆居中定点保持（需位置源） |
 | Offboard | OFFBOARD (14) | `trajectory_setpoint` | 位置/速度/姿态设定点 |
 | Auto | 其他 | `vehicle_*_setpoint` | flight_mode_manager 输出 |
 
-#### Manual 模式摇杆映射
+#### Manual 模式摇杆映射（力开环）
 
-摇杆输入经死区处理后映射为机体坐标系参考量：
+Manual 为**开环力控制**：姿态仍闭环，但位置/速度无反馈，摇杆直接指令机体三轴力。
 
-$$\omega_{sp} = \text{deadzone}(\text{stick}_{rp y}, dz) \cdot \omega_{\max}$$
-$$\mathbf{v}_{sp}^B = \text{deadzone}(\text{stick}_{aux1,2,3}, dz) \cdot v_{\max}$$
+- **roll / pitch 摇杆 → 机体 x / y 力**（平移，开环）
+- **aux1 / aux2 摇杆 → roll / pitch 角速率**（姿态闭环）
+- **yaw 摇杆 → 偏航角速率**（不变）
+- **throttle → 机体 z 力**（含悬停配平）
 
-其中 $dz$ 为死区参数（`GC_MAN_DZ`，默认 0.1），$\omega_{\max}$ 为最大角速率（`GC_MAN_RATE_MAX`，默认 1.5 rad/s），$v_{\max}$ 为最大速度（`GC_MAN_VEL_MAX`，默认 5.0 m/s）。
+摇杆经死区处理后映射为：
 
-角速率参考通过四元数积分生成姿态参考 $R_{sp}$，速度参考转换到 NED 系后通过 P 环生成期望力。
+$$\mathbf{f}_{sp}^B = \begin{bmatrix} \text{deadzone}(\text{stick}_{roll}, dz) \\[4pt] \text{deadzone}(\text{stick}_{pitch}, dz) \\[4pt] -\text{deadzone}(\text{stick}_{throttle}, dz) \end{bmatrix} \cdot F_{\max} + \begin{bmatrix} 0 \\ 0 \\ -m g \end{bmatrix}$$
+
+$$\boldsymbol{\omega}_{sp} = \begin{bmatrix} \text{deadzone}(\text{stick}_{aux1}, dz) \\[4pt] \text{deadzone}(\text{stick}_{aux2}, dz) \\[4pt] \text{deadzone}(\text{stick}_{yaw}, dz) \end{bmatrix} \cdot \omega_{\max}$$
+
+其中 $dz$ 为死区参数（`GC_MAN_DZ`，默认 0.1），$\omega_{\max}$ 为最大角速率（`GC_MAN_RATE_MAX`，默认 1.5 rad/s），$F_{\max}$ 为每轴最大机体力（`GC_MAN_FMAX`，默认 20 N）。
+
+> **注**：
+> - 垂向力参考取自**油门杆**（`manual_sp.throttle`）。机体坐标系 z 轴向下，故悬停配平为 $-m g$（向上），且油门上推（$-\text{deadzone}(\text{throttle})$）对应更向上力 = 爬升。
+> - roll/pitch 与 aux1/aux2 的映射已对调：平移由主摇杆（roll/pitch）控制，姿态由 aux1/aux2 控制（见 `geo_control.cpp` `control_step_manual`）。
+> - 力开环模式无速度/位置反馈，速度积分器保持为零，仅有姿态（角速率）积分器工作。
+
+角速率参考通过四元数积分生成姿态参考 $R_{sp}$；期望力 $\mathbf{f}_{sp}^B$ 直接作为机体期望力发布（经分配器反解为电机转速与舵机角），不做速度 P 环。
+
+#### Position 模式摇杆映射（位置闭环）
+
+Position 为**闭环位置控制**，需要有效位置源（GPS / 光流 / VIO）：
+
+- **aux1 / aux2 摇杆 → 机体水平速度**
+- **throttle → 垂向速度**
+- **roll / pitch / yaw 摇杆 → 姿态角速率**（保持手动姿态控制）
+- 摇杆居中时，位置外环将位置设定点保持当前位置（定点悬停）
+
+速度参考（机体）经转换到 NED 系后，叠加位置外环项 $\mathbf{v}_{sp} = \mathbf{v}_{sp}^{stick} + K_P(\mathbf{p}_{sp} - \mathbf{p})$，再通过速度 P 环生成期望力（见 `control_step_position`）。位置设定点 $\mathbf{p}_{sp}$ 在摇杆有指令时积分跟随、居中时保持。
 
 ### 3.7 积分器与抗饱和
 
 为消除稳态误差，几何控制器在力矩环和力环各加入积分项：
 
 $$\boldsymbol{\tau}_{des} = -K_R \mathbf{e}_R - K_\Omega \mathbf{e}_\omega + \mathbf{I}_{rate} + \boldsymbol{\omega} \times (\mathbf{J}\boldsymbol{\omega})$$
-$$\mathbf{f}_{des}^W = -K_P \mathbf{e}_p - K_V \mathbf{e}_v - \mathbf{I}_{vel} + m\mathbf{g} + m\mathbf{a}_{sp}$$
+$$\mathbf{f}_{des}^W = -K_P \mathbf{e}_p - K_V \mathbf{e}_v - \mathbf{I}_{vel} - m\mathbf{g} + m\mathbf{a}_{sp}$$
 
 #### 积分更新律
 
@@ -296,8 +322,8 @@ for i = 0 to 3 do:
     t_hat ← t[i] / t_norm
 
     // Two branches
-    beta1  ←  arcsin(-t_hat[1])
-    alpha1 ←  atan2(t_hat[0], t_hat[2])
+    beta1  ←  arcsin(t_hat[1])
+    alpha1 ←  atan2(t_hat[0], -t_hat[2])
     beta2  ←  π - beta1
     alpha2 ←  π + alpha1
 

@@ -399,8 +399,9 @@ ControlAllocator 订阅这两个话题，构造 6D `control_sp` 向量传入 `up
          后 (x-)      [3] = 后右 (BR), CCW
 
     actuator_sp 索引:
-    [0..3] = 电机 Omega_0..Omega_3
-    [4..7] = 外舵机 alpha_0..alpha_3
+    [0..3]   = 电机 Omega_0..Omega_3
+    [4..7]   = 外舵机 alpha_0..alpha_3
+    [8..11]  = 内舵机 beta_0..beta_3
 ```
 
 ### 6.2 信号归一化
@@ -408,9 +409,14 @@ ControlAllocator 订阅这两个话题，构造 6D `control_sp` 向量传入 `up
 | 执行器 | 物理量 | 归一化范围 | 归一化公式 |
 |--------|--------|-----------|-----------|
 | 电机 0-3 | $\Omega_i$ [rad/s] | [0, 1] | $\Omega_i / \Omega_{\max}$，$\Omega_{\max} = 1200$ |
-| 舵机 0-3 | $\alpha_i$ [rad] | [-1, 1] | $\alpha_i / \pi$ |
+| 舵机 0-3（外） | $\alpha_i$ [rad] | [-1, 1] | $\alpha_i / \pi$ |
+| 舵机 4-7（内） | $\beta_i$ [rad] | [-1, 1] | $\beta_i / \pi$ |
 
-**注意**：内舵机 $\beta_i$ 当前未直接输出到 `actuator_sp`，需在底层驱动中根据 $\alpha_i$ 和推力方向计算，或扩展执行器数量至 12（4 电机 + 4 外舵机 + 4 内舵机）。
+**注意**：12 路执行器（4 电机 + 4 外舵机 $\alpha$ + 4 内舵机 $\beta$）已完整输出到 `actuator_sp[0..11]`，
+由 `ActuatorEffectivenessMorphQuad::updateSetpoint()` 写入（见代码 §3.3）。桥接层 `configs/morphquad.xml`
+以 `scale=π` 将归一化舵角还原为弧度，1:1 直连 JSBSim 的 `fcs/esc-cmd-norm[i]`、`fcs/servo-alpha-cmd[i]`、
+`fcs/servo-beta-cmd[i]`。旋翼序号与物理位置对齐（FR=(+l,−b)、FL=(+l,+b)、BL=(−l,+b)、BR=(−l,−b)），
+与 JSBSim 模型 `morphquad.xml` 中 ROTORi 的位置一一对应。
 
 ---
 
@@ -497,6 +503,6 @@ for (int i = 4; i < 8; i++) {
 ## 10. 待办事项
 
 - [ ] 将硬编码几何参数迁移到 PX4 参数系统
-- [ ] 扩展执行器数量至 12（支持内舵机 β_i 独立输出）
+- [x] 扩展执行器数量至 12（4 电机 + 4 外舵机 α + 4 内舵机 β，已通过 actuator_sp[0..11] 输出）
 - [ ] 添加单元测试（gtest）
 - [ ] SITL 仿真验证
