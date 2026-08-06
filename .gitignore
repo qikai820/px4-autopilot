@@ -109,3 +109,7 @@ src/systemcmds/topic_listener/listener_generated.cpp
 # colcon
 log/
 keys/
+
+# MorphQuad docs: generated font subset for figure rendering
+docs/figures/NotoSansCJKsc.otf
+docs/missfont.log

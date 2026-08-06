@@ -29,80 +29,11 @@
 
 ### 2.1 在 PX4 中的位置
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                        PX4 Autopilot                                  │
-│                                                                       │
-│  启动脚本: rc.vector_defaults (默认参数) / rc.vector_apps (应用启动)   │
-│                                                                       │
-│  ┌──────────────┐     ┌──────────────┐     ┌─────────────────────┐  │
-│  │  Flight Mode  │────▶│   EKF2 /     │────▶│    geo_control       │  │
-│  │  Manager     │     │  State Est.  │     │   (几何控制器)        │  │
-│  └──────────────┘     └──────────────┘     │                       │  │
-│                                             │  输入模式:            │  │
-│                                             │  • Manual  ← manual_ │  │
-│                                             │    control_setpoint  │  │
-│                                             │  • Offboard ← traj_  │  │
-│                                             │    setpoint          │  │
-│                                             │  • Auto ← vehicle_*_ │  │
-│                                             │    setpoint          │  │
-│                                             └──────────┬──────────┘  │
-│                                                        │              │
-│                                           vehicle_thrust/torque_     │
-│                                           setpoint                   │
-│                                                        │              │
-│                                                        ▼              │
-│  ┌───────────────────────────────────────────────────────────────┐   │
-│  │              ControlAllocator                                  │   │
-│  │  ┌─────────────────────────────────────────────────────────┐  │   │
-│  │  │  ActuatorEffectivenessMorphQuad  ◄── 本模块              │  │   │
-│  │  │  • getEffectivenessMatrix()  → 注册执行器                │  │   │
-│  │  │  • updateSetpoint()          → 推力分配核心算法          │  │   │
-│  │  │  • getUnallocatedControl()   → 饱和/未分配信号输出       │  │   │
-│  │  └─────────────────────────────────────────────────────────┘  │   │
-│  └───────────────────────────────────────────────────────────────┘   │
-│         │                              │                             │
-│         │ actuator_controls_0          │ vehicle_land_detected       │
-│         │                              │ control_allocator_status    │
-│         ▼                              │ (unallocated feedback)      │
-│  ┌──────────────┐     ┌──────────────┐ │                             │
-│  │  PWM Out     │────▶│  ESC / Servo │─┘                             │
-│  │  Driver      │     │  Hardware    │────▶  4 电机 + 8 舵机         │
-│  └──────────────┘     └──────────────┘                               │
-└──────────────────────────────────────────────────────────────────────┘
-```
+![图 2.1  PX4 中的 MorphQuad 推力分配架构](figures/sys_arch.png)
 
 ### 2.2 数据流
 
-```
-vehicle_torque_setpoint (roll, pitch, yaw)     ──┐
-                                                  ├──▶ control_sp[6] ──▶ updateSetpoint()
-vehicle_thrust_setpoint (thrust_x/y/z)          ──┘                          │
-                                                                             ▼
-                                                                  ┌─────────────────────┐
-                                                                  │  computeThrustVectors│
-                                                                  │  (Eq. 12 + 15-16)   │
-                                                                  └──────────┬──────────┘
-                                                                             │
-                                                                             ▼
-                                                                  ─────────────────────┐
-                                                                  │ recoverServoAngles   │
-                                                                  │ (Eq. 14, ×4 rotors) │
-                                                                  └──────────┬──────────┘
-                                                                             │
-                                                                             ▼
-                                                                  actuator_sp[8]:
-                                                                  [Ω₀,Ω₁,Ω₂,Ω₃, α₀,α₁,α₂,α₃]
-
-饱和反馈回路 (saturation feedback):
-
-geo_control → vehicle_thrust/torque_setpoint → ControlAllocator → actuator_sp
-     ↑                                              │
-     └── control_allocator_status (unallocated) ────┘
-
-当执行器饱和时，ControlAllocator 通过 control_allocator_status 发布未分配量，
-geo_control 可据此进行抗积分饱和处理。
-```
+![图 2.2  推力分配数据流](figures/data_flow.png)
 
 ---
 
@@ -110,57 +41,7 @@ geo_control 可据此进行抗积分饱和处理。
 
 ### 3.1 类图
 
-```
-─────────────────────────────────────────────────────────────────────┐
-│                    ActuatorEffectiveness (抽象基类)                   │
-│                    src/lib/control_allocation/...                    │
-─────────────────────────────────────────────────────────────────────
-│ + NUM_ACTUATORS = 16                                                │
-│ + NUM_AXES = 6                                                      │
-│ + ControlAxis: ROLL, PITCH, YAW, THRUST_X, THRUST_Y, THRUST_Z      │
-│ + ActuatorVector = Vector<float, 16>                                │
-│ + EffectivenessMatrix = Matrix<float, 6, 16>                        │
-│                                                                     │
-│ # _flight_phase: FlightPhase                                        │
-│ # _stopped_motors_mask: uint32_t                                    │
-│                                                                     │
-│ + virtual name() → const char*              {pure virtual}          │
-│ + virtual getEffectivenessMatrix(...) → bool {default: false}       │
-│ + virtual updateSetpoint(...)               {default: no-op}        │
-│ + virtual getDesiredAllocationMethod(...)   {default: PSEUDO_INVERSE│
-│ + virtual getNormalizeRPY(...)              {default: false}        │
-│ + virtual getUnallocatedControl(...)        {default: no-op}        │
-└──────────────────────────────┬──────────────────────────────────────┘
-                               │ extends
-                               ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│              ActuatorEffectivenessMorphQuad                          │
-│  src/modules/control_allocator/VehicleActuatorEffectiveness/        │
-├─────────────────────────────────────────────────────────────────────┤
-│ - _half_length: float = 0.17f    (l, 半臂长)                         │
-│ - _half_width:  float = 0.17f    (b, 半臂宽)                         │
-│ - _thrust_coeff: float = 1.0f    (c_t, 推力系数)                     │
-│ - _alpha_prev[4]: float          (外舵机历史角度)                     │
-│ - _beta_prev[4]:  float          (内舵机历史角度)                     │
-│ + NR: static constexpr int = 2   (缠绕检查范围)                      │
-│ - _motor_saturated: bool         (电机饱和标志)                       │
-│ - _servo_saturated: bool         (舵机饱和标志)                       │
-│ - _unallocated_torque[3]: float  (未分配力矩 [roll, pitch, yaw])      │
-│ - _unallocated_thrust[3]: float  (未分配推力 [x, y, z])              │
-│                                                                     │
-│ + ActuatorEffectivenessMorphQuad(parent)                            │
-│ + ~ActuatorEffectivenessMorphQuad() = default                       │
-│                                                                     │
-│ + getEffectivenessMatrix(config, reason) → bool  [override]         │
-│ + updateSetpoint(control_sp, idx, actuator_sp, min, max) [override] │
-│ + getUnallocatedControl() [override]                                │
-│ + name() → const char*  { return "MorphQuad"; }                     │
-│                                                                     │
-│ - computeThrustVectors(f_des, tau_des, t_out)                       │
-│ - recoverServoAngles(t, idx, alpha, beta, omega)                    │
-│ - computeUnallocatedWrench(control_sp, actuator_sp)                 │
-└─────────────────────────────────────────────────────────────────────┘
-```
+![图 3.1  ActuatorEffectivenessMorphQuad 类图](figures/class_diagram.png)
 
 ### 3.2 关键成员变量
 
@@ -390,19 +271,7 @@ ControlAllocator 订阅这两个话题，构造 6D `control_sp` 向量传入 `up
 
 ### 6.1 执行器布局
 
-```
-         前 (x+)
-          │
-    [1] ──┼── [0]     [0] = 前右 (FR), CW
-    [2] ──┼── [3]     [1] = 前左 (FL), CCW
-          │           [2] = 后左 (BL), CW
-         后 (x-)      [3] = 后右 (BR), CCW
-
-    actuator_sp 索引:
-    [0..3]   = 电机 Omega_0..Omega_3
-    [4..7]   = 外舵机 alpha_0..alpha_3
-    [8..11]  = 内舵机 beta_0..beta_3
-```
+![图 6.1  MorphQuad 执行器布局 (机体顶视)](figures/actuator_layout.png)
 
 ### 6.2 信号归一化
 
