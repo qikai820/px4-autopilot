@@ -146,17 +146,175 @@ void GeoControl::publish_wrench(const Vector3f &f_des_body, const Vector3f &tau_
 	_torque_pub.publish(torque_msg);
 }
 
+void GeoControl::publish_setpoints(const Vector3f &f_des_world, const Vector3f &f_des_body,
+				   const Vector3f &tau_des, const Quatf &q_att_ref,
+				   const Vector3f &vel_sp_world, const Vector3f &omega,
+				   uint64_t timestamp_sample)
+{
+	const hrt_abstime now = hrt_absolute_time();
+	const float thrust_max = math::max(_param_gc_thrust_max.get(), 1.f);
+
+	// ── Normalized collective-throttle estimate (matching morphquad esc table) ──
+	// ‖f_des_world‖ spans ~0 (idle) … mass*g (hover≈0.4) … N_rotors*Tmax (full≈1.0).
+	const float throttle_norm = math::constrain(f_des_world.norm() / thrust_max, 0.f, 1.f);
+
+	// ── vehicle_local_position_setpoint (position/velocity debug + throttle est) ──
+	vehicle_local_position_setpoint_s local_pos_sp{};
+	local_pos_sp.timestamp = now;
+	local_pos_sp.vx = vel_sp_world(0);
+	local_pos_sp.vy = vel_sp_world(1);
+	local_pos_sp.vz = vel_sp_world(2);
+	local_pos_sp.acceleration[0] = 0.f;
+	local_pos_sp.acceleration[1] = 0.f;
+	local_pos_sp.acceleration[2] = 0.f;
+	local_pos_sp.thrust[0] = f_des_body(0) / thrust_max;
+	local_pos_sp.thrust[1] = f_des_body(1) / thrust_max;
+	local_pos_sp.thrust[2] = throttle_norm;
+	local_pos_sp.yaw = Eulerf(q_att_ref).psi();
+	local_pos_sp.yawspeed = 0.f;
+	_local_pos_sp_pub.publish(local_pos_sp);
+
+	// ── vehicle_attitude_setpoint (desired attitude + body thrust) ──
+	vehicle_attitude_setpoint_s att_sp{};
+	att_sp.timestamp = now;
+	// Quatf components are stored as (w, x, y, z)
+	att_sp.q_d[0] = q_att_ref(0);
+	att_sp.q_d[1] = q_att_ref(1);
+	att_sp.q_d[2] = q_att_ref(2);
+	att_sp.q_d[3] = q_att_ref(3);
+	att_sp.thrust_body[0] = f_des_body(0) / thrust_max;
+	att_sp.thrust_body[1] = f_des_body(1) / thrust_max;
+	att_sp.thrust_body[2] = throttle_norm;
+	att_sp.yaw_sp_move_rate = 0.f;
+	_att_sp_pub.publish(att_sp);
+
+	// ── vehicle_angular_acceleration_setpoint ──
+	// Desired angular accel from the torque setpoint: tau = J·α + ω×Jω  →  α = J⁻¹(τ − ω×Jω)
+	Matrix3f J = matrix::diag(Vector3f(
+					   _param_gc_inertia_xx.get(),
+					   _param_gc_inertia_yy.get(),
+					   _param_gc_inertia_zz.get()));
+	const Vector3f gyro_term = omega.cross(J * omega);
+	const Vector3f ang_accel = J.I() * (tau_des - gyro_term);
+
+	vehicle_angular_acceleration_setpoint_s ang_accel_sp{};
+	ang_accel_sp.timestamp = now;
+	ang_accel_sp.timestamp_sample = timestamp_sample;
+	ang_accel_sp.xyz[0] = ang_accel(0);
+	ang_accel_sp.xyz[1] = ang_accel(1);
+	ang_accel_sp.xyz[2] = ang_accel(2);
+	_ang_accel_sp_pub.publish(ang_accel_sp);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Manual mode: RC sticks → angular rate + velocity references
 // ─────────────────────────────────────────────────────────────────────────────
-void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &vel,
-				     const Vector3f &omega, uint64_t timestamp_sample)
+void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &omega,
+				     uint64_t timestamp_sample)
 {
-	manual_control_setpoint_s manual_sp;
+	// Manual control: if no valid RC/joystick input is available (common in
+	// SITL/HIL without a transmitter), do NOT bail out with a zero wrench.
+	// Fall back to zero stick setpoints instead, so the velocity controller
+	// still commands the hover thrust (-mass*g). This keeps
+	// vehicle_thrust_setpoint non-zero, which stops the land detector from
+	// declaring "landed" and auto-disarming the vehicle
+	// ("系统油门值始终为0 导致自动上锁"). When a real stick input exists,
+	// behaviour is unchanged.
+	manual_control_setpoint_s manual_sp{};
+	const bool has_manual = _sub_manual_control_sp.update(&manual_sp) && manual_sp.valid;
 
-	if (!_sub_manual_control_sp.update(&manual_sp) || !manual_sp.valid) {
-		return;
+	const float dt = math::constrain(static_cast<float>((hrt_absolute_time() - _last_run) * 1e-6f),
+					 0.001f, 0.05f);
+
+	const float rate_max = _param_gc_man_rate_max.get();
+	const float dz = _param_gc_man_dz.get();
+	const float mass = _param_gc_mass.get();
+
+	float p_sp = 0.f;
+	float q_sp = 0.f;
+	float r_sp = 0.f;
+	float fx_body = 0.f;
+	float fy_body = 0.f;
+	float fz_body = -mass * 9.81f;   // hover trim (upward) when no stick input
+
+	if (has_manual) {
+		// Attitude: aux1/aux2 → roll/pitch angular rate [rad/s] (closed loop);
+		// yaw stick → yaw rate.
+		p_sp = math::deadzone(manual_sp.aux1, dz) * rate_max;
+		q_sp = math::deadzone(manual_sp.aux2, dz) * rate_max;
+		r_sp = math::deadzone(manual_sp.yaw,   dz) * rate_max;
+
+		// Force: roll/pitch → body x/y force [N] (OPEN LOOP, no feedback);
+		// throttle → body z force. Body z is down, so hover trim is -mass*g
+		// (upward) and throttle-up commands more upward force (climb).
+		const float fmax = _param_gc_man_fmax.get();
+		fx_body = math::deadzone(manual_sp.roll, dz) * fmax;
+		fy_body = math::deadzone(manual_sp.pitch, dz) * fmax;
+		fz_body = -mass * 9.81f - math::deadzone(manual_sp.throttle, dz) * fmax;
 	}
+
+	Vector3f omega_sp(p_sp, q_sp, r_sp);
+	Vector3f f_des_body(fx_body, fy_body, fz_body);
+
+	// Integrate rate commands into attitude reference (quaternion integration)
+	const Vector3f omega_vec(omega_sp(0), omega_sp(1), omega_sp(2));
+	const float omega_norm = omega_vec.norm();
+
+	if (omega_norm > 1e-6f) {
+		const float angle = omega_norm * dt;
+		const Vector3f axis = omega_vec / omega_norm;
+		const float ha = angle * 0.5f;
+		const float sha = sinf(ha);
+		const float cha = cosf(ha);
+		Quatf dq(cha, axis(0) * sha, axis(1) * sha, axis(2) * sha);
+		_q_att_ref = _q_att_ref * dq;
+		_q_att_ref.normalize();
+	}
+
+	// ── Attitude loop → desired torque (closed loop) ──
+	const Dcmf R(R_q);
+	const Dcmf R_sp(_q_att_ref);
+	const Dcmf e_R_mat = (R_sp.transpose() * R - R.transpose() * R_sp) * 0.5f;
+	Vector3f e_R(e_R_mat(2, 1), e_R_mat(0, 2), e_R_mat(1, 0));
+
+	Vector3f kR(_param_gc_rp_p.get(), _param_gc_rp_p.get(), _param_gc_yaw_p.get());
+	Vector3f kOmega(_param_gc_rp_rate_p.get(), _param_gc_rp_rate_p.get(), _param_gc_yaw_rate_p.get());
+
+	Matrix3f J = matrix::diag(Vector3f(
+					   _param_gc_inertia_xx.get(),
+					   _param_gc_inertia_yy.get(),
+					   _param_gc_inertia_zz.get()));
+
+	Vector3f omega_d_in_B = R.transpose() * R_sp * omega_sp;
+	Vector3f e_omega = omega - omega_d_in_B;
+
+	// Open-loop force mode: velocity/position feedback disabled, so only the
+	// rate/attitude integrator is updated (velocity integrator stays zeroed).
+	if (!_landed) {
+		updateIntegrators(e_omega, Vector3f(0.f, 0.f, 0.f), dt);
+	}
+
+	Vector3f tau_des = -kR.emult(e_R) - kOmega.emult(e_omega) + _rate_int + omega.cross(J * omega);
+
+	const Vector3f f_des_world = R * f_des_body;   // for throttle-norm debug only
+
+	publish_wrench(f_des_body, tau_des, timestamp_sample);
+	publish_setpoints(f_des_world, f_des_body, tau_des, _q_att_ref, Vector3f(0.f, 0.f, 0.f), omega,
+			  timestamp_sample);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Position mode: cascaded position outer loop + velocity inner loop (closed loop).
+// Requires a valid position estimate (GPS / optical-flow / VIO). Stick centered → hold.
+// ─────────────────────────────────────────────────────────────────────────────
+void GeoControl::control_step_position(const Quatf &R_q, const Vector3f &pos,
+				       const Vector3f &vel, const Vector3f &omega,
+				       uint64_t timestamp_sample)
+{
+	// Same no-RC fallback as manual mode: keep the last/zero setpoint so the
+	// position loop holds hover instead of bailing out with a zero wrench.
+	manual_control_setpoint_s manual_sp{};
+	const bool has_manual = _sub_manual_control_sp.update(&manual_sp) && manual_sp.valid;
 
 	const float dt = math::constrain(static_cast<float>((hrt_absolute_time() - _last_run) * 1e-6f),
 					 0.001f, 0.05f);
@@ -166,21 +324,44 @@ void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &vel,
 	const float dz = _param_gc_man_dz.get();
 	const float mass = _param_gc_mass.get();
 
-	// Apply deadzone then scale: stick [-1,1] → angular rate [rad/s]
-	const float p_sp = math::deadzone(manual_sp.roll,  dz) * rate_max;
-	const float q_sp = math::deadzone(manual_sp.pitch, dz) * rate_max;
-	const float r_sp = math::deadzone(manual_sp.yaw,   dz) * rate_max;
-	Vector3f omega_sp(p_sp, q_sp, r_sp);
+	float p_sp = 0.f;
+	float q_sp = 0.f;
+	float r_sp = 0.f;
+	float vx_sp_b = 0.f;
+	float vy_sp_b = 0.f;
+	float vz_sp_b = 0.f;
 
-	// Apply deadzone then scale: aux stick [-1,1] → body velocity [m/s]
-	const float vx_sp_b = math::deadzone(manual_sp.aux1, dz) * vel_max;
-	const float vy_sp_b = math::deadzone(manual_sp.aux2, dz) * vel_max;
-	const float vz_sp_b = math::deadzone(manual_sp.aux3, dz) * vel_max;
+	if (has_manual) {
+		// Attitude: stick [-1,1] → angular rate [rad/s]
+		p_sp = math::deadzone(manual_sp.roll,  dz) * rate_max;
+		q_sp = math::deadzone(manual_sp.pitch, dz) * rate_max;
+		r_sp = math::deadzone(manual_sp.yaw,   dz) * rate_max;
+
+		// Stick [-1,1] → body velocity [m/s] (aux1/aux2 horizontal, throttle vertical)
+		vx_sp_b = math::deadzone(manual_sp.aux1, dz) * vel_max;
+		vy_sp_b = math::deadzone(manual_sp.aux2, dz) * vel_max;
+		vz_sp_b = math::deadzone(manual_sp.throttle, dz) * vel_max;
+	}
+
+	Vector3f omega_sp(p_sp, q_sp, r_sp);
 	Vector3f vel_sp_body(vx_sp_b, vy_sp_b, vz_sp_b);
 
-	// Convert velocity setpoint to NED world frame
 	const Dcmf R(R_q);
-	Vector3f vel_sp_world = R * vel_sp_body;
+	Vector3f vel_sp_world_stick = R * vel_sp_body;
+
+	// Position outer loop: maintain a position setpoint. Follow the stick velocity
+	// while the pilot is commanding motion; hold the current position when neutral.
+	if (!_pos_sp_init) {
+		_pos_sp = pos;
+		_pos_sp_init = true;
+	}
+
+	if (vel_sp_world_stick.norm() > 0.05f) {
+		_pos_sp += vel_sp_world_stick * dt;
+	}
+
+	Vector3f kp_pos(_param_gc_xy_p.get(), _param_gc_xy_p.get(), _param_gc_z_p.get());
+	Vector3f vel_sp_world = vel_sp_world_stick + kp_pos.emult(_pos_sp - pos);
 
 	// Integrate rate commands into attitude reference (quaternion integration)
 	const Vector3f omega_vec(omega_sp(0), omega_sp(1), omega_sp(2));
@@ -198,10 +379,10 @@ void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &vel,
 	}
 
 	// ── Velocity loop → desired force ──
-	Vector3f kp(_param_gc_xy_vel_p.get(), _param_gc_xy_vel_p.get(), _param_gc_z_vel_p.get());
+	Vector3f kv(_param_gc_xy_vel_p.get(), _param_gc_xy_vel_p.get(), _param_gc_z_vel_p.get());
 	Vector3f e_v = vel - vel_sp_world;
 	Vector3f g(0.f, 0.f, 9.81f);
-	Vector3f f_des_world = -kp.emult(e_v) - _vel_int + mass * g;
+	Vector3f f_des_world = -kv.emult(e_v) - _vel_int - mass * g;
 	Vector3f f_des_body = R.transpose() * f_des_world;
 
 	// ── Attitude loop → desired torque ──
@@ -220,7 +401,6 @@ void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &vel,
 	Vector3f omega_d_in_B = R.transpose() * R_sp * omega_sp;
 	Vector3f e_omega = omega - omega_d_in_B;
 
-	// Update integrators (only when airborne)
 	if (!_landed) {
 		updateIntegrators(e_omega, e_v, dt);
 	}
@@ -228,6 +408,7 @@ void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &vel,
 	Vector3f tau_des = -kR.emult(e_R) - kOmega.emult(e_omega) + _rate_int + omega.cross(J * omega);
 
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
+	publish_setpoints(f_des_world, f_des_body, tau_des, _q_att_ref, vel_sp_world, omega, timestamp_sample);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -270,7 +451,7 @@ void GeoControl::control_step_offboard(const Quatf &R_q, const Vector3f &pos,
 	Vector3f e_p = pos - pos_sp;
 	Vector3f e_v = vel - vel_sp;
 	Vector3f g(0.f, 0.f, 9.81f);
-	Vector3f f_des_world = -kp.emult(e_p) - kv.emult(e_v) - _vel_int + mass * g + mass * acc_sp;
+	Vector3f f_des_world = -kp.emult(e_p) - kv.emult(e_v) - _vel_int - mass * g + mass * acc_sp;
 	Vector3f f_des_body = R.transpose() * f_des_world;
 
 	// ── Attitude loop → desired torque ──
@@ -296,6 +477,7 @@ void GeoControl::control_step_offboard(const Quatf &R_q, const Vector3f &pos,
 	Vector3f tau_des = -kR.emult(e_R) - kOmega.emult(e_omega) + _rate_int + omega.cross(J * omega);
 
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
+	publish_setpoints(f_des_world, f_des_body, tau_des, Quatf(R_sp), vel_sp, omega, timestamp_sample);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -332,7 +514,7 @@ void GeoControl::control_step_auto(const Quatf &R_q, const Vector3f &pos,
 	Vector3f e_p = pos - pos_sp;
 	Vector3f e_v = vel - vel_sp;
 	Vector3f g(0.f, 0.f, 9.81f);
-	Vector3f f_des_world = -kp.emult(e_p) - kv.emult(e_v) - _vel_int + mass * g + mass * acc_sp;
+	Vector3f f_des_world = -kp.emult(e_p) - kv.emult(e_v) - _vel_int - mass * g + mass * acc_sp;
 	Vector3f f_des_body = R.transpose() * f_des_world;
 
 	// ── Attitude loop → desired torque ──
@@ -358,20 +540,19 @@ void GeoControl::control_step_auto(const Quatf &R_q, const Vector3f &pos,
 	Vector3f tau_des = -kR.emult(e_R) - kOmega.emult(e_omega) + _rate_int + omega.cross(J * omega);
 
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
+	publish_setpoints(f_des_world, f_des_body, tau_des, Quatf(R_sp), vel_sp, omega, timestamp_sample);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Main control dispatch
 // ─────────────────────────────────────────────────────────────────────────────
-void GeoControl::control_step()
+void GeoControl::control_step(const vehicle_local_position_s &local_pos)
 {
 	vehicle_attitude_s att;
 	vehicle_angular_velocity_s angular_vel;
-	vehicle_local_position_s local_pos;
 	vehicle_status_s vehicle_status{};
 
-	if (!_sub_vehicle_local_position.update(&local_pos) ||
-	    !_sub_vehicle_attitude.update(&att) ||
+	if (!_sub_vehicle_attitude.update(&att) ||
 	    !_sub_vehicle_angular_velocity.update(&angular_vel)) {
 		return;
 	}
@@ -387,9 +568,18 @@ void GeoControl::control_step()
 
 	_armed = vehicle_status.arming_state == vehicle_status.ARMING_STATE_ARMED;
 
-	// Reset integrators when disarmed
+	// 未解锁时:清零积分器并发布零 wrench,使执行器处于中立初值
+	// (否则会发布悬停推力 + 姿态保持力矩,导致分配器在零推力退化点把舵机推到饱和)
 	if (!_armed) {
 		resetIntegrators();
+		_pos_sp_init = false;   // re-init position hold setpoint on next arm
+		publish_wrench(matrix::Vector3f(0.f, 0.f, 0.f), matrix::Vector3f(0.f, 0.f, 0.f),
+			       local_pos.timestamp_sample);
+		publish_setpoints(matrix::Vector3f(0.f, 0.f, 0.f), matrix::Vector3f(0.f, 0.f, 0.f),
+				  matrix::Vector3f(0.f, 0.f, 0.f), matrix::Quatf(1.f, 0.f, 0.f, 0.f),
+				  matrix::Vector3f(0.f, 0.f, 0.f), matrix::Vector3f(0.f, 0.f, 0.f),
+				  local_pos.timestamp_sample);
+		return;
 	}
 
 	// Update saturation feedback from control allocator
@@ -437,13 +627,20 @@ void GeoControl::control_step()
 	if (vehicle_status.nav_state == vehicle_status.NAVIGATION_STATE_MANUAL) {
 		mode = ControlMode::MANUAL;
 
+	} else if (vehicle_status.nav_state == vehicle_status.NAVIGATION_STATE_POSCTL) {
+		mode = ControlMode::POSITION;
+
 	} else if (vehicle_status.nav_state == vehicle_status.NAVIGATION_STATE_OFFBOARD) {
 		mode = ControlMode::OFFBOARD;
 	}
 
 	switch (mode) {
 	case ControlMode::MANUAL:
-		control_step_manual(R_q, vel, omega, local_pos.timestamp_sample);
+		control_step_manual(R_q, omega, local_pos.timestamp_sample);
+		break;
+
+	case ControlMode::POSITION:
+		control_step_position(R_q, pos, vel, omega, local_pos.timestamp_sample);
 		break;
 
 	case ControlMode::OFFBOARD:
@@ -472,7 +669,7 @@ void GeoControl::Run()
 
 	if (_sub_vehicle_local_position.update(&local_pos)) {
 		_last_run = local_pos.timestamp_sample;
-		control_step();
+		control_step(local_pos);
 	}
 
 	perf_end(_loop_perf);

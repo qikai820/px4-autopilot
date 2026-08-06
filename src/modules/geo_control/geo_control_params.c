@@ -162,6 +162,19 @@ PARAM_DEFINE_FLOAT(GC_MAN_VEL_MAX, 5.0);
 PARAM_DEFINE_FLOAT(GC_MAN_DZ, 0.1);
 
 /**
+ * Geometric Controller Manual Mode Max Body Force
+ *
+ * Maximum body-frame force magnitude per axis commanded by the sticks in
+ * Manual (force open-loop) mode. aux1/aux2 command body x/y force, throttle
+ * commands body z force (center = hover trim -mass*g, up = climb).
+ * Keep below the available thrust margin (N_rotors * CA_MQ_TMAX - mass*g).
+ *
+ * @unit N
+ * @group Geometric Controller
+ */
+PARAM_DEFINE_FLOAT(GC_MAN_FMAX, 20.0);
+
+/**
  * Geometric Controller Rate/Angle Integral Gain
  *
  * Integral gain for the attitude/rate error integrator (torque loop).
@@ -196,3 +209,15 @@ PARAM_DEFINE_FLOAT(GC_VEL_I, 0.5);
  * @group Geometric Controller
  */
 PARAM_DEFINE_FLOAT(GC_VEL_INT_LIM, 2.0);
+
+/**
+ * Geometric Controller Total Maximum Thrust
+ *
+ * Sum of the maximum thrust of every rotor. Used to normalize the desired
+ * force into a [0,1] collective-throttle estimate for the debug setpoints.
+ * Should equal N_rotors * CA_MQ_TMAX (4 * 27.5 = 110 N for the morphquad).
+ *
+ * @unit N
+ * @group Geometric Controller
+ */
+PARAM_DEFINE_FLOAT(GC_THRUST_MAX, 110.0);

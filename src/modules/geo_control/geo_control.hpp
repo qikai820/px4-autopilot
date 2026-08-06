@@ -46,6 +46,7 @@
 #include <uORB/topics/vehicle_angular_velocity.h>
 #include <uORB/topics/vehicle_local_position.h>
 #include <uORB/topics/vehicle_local_position_setpoint.h>
+#include <uORB/topics/vehicle_angular_acceleration_setpoint.h>
 #include <uORB/topics/vehicle_thrust_setpoint.h>
 #include <uORB/topics/vehicle_torque_setpoint.h>
 #include <uORB/topics/vehicle_status.h>
@@ -76,15 +77,20 @@ private:
 	enum class ControlMode {
 		MANUAL = 0,
 		OFFBOARD = 1,
-		AUTO = 2
+		AUTO = 2,
+		POSITION = 3
 	};
 
 	void Run() override;
 	void parameters_update(bool force = false);
-	void control_step();
+	void control_step(const vehicle_local_position_s &local_pos);
 
-	void control_step_manual(const matrix::Quatf &R_q, const matrix::Vector3f &vel,
-				 const matrix::Vector3f &omega, uint64_t timestamp_sample);
+	void control_step_manual(const matrix::Quatf &R_q, const matrix::Vector3f &omega,
+				 uint64_t timestamp_sample);
+
+	void control_step_position(const matrix::Quatf &R_q, const matrix::Vector3f &pos,
+				   const matrix::Vector3f &vel, const matrix::Vector3f &omega,
+				   uint64_t timestamp_sample);
 
 	void control_step_offboard(const matrix::Quatf &R_q, const matrix::Vector3f &pos,
 				   const matrix::Vector3f &vel, const matrix::Vector3f &omega,
@@ -96,6 +102,17 @@ private:
 
 	void publish_wrench(const matrix::Vector3f &f_des_body, const matrix::Vector3f &tau_des,
 			    uint64_t timestamp_sample);
+
+	/**
+	 * Publish debug setpoints (local-position / attitude / angular-acceleration) so the
+	 * desired wrench can be inspected with `listener`/ulog. The normalized throttle estimate
+	 * (hover≈0.4, full≈1.0, matching the morphquad esc table) is filled into
+	 * vehicle_local_position_setpoint.thrust[3] and vehicle_attitude_setpoint.thrust_body[3].
+	 */
+	void publish_setpoints(const matrix::Vector3f &f_des_world, const matrix::Vector3f &f_des_body,
+			       const matrix::Vector3f &tau_des, const matrix::Quatf &q_att_ref,
+			       const matrix::Vector3f &vel_sp_world, const matrix::Vector3f &omega,
+			       uint64_t timestamp_sample);
 
 	/**
 	 * Update integrators with anti-windup from actuator saturation feedback.
@@ -128,6 +145,9 @@ private:
 	// uORB Publications
 	uORB::Publication<vehicle_thrust_setpoint_s> _thrust_pub{ORB_ID(vehicle_thrust_setpoint)};
 	uORB::Publication<vehicle_torque_setpoint_s> _torque_pub{ORB_ID(vehicle_torque_setpoint)};
+	uORB::Publication<vehicle_local_position_setpoint_s> _local_pos_sp_pub{ORB_ID(vehicle_local_position_setpoint)};
+	uORB::Publication<vehicle_attitude_setpoint_s> _att_sp_pub{ORB_ID(vehicle_attitude_setpoint)};
+	uORB::Publication<vehicle_angular_acceleration_setpoint_s> _ang_accel_sp_pub{ORB_ID(vehicle_angular_acceleration_setpoint)};
 
 	// Parameters (GC_ prefix)
 	DEFINE_PARAMETERS(
@@ -149,7 +169,9 @@ private:
 		(ParamFloat<px4::params::GC_RATE_I>) _param_gc_rate_i,
 		(ParamFloat<px4::params::GC_RATE_INT_LIM>) _param_gc_rate_int_lim,
 		(ParamFloat<px4::params::GC_VEL_I>) _param_gc_vel_i,
-		(ParamFloat<px4::params::GC_VEL_INT_LIM>) _param_gc_vel_int_lim
+		(ParamFloat<px4::params::GC_VEL_INT_LIM>) _param_gc_vel_int_lim,
+		(ParamFloat<px4::params::GC_THRUST_MAX>) _param_gc_thrust_max,
+		(ParamFloat<px4::params::GC_MAN_FMAX>) _param_gc_man_fmax
 	)
 
 	// Integrator states
@@ -168,6 +190,10 @@ private:
 
 	// Manual mode: integrated attitude reference from rate commands
 	matrix::Quatf _q_att_ref{1.f, 0.f, 0.f, 0.f};
+
+	// Position mode: integrated position setpoint for hold (re-init on (re)arm)
+	matrix::Vector3f _pos_sp{};
+	bool _pos_sp_init{false};
 
 	hrt_abstime _last_run{0};
 	perf_counter_t _loop_perf;
