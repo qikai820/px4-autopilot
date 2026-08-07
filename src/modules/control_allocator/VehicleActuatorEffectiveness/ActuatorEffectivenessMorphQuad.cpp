@@ -162,70 +162,121 @@ void ActuatorEffectivenessMorphQuad::computeThrustVectors(
 {
 	const float l = _param_ca_mq_l.get();
 	const float b = _param_ca_mq_b.get();
-	const float r = sqrtf(l * l + b * b);
-	const float gimbal_lock_gain = _param_ca_mq_glg.get();
-	const float downwash_gain = _param_ca_mq_dwg.get();
 
-	// X-layout sign patterns (rotor order: RF=0, LF=1, LB=2, RB=3, counter-clockwise from RF)
-	// roll_sign:  +1 for rotors on the -y side (LF, LB), -1 for +y side (RF, RB)
-	const float roll_sign[NUM_ROTORS]  = {-1.0f, +1.0f, +1.0f, -1.0f};
-	// pitch_sign: -1 for front (+x), +1 for back (-x)
-	const float pitch_sign[NUM_ROTORS] = {-1.0f, -1.0f, +1.0f, +1.0f};
+	// Rotor arm positions (X-layout: RF, LF, LB, RB, CCW from RF)
+	const float lx[NUM_ROTORS] = { l,  l, -l, -l};
+	const float ly[NUM_ROTORS] = { b, -b, -b,  b};
 
-	// Yaw unit vectors (Eq.13): perpendicular to rotor arm in xy-plane
-	// e_psi_i = [-l_iy/r, +l_ix/r, 0]
-	// Rotor positions: RF(+l,+b), LF(+l,-b), LB(-l,-b), RB(-l,+b)
-	const float eps_x[NUM_ROTORS] = { b / r, -b / r, -b / r,  b / r};
-	const float eps_y[NUM_ROTORS] = { l / r,  l / r, -l / r, -l / r};
+	// Wrench W = [force; torque] (body frame, Newtons / N·m)
+	matrix::Vector<float, 6> W;
+	W(0) = f_des(0); W(1) = f_des(1); W(2) = f_des(2);
+	W(3) = tau_des(0); W(4) = tau_des(1); W(5) = tau_des(2);
 
-	// Step 1: Minimum-norm decomposition (Eq.12)
+	// ── Build the allocation matrix A_g(q) from the CURRENT (warm-started) ──
+	// ── gimbal angles.  f_i = T_i g_i ,  τ_i = r_i × f_i  ⇒  W = A_g T.   ──
+	// g_i = R_x(α_i) R_y(β_i) e_3 — must match recoverServoAngles() forward kinematics.
+	matrix::Matrix<float, 6, NUM_ROTORS> A_g;
 	for (int i = 0; i < NUM_ROTORS; ++i) {
-		// Force sharing + roll torque + yaw torque (tangential)
-		t_out[i][0] = f_des(0) / 4.0f
-			      + roll_sign[i] * tau_des(0) / (4.0f * b)
-			      + tau_des(2) * eps_x[i] / (4.0f * r);
-
-		// Force sharing + pitch torque + yaw torque (tangential)
-		// Corrected sign: pitch contribution uses -pitch_sign to match
-		// the wrench equation tau_y = sum(l_ix * t_iz - l_iz * t_ix)
-		t_out[i][1] = f_des(1) / 4.0f
-			      - pitch_sign[i] * tau_des(1) / (4.0f * l)
-			      + tau_des(2) * eps_y[i] / (4.0f * r);
-
-		// z-component: only force sharing (torque from z-force is coupled
-		// with roll/pitch through arm offsets, handled by the above terms)
-		t_out[i][2] = f_des(2) / 4.0f;
+		const float sa = sinf(_alpha_prev[i]);
+		const float ca = cosf(_alpha_prev[i]);
+		const float sb = sinf(_beta_prev[i]);
+		const float cb = cosf(_beta_prev[i]);
+		const Vector3f g(sa * cb, sb, -ca * cb);
+		A_g(0, i) = g(0); A_g(1, i) = g(1); A_g(2, i) = g(2);
+		const Vector3f r_i(lx[i], ly[i], 0.f);
+		const Vector3f r_cross_g = r_i.cross(g);
+		A_g(3, i) = r_cross_g(0); A_g(4, i) = r_cross_g(1); A_g(5, i) = r_cross_g(2);
 	}
 
-	// Step 2: Null-space correction (Eq.15-16)
-	const float f_norm = f_des.norm();
+	// ── Step 1: minimum-norm thrust magnitudes u0 = A_g^+ W ──
+	matrix::Matrix<float, NUM_ROTORS, 6> A_pinv;
 
-	if (f_norm > 0.01f) {
-		const float f_hat_y = f_des(1) / f_norm;
-		const float f_hat_x = f_des(0) / f_norm;
+	if (!matrix::geninv(A_g, A_pinv)) {
+		// Degenerate geometry (should not happen): fall back to zero thrust.
+		for (int i = 0; i < NUM_ROTORS; ++i) { t_out[i][0] = t_out[i][1] = t_out[i][2] = 0.f; }
 
-		// (a) Gimbal lock avoidance: repel beta_i away from +/-pi/2
-		// When f is aligned with j^B (y-axis), inner servo loses control.
-		// Add alternating y-component correction proportional to |f_hat . j^B|.
-		const float y_corr = gimbal_lock_gain * fabsf(f_hat_y) * f_norm / 4.0f;
+		return;
+	}
 
+	const matrix::Vector<float, NUM_ROTORS> u0 = A_pinv * W;
+
+	// ── Null space N = I - A_g^+ A_g. Any z in this space satisfies A_g N z = 0, ──
+	// ── so u = u0 + N z realises the SAME wrench W (ANz = 0 is guaranteed,   ──
+	// ── unlike the previous ad-hoc component perturbations).                   ──
+	const matrix::Matrix<float, NUM_ROTORS, NUM_ROTORS> I = matrix::eye<float, NUM_ROTORS>();
+	const matrix::Matrix<float, NUM_ROTORS, NUM_ROTORS> N_mat = I - A_pinv * A_g;
+
+	// ── Step 2: null-space optimisation — minimise a cost J(u) over the ──
+	// ── redundant DOF by gradient descent: z = -k * grad(J).            ──
+	// Cost terms with non-zero gradient w.r.t. u (so the projection bites):
+	//   • motor power : J_pow = w_pow * Σ u_i^2        → ∂/∂u_i = 2 w_pow u_i
+	//   • downwash    : J_dw  = w_dw  * Σ d_ij u_i u_j → ∂/∂u_i = w_dw Σ (d_ij+d_ji) u_j
+	// (Gimbal-lock / servo-angle avoidance is directional (α,β) and handled by the
+	//  IK branch selection in recoverServoAngles(); it is not part of this 4-DOF u-space.)
+	const float w_pow = _param_ca_mq_ns_pow.get();
+	const float w_dw  = _param_ca_mq_dwg.get();
+
+	// Downwash interaction weights d_ij: rotor j sits in the slipstream of rotor i
+	// when j is downstream of i's thrust axis and close to it.
+	float d_ij[NUM_ROTORS][NUM_ROTORS] {};
+
+	if (w_dw > 0.f) {
 		for (int i = 0; i < NUM_ROTORS; ++i) {
-			// Alternating sign: (-1)^i
-			const float sign = (i % 2 == 0) ? 1.0f : -1.0f;
-			t_out[i][1] += sign * y_corr;
-		}
+			const float sa = sinf(_alpha_prev[i]);
+			const float ca = cosf(_alpha_prev[i]);
+			const float sb = sinf(_beta_prev[i]);
+			const float cb = cosf(_beta_prev[i]);
+			const Vector3f g_i(sa * cb, sb, -ca * cb);
 
-		// (b) Downwash avoidance: break thrust collinearity when f || i^B
-		// When |f_hat . i^B| > 0.7, add alternating x-component to front/back pairs.
-		if (fabsf(f_hat_x) > 0.7f) {
-			const float x_corr = downwash_gain * fabsf(f_hat_x) * f_norm / 10.0f;
+			for (int j = 0; j < NUM_ROTORS; ++j) {
+				if (i == j) { continue; }
 
-			for (int i = 0; i < NUM_ROTORS; ++i) {
-				// Front pair (0,1): +x_corr, Back pair (2,3): -x_corr
-				const float sign = (i < 2) ? 1.0f : -1.0f;
-				t_out[i][0] += sign * x_corr;
+				const Vector3f rel(lx[j] - lx[i], ly[j] - ly[i], 0.f);
+				const float along = -rel.dot(g_i);   // >0: j downstream of i
+
+				if (along <= 0.f) { continue; }
+
+				const float perp = sqrtf(math::max(rel.dot(rel) - along * along, 0.f));
+				d_ij[i][j] = along / (perp + 0.05f);
 			}
 		}
+	}
+
+	matrix::Vector<float, NUM_ROTORS> grad_J{};
+
+	for (int i = 0; i < NUM_ROTORS; ++i) {
+		grad_J(i) += 2.f * w_pow * u0(i);
+
+		if (w_dw > 0.f) {
+			float g_dw = 0.f;
+
+			for (int j = 0; j < NUM_ROTORS; ++j) {
+				if (i == j) { continue; }
+
+				g_dw += (d_ij[i][j] + d_ij[j][i]) * u0(j);
+			}
+
+			grad_J(i) += w_dw * g_dw;
+		}
+	}
+
+	const float k_ns = _param_ca_mq_ns_gain.get();
+	const matrix::Vector<float, NUM_ROTORS> z = -k_ns * grad_J;
+	const matrix::Vector<float, NUM_ROTORS> u = u0 + N_mat * z;
+
+	// Reconstruct the thrust VECTOR from the optimised magnitude and the current
+	// direction. Negative thrust is unphysical — clamp. Downstream IK keeps the
+	// recovered α,β consistent with this direction.
+	for (int i = 0; i < NUM_ROTORS; ++i) {
+		const float T_i = math::max(u(i), 0.f);
+		const float sa = sinf(_alpha_prev[i]);
+		const float ca = cosf(_alpha_prev[i]);
+		const float sb = sinf(_beta_prev[i]);
+		const float cb = cosf(_beta_prev[i]);
+		const Vector3f g(sa * cb, sb, -ca * cb);
+		t_out[i][0] = T_i * g(0);
+		t_out[i][1] = T_i * g(1);
+		t_out[i][2] = T_i * g(2);
 	}
 }
 

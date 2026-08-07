@@ -66,9 +66,10 @@ private:
 		(ParamFloat<px4::params::CA_MQ_OMAX>)  _param_ca_mq_omax,   ///< max motor speed [rad/s]
 		(ParamFloat<px4::params::CA_MQ_ALPM>)  _param_ca_mq_alpm,   ///< max alpha servo angle [deg]
 		(ParamFloat<px4::params::CA_MQ_BETM>)  _param_ca_mq_betm,   ///< max beta servo angle [deg]
-		(ParamFloat<px4::params::CA_MQ_GLG>)   _param_ca_mq_glg,    ///< gimbal lock avoidance gain
-		(ParamFloat<px4::params::CA_MQ_DWG>)   _param_ca_mq_dwg,    ///< downwash avoidance gain
-		(ParamFloat<px4::params::CA_MQ_TMAX>)  _param_ca_mq_tmax    ///< max per-rotor thrust at full throttle [N]
+		(ParamFloat<px4::params::CA_MQ_DWG>)   _param_ca_mq_dwg,    ///< downwash cost weight (null-space)
+		(ParamFloat<px4::params::CA_MQ_TMAX>)  _param_ca_mq_tmax,   ///< max per-rotor thrust at full throttle [N]
+		(ParamFloat<px4::params::CA_MQ_NS_GAIN>) _param_ca_mq_ns_gain, ///< null-space descent gain k
+		(ParamFloat<px4::params::CA_MQ_NS_POW>)  _param_ca_mq_ns_pow   ///< null-space motor-power cost weight
 	)
 
 	// Previous servo angles for minimal-motion selection

@@ -681,20 +681,6 @@ parameters:
             max: 180
             default: 180
 
-        CA_MQ_GLG:
-            description:
-                short: Gimbal lock avoidance gain
-                long: |
-                  Null-space correction gain that repels the inner servo angle
-                  away from +/-90 deg to avoid gimbal lock singularity.
-                  Set to 0 to disable.
-            type: float
-            decimal: 2
-            increment: 0.05
-            min: 0
-            max: 1.0
-            default: 0.3
-
         CA_MQ_DWG:
             description:
                 short: Downwash avoidance gain
@@ -726,6 +712,35 @@ parameters:
             min: 1.0
             max: 200.0
             default: 27.5
+
+        CA_MQ_NS_GAIN:
+            description:
+                short: Null-space descent gain
+                long: |
+                  Gradient-descent step size k for the null-space optimisation
+                  u = u0 + N z, z = -k*grad(J). The projection guarantees the
+                  wrench is preserved (A N z = 0) for any k; this only sets how
+                  aggressively redundant DOF are traded off.
+            type: float
+            decimal: 3
+            increment: 0.05
+            min: 0
+            max: 2.0
+            default: 0.5
+
+        CA_MQ_NS_POW:
+            description:
+                short: Null-space motor-power cost weight
+                long: |
+                  Weight w_pow on the motor-power cost J_pow = w_pow * sum(T_i^2)
+                  minimised in the allocation null space. Higher favours lower
+                  total rotor speed for the same wrench.
+            type: float
+            decimal: 3
+            increment: 0.1
+            min: 0
+            max: 10.0
+            default: 1.0
 
 # Mixer
 mixer:
