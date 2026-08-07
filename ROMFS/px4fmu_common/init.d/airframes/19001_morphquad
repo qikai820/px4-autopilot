@@ -11,8 +11,9 @@
 #
 # Actuator mapping:
 #   Motors 0-3:  rotor speeds (Omega_0 .. Omega_3)
-#   Servos 0-3:  outer gimbal servos (alpha_0 .. alpha_3)
-#   Servos 4-7:  inner gimbal servos (beta_0 .. beta_3)
+#   Servos 0-7:  per-motor interleaved gimbal servos:
+#               alpha_0, beta_0, alpha_1, beta_1, alpha_2, beta_2, alpha_3, beta_3
+#               (outer alpha_i at actuator_sp[4+2i], inner beta_i at actuator_sp[5+2i])
 #
 # Control allocation is handled by ActuatorEffectivenessMorphQuad
 # using Pattern B (custom updateSetpoint override).
@@ -35,12 +36,22 @@ param set-default PWM_MAIN_FUNC1 101
 param set-default PWM_MAIN_FUNC2 102
 param set-default PWM_MAIN_FUNC3 103
 param set-default PWM_MAIN_FUNC4 104
-# Outer gimbal servos (alpha): channels 5-8
+# ── Servo (gimbal) channel mapping ──
+# 舵机按"先外后内、逐电机"交错编号, 与 ActuatorEffectivenessMorphQuad 一致。
+# 函数号 201..208 依次对应 actuator_sp[4..11], 因此物理通道顺序即为交错布局:
+#   PWM channel  5 (FUNC 201) = 电机0 外舵机 α0  (actuator_sp[4])
+#   PWM channel  6 (FUNC 202) = 电机0 内舵机 β0  (actuator_sp[5])
+#   PWM channel  7 (FUNC 203) = 电机1 外舵机 α1  (actuator_sp[6])
+#   PWM channel  8 (FUNC 204) = 电机1 内舵机 β1  (actuator_sp[7])
+#   PWM channel  9 (FUNC 205) = 电机2 外舵机 α2  (actuator_sp[8])
+#   PWM channel 10 (FUNC 206) = 电机2 内舵机 β2  (actuator_sp[9])
+#   PWM channel 11 (FUNC 207) = 电机3 外舵机 α3  (actuator_sp[10])
+#   PWM channel 12 (FUNC 208) = 电机3 内舵机 β3  (actuator_sp[11])
+# 注意: 物理舵机接线需按此顺序(α0,β0,α1,β1,α2,β2,α3,β3)连接 PWM 5-12。
 param set-default PWM_MAIN_FUNC5 201
 param set-default PWM_MAIN_FUNC6 202
 param set-default PWM_MAIN_FUNC7 203
 param set-default PWM_MAIN_FUNC8 204
-# Inner gimbal servos (beta): channels 9-12
 param set-default PWM_MAIN_FUNC9 205
 param set-default PWM_MAIN_FUNC10 206
 param set-default PWM_MAIN_FUNC11 207
