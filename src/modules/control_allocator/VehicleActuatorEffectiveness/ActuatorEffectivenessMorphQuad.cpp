@@ -128,8 +128,8 @@ void ActuatorEffectivenessMorphQuad::updateSetpoint(
 
 		actuator_sp(i) = motor_clamped;
 
-		// Outer servo (alpha) saturation check
-		const int alpha_idx = NUM_ROTORS + i;
+		// Outer servo (alpha) — interleaved per motor: actuator_sp[4 + 2*i]
+		const int alpha_idx = 4 + 2 * i;
 		const float alpha_clamped = math::constrain(alpha_raw[i], actuator_min(alpha_idx), actuator_max(alpha_idx));
 
 		if (fabsf(alpha_clamped - alpha_raw[i]) > FLT_EPSILON) {
@@ -138,8 +138,8 @@ void ActuatorEffectivenessMorphQuad::updateSetpoint(
 
 		actuator_sp(alpha_idx) = alpha_clamped;
 
-		// Inner servo (beta) saturation check
-		const int beta_idx = 2 * NUM_ROTORS + i;
+		// Inner servo (beta) — interleaved per motor: actuator_sp[5 + 2*i]
+		const int beta_idx = 5 + 2 * i;
 		const float beta_clamped = math::constrain(beta_raw[i], actuator_min(beta_idx), actuator_max(beta_idx));
 
 		if (fabsf(beta_clamped - beta_raw[i]) > FLT_EPSILON) {
@@ -165,16 +165,16 @@ void ActuatorEffectivenessMorphQuad::computeThrustVectors(
 	const float gimbal_lock_gain = _param_ca_mq_glg.get();
 	const float downwash_gain = _param_ca_mq_dwg.get();
 
-	// X-layout sign patterns (rotor order: FR=0, FL=1, BL=2, BR=3)
-	// roll_sign:  +1 for rotors on the -y side (FR, BR), -1 for +y side (FL, BL)
-	const float roll_sign[NUM_ROTORS]  = {+1.0f, -1.0f, -1.0f, +1.0f};
+	// X-layout sign patterns (rotor order: RF=0, LF=1, LB=2, RB=3, counter-clockwise from RF)
+	// roll_sign:  +1 for rotors on the -y side (LF, LB), -1 for +y side (RF, RB)
+	const float roll_sign[NUM_ROTORS]  = {-1.0f, +1.0f, +1.0f, -1.0f};
 	// pitch_sign: -1 for front (+x), +1 for back (-x)
 	const float pitch_sign[NUM_ROTORS] = {-1.0f, -1.0f, +1.0f, +1.0f};
 
 	// Yaw unit vectors (Eq.13): perpendicular to rotor arm in xy-plane
 	// e_psi_i = [-l_iy/r, +l_ix/r, 0]
-	// Rotor positions: FR(+l,-b), FL(+l,+b), BL(-l,+b), BR(-l,-b)
-	const float eps_x[NUM_ROTORS] = {-b / r,  b / r,  b / r, -b / r};
+	// Rotor positions: RF(+l,+b), LF(+l,-b), LB(-l,-b), RB(-l,+b)
+	const float eps_x[NUM_ROTORS] = { b / r, -b / r, -b / r,  b / r};
 	const float eps_y[NUM_ROTORS] = { l / r,  l / r, -l / r, -l / r};
 
 	// Step 1: Minimum-norm decomposition (Eq.12)
@@ -343,14 +343,15 @@ void ActuatorEffectivenessMorphQuad::computeUnallocatedWrench(
 	Vector3f f_achieved(0.f, 0.f, 0.f);
 	Vector3f tau_achieved(0.f, 0.f, 0.f);
 
-	// Rotor positions (X-layout: FR, FL, BL, BR)
+	// Rotor positions (X-layout: RF, LF, LB, RB, counter-clockwise from RF)
 	const float lx[NUM_ROTORS] = { l,  l, -l, -l};
-	const float ly[NUM_ROTORS] = {-b,  b,  b, -b};
+	const float ly[NUM_ROTORS] = { b, -b, -b,  b};
 
 	for (int i = 0; i < NUM_ROTORS; ++i) {
 		// Recover actual alpha, beta from saturated actuator outputs
-		const float alpha_actual = actuator_sp(NUM_ROTORS + i) * M_PI_F;
-		const float beta_actual = actuator_sp(2 * NUM_ROTORS + i) * M_PI_F;
+		// (interleaved per motor: alpha at 4+2*i, beta at 5+2*i)
+		const float alpha_actual = actuator_sp(4 + 2 * i) * M_PI_F;
+		const float beta_actual  = actuator_sp(5 + 2 * i) * M_PI_F;
 
 		// Achieved thrust magnitude: actuator_sp(i) is the normalized thrust
 		// fraction in [0,1] (esc-cmd-norm), so T = fraction * TMAX.

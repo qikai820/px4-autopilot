@@ -72,7 +72,7 @@ bool getEffectivenessMatrix(Configuration &configuration,
 **行为**：
 - 仅在 `external_update != NO_EXTERNAL_UPDATE` 时执行（几何结构静态）
 - 注册 4 个电机（推力方向 `[0, 0, -1]`，NED 下 -z = 向上）
-- 注册 4 个舵机（占位，实际分配在 `updateSetpoint` 中完成）
+- 注册 8 个舵机（4 外 $\alpha$ + 4 内 $\beta$，实际分配在 `updateSetpoint` 中完成）
 - 返回 `true` 表示矩阵已更新
 
 **设计决策**：采用 **Pattern B**（零矩阵 + `updateSetpoint` 覆盖），原因见算法设计报告 §5.1。
@@ -86,21 +86,22 @@ void updateSetpoint(const Vector<float, NUM_AXES> &control_sp, int matrix_index,
                    const ActuatorVector &actuator_max) override;
 ```
 
-**职责**：核心推力分配入口，将 6D wrench 转换为 8 个执行器指令。
+**职责**：核心推力分配入口，将 6D wrench 转换为 12 个执行器指令（4 电机 + 8 舵机）。
 
 **输入**：
 - `control_sp[6]`：`[roll_torque, pitch_torque, yaw_torque, thrust_x, thrust_y, thrust_z]`
 - `actuator_min[16]`、`actuator_max[16]`：执行器限幅
 
 **输出**：
-- `actuator_sp[0..3]`：电机转速归一化值 [0, 1]
-- `actuator_sp[4..7]`：外舵机角度归一化值 [-1, 1]
+- `actuator_sp[0..3]`：电机 0..3 转速归一化值 [0, 1]
+- `actuator_sp[4 + 2i]`：电机 $i$ 外舵机 $\alpha_i$ 归一化角度 [-1, 1]（$i=0..3$）
+- `actuator_sp[5 + 2i]`：电机 $i$ 内舵机 $\beta_i$ 归一化角度 [-1, 1]（$i=0..3$）
 
 **处理流程**：
 1. 从 `control_sp` 提取 $\mathbf{f}_d$ 和 $\boldsymbol{\tau}_d$
 2. 调用 `computeThrustVectors()` 计算 4 个推力向量
 3. 对每个旋翼调用 `recoverServoAngles()` 反解舵机角度和电机转速
-4. 归一化并写入 `actuator_sp`
+4. 按 §6.2.3 的交错约定归一化并写入 `actuator_sp[0..11]`
 5. 饱和处理（clamp 到 `[min, max]`）
 
 #### `computeThrustVectors()`
@@ -273,19 +274,72 @@ ControlAllocator 订阅这两个话题，构造 6D `control_sp` 向量传入 `up
 
 ![图 6.1  MorphQuad 执行器布局 (机体顶视)](figures/actuator_layout.png)
 
-### 6.2 信号归一化
+### 6.2 执行器编号约定
 
-| 执行器 | 物理量 | 归一化范围 | 归一化公式 |
-|--------|--------|-----------|-----------|
-| 电机 0-3 | $\Omega_i$ [rad/s] | [0, 1] | $\Omega_i / \Omega_{\max}$，$\Omega_{\max} = 1200$ |
-| 舵机 0-3（外） | $\alpha_i$ [rad] | [-1, 1] | $\alpha_i / \pi$ |
-| 舵机 4-7（内） | $\beta_i$ [rad] | [-1, 1] | $\beta_i / \pi$ |
+> 本章节定义 MorphQuad 全部 12 路执行器（4 电机 + 8 舵机）的**唯一编号约定**，作为软件设计与硬件/仿真映射的权威依据。坐标系为机体顶视：$+x$ 指向前方、$+y$ 指向右方。
 
-**注意**：12 路执行器（4 电机 + 4 外舵机 $\alpha$ + 4 内舵机 $\beta$）已完整输出到 `actuator_sp[0..11]`，
-由 `ActuatorEffectivenessMorphQuad::updateSetpoint()` 写入（见代码 §3.3）。桥接层 `configs/morphquad.xml`
-以 `scale=π` 将归一化舵角还原为弧度，1:1 直连 JSBSim 的 `fcs/esc-cmd-norm[i]`、`fcs/servo-alpha-cmd[i]`、
-`fcs/servo-beta-cmd[i]`。旋翼序号与物理位置对齐（FR=(+l,−b)、FL=(+l,+b)、BL=(−l,+b)、BR=(−l,−b)），
-与 JSBSim 模型 `morphquad.xml` 中 ROTORi 的位置一一对应。
+#### 6.2.1 电机（旋翼）编号
+
+第一个电机为**右前（RF）**，随后按**逆时针**依次编号：
+
+| 电机序号 | 物理位置 | 机体坐标 |
+|---------|---------|---------|
+| 0 | 右前（RF） | $(+l,\ +b)$ |
+| 1 | 左前（LF） | $(+l,\ -b)$ |
+| 2 | 左后（LB） | $(-l,\ -b)$ |
+| 3 | 右后（RB） | $(-l,\ +b)$ |
+
+逆时针走向：RF → LF → LB → RB（顶视，从右前开始向左转）。
+
+#### 6.2.2 舵机编号
+
+每个电机配备一对舵机：**外舵机 $\alpha$** 与 **内舵机 $\beta$**。舵机按“**先外后内、逐电机**”的顺序编号：
+
+| 舵机序号 | 归属电机 | 类型 | 物理位置 |
+|---------|---------|------|---------|
+| 0 | 电机 0 (RF) | 外舵机 $\alpha_0$ | 右前外 |
+| 1 | 电机 0 (RF) | 内舵机 $\beta_0$ | 右前内 |
+| 2 | 电机 1 (LF) | 外舵机 $\alpha_1$ | 左前外 |
+| 3 | 电机 1 (LF) | 内舵机 $\beta_1$ | 左前内 |
+| 4 | 电机 2 (LB) | 外舵机 $\alpha_2$ | 左后外 |
+| 5 | 电机 2 (LB) | 内舵机 $\beta_2$ | 左后内 |
+| 6 | 电机 3 (RB) | 外舵机 $\alpha_3$ | 右后外 |
+| 7 | 电机 3 (RB) | 内舵机 $\beta_3$ | 右后内 |
+
+通用映射：舵机序号 $k \in [0,7]$，所属电机 $i = \lfloor k/2 \rfloor$，类型由 $k$ 的奇偶决定——偶数为外舵机 $\alpha_i$、奇数为内舵机 $\beta_i$。
+
+#### 6.2.3 归一化与 `actuator_sp` 布局
+
+12 路执行器写入 `actuator_sp[0..11]`，布局如下：
+
+| `actuator_sp` 索引 | 执行器 | 物理量 | 归一化范围 | 归一化公式 |
+|-------------------|--------|--------|-----------|-----------|
+| 0 | 电机 0 (RF) | $\Omega_0$ | [0, 1] | $\Omega_0 / \Omega_{\max}$，$\Omega_{\max} = 1200$ |
+| 1 | 电机 1 (LF) | $\Omega_1$ | [0, 1] | $\Omega_1 / \Omega_{\max}$ |
+| 2 | 电机 2 (LB) | $\Omega_2$ | [0, 1] | $\Omega_2 / \Omega_{\max}$ |
+| 3 | 电机 3 (RB) | $\Omega_3$ | [0, 1] | $\Omega_3 / \Omega_{\max}$ |
+| 4 | 舵机 0（电机0 外 $\alpha_0$） | $\alpha_0$ | [-1, 1] | $\alpha_0 / \pi$ |
+| 5 | 舵机 1（电机0 内 $\beta_0$） | $\beta_0$ | [-1, 1] | $\beta_0 / \pi$ |
+| 6 | 舵机 2（电机1 外 $\alpha_1$） | $\alpha_1$ | [-1, 1] | $\alpha_1 / \pi$ |
+| 7 | 舵机 3（电机1 内 $\beta_1$） | $\beta_1$ | [-1, 1] | $\beta_1 / \pi$ |
+| 8 | 舵机 4（电机2 外 $\alpha_2$） | $\alpha_2$ | [-1, 1] | $\alpha_2 / \pi$ |
+| 9 | 舵机 5（电机2 内 $\beta_2$） | $\beta_2$ | [-1, 1] | $\beta_2 / \pi$ |
+| 10 | 舵机 6（电机3 外 $\alpha_3$） | $\alpha_3$ | [-1, 1] | $\alpha_3 / \pi$ |
+| 11 | 舵机 7（电机3 内 $\beta_3$） | $\beta_3$ | [-1, 1] | $\beta_3 / \pi$ |
+
+**桥接层映射**（`configs/morphquad.xml`，`scale=π` 还原弧度）：
+- `fcs/esc-cmd-norm[i]` ← `actuator_sp[i]`（电机 $i$，$i=0..3$）
+- `fcs/servo-alpha-cmd[i]` ← `actuator_sp[4 + 2i]`（电机 $i$ 的外舵机 $\alpha_i$）
+- `fcs/servo-beta-cmd[i]`  ← `actuator_sp[5 + 2i]`（电机 $i$ 的内舵机 $\beta_i$）
+
+旋翼序号与 JSBSim 模型 `morphquad.xml` 中 ROTOR$i$ 的物理位置一一对应。
+
+> **实现状态**：代码 `ActuatorEffectivenessMorphQuad` 已按本约定实现——`updateSetpoint()` 写入
+> 电机 `actuator_sp[0..3]` 与外/内舵机 `actuator_sp[4+2i]` / `actuator_sp[5+2i]`，
+> `computeUnallocatedWrench()` 按相同索引重建 wrench，旋翼几何为 `RF=(+l,+b)` 逆时针布局。
+> 外部桥接层 `configs/morphquad.xml` 需保证 `servo-alpha-cmd[i]→actuator_sp[4+2i]`、
+> `servo-beta-cmd[i]→actuator_sp[5+2i]`，且 JSBSim 模型 `morphquad.xml` 中 ROTOR$i$ 的物理位置
+> 与本约定的 `RF=(+l,+b)` 一致，否则需相应调整旋向/符号。
 
 ---
 
@@ -305,21 +359,33 @@ ControlAllocator 订阅这两个话题，构造 6D `control_sp` 向量传入 `up
 
 ### 7.3 饱和处理
 
-在 `updateSetpoint()` 末尾对 `actuator_sp[0..7]` 执行 clamp，并检测饱和状态：
+在 `updateSetpoint()` 末尾按 §6.2.3 的编号约定对 `actuator_sp[0..11]` 执行 clamp，并检测饱和状态：
 ```cpp
 // 饱和检测
 _motor_saturated = false;
 _servo_saturated = false;
 
+// 4 个电机: actuator_sp[0..3]
 for (int i = 0; i < 4; i++) {
     float clamped = math::constrain(actuator_sp(i), actuator_min(i), actuator_max(i));
     if (clamped != actuator_sp(i)) _motor_saturated = true;
     actuator_sp(i) = clamped;
 }
-for (int i = 4; i < 8; i++) {
-    float clamped = math::constrain(actuator_sp(i), actuator_min(i), actuator_max(i));
-    if (clamped != actuator_sp(i)) _servo_saturated = true;
-    actuator_sp(i) = clamped;
+
+// 8 个舵机: 外 α_i 在 4+2i, 内 β_i 在 5+2i
+for (int i = 0; i < 4; i++) {
+    int alpha_idx = 4 + 2 * i;
+    int beta_idx  = 5 + 2 * i;
+
+    float alpha_clamped = math::constrain(actuator_sp(alpha_idx),
+                                          actuator_min(alpha_idx), actuator_max(alpha_idx));
+    if (alpha_clamped != actuator_sp(alpha_idx)) _servo_saturated = true;
+    actuator_sp(alpha_idx) = alpha_clamped;
+
+    float beta_clamped = math::constrain(actuator_sp(beta_idx),
+                                         actuator_min(beta_idx), actuator_max(beta_idx));
+    if (beta_clamped != actuator_sp(beta_idx)) _servo_saturated = true;
+    actuator_sp(beta_idx) = beta_clamped;
 }
 ```
 
@@ -366,6 +432,7 @@ for (int i = 4; i < 8; i++) {
 | v0.3 | 2026-07-27 | 修复编译错误，参数化惯性矩阵，添加 module.yaml |
 | v0.4 | 2026-07-29 | 三模式输入 (Manual/Offboard/Auto), 摇杆死区, 积分器+抗饱和, 饱和信号输出 |
 | v0.5 | 2026-07-29 | vector 启动脚本 (rc.vector_defaults/rc.vector_apps), CA_AIRFRAME=16 |
+| v0.6 | 2026-08-06 | 明确执行器编号约定：电机 0=右前逆时针编号；舵机按"先外后内、逐电机"交错排序（§6.2） |
 
 ---
 

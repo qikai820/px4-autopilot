@@ -98,7 +98,7 @@ def fig_algo_flow():
                                   "下洗干扰避免：打破推力共线性"], C_GREEN, 2.1),
         ("Step 3  舵机角度反解", ["双分支解 + 最小运动选择",
                                    "多周期缠绕支持 (±2kπ)"], C_PURPLE, 0.6),
-        ("输出", ["[Ω1…Ω4, α1…α4, β1…β4]", "→ 执行器指令 (PWM)"], C_ORANGE, -0.8),
+        ("输出", ["[Ω0…Ω3, α0,β0,α1,β1,", " α2,β2,α3,β3]", "→ 执行器指令"], C_ORANGE, -0.8),
     ]
     prev_bottom = None
     for t, lines, c, yb in nodes:
@@ -171,7 +171,7 @@ def fig_data_flow():
         ("updateSetpoint()", ["核心分配入口"], C_HEADER, 2.8),
         ("computeThrustVectors()", ["Eq. (12) + (15-16)", "最小范数 + 零空间修正"], C_GREEN, 1.5),
         ("recoverServoAngles()  ×4", ["Eq. (14)", "双分支 + 最小运动"], C_PURPLE, 0.2),
-        ("actuator_sp[8]", ["[Ω0..Ω3, α0..α3]", "归一化执行器指令"], C_ORANGE, -1.1),
+        ("actuator_sp[12]", ["[Ω0..Ω3, α0,β0,α1,β1,", " α2,β2,α3,β3]", "归一化执行器指令"], C_ORANGE, -1.1),
     ]
     chain_right = W / 2  # = 1.5
     prev = None
@@ -291,19 +291,23 @@ def fig_actuator_layout():
                 arrowprops=dict(arrowstyle="-|>", color=C_LINE, lw=1.6))
     ax.annotate("", xy=(2.2, 0), xytext=(-2.2, 0),
                 arrowprops=dict(arrowstyle="-|>", color=C_LINE, lw=1.6))
-    ax.text(0, 2.35, "x  (前 forward)", ha="center", fontproperties=FP_B,
+    ax.text(0, 2.55, "x  (前 forward)", ha="center", fontproperties=FP_B,
             color=C_HEADER, fontsize=10)
     ax.text(2.35, 0, "y  (右 right)", ha="center", fontproperties=FP_B,
             color=C_GREEN, fontsize=10)
 
-    l, b = 1.3, 1.3  # visual half-arm (x forward, y right)
+    l, b = 1.3, 1.3  # visual half-arm (body x forward, y right)
+    # Motor 0 = right-front (RF); numbering is counter-clockwise: RF -> LF -> LB -> RB
+    # Body frame: +x forward, +y right.  In the plot the vertical axis is body x
+    # (forward) and the horizontal axis is body y (right), so matplotlib (x,y) = (body_y, body_x).
     rotors = {
-        0: (l, -b, "FR", "CW"),
-        1: (l, b, "FL", "CCW"),
-        2: (-l, b, "BL", "CW"),
-        3: (-l, -b, "BR", "CCW"),
+        0: (l, b, "FR", "CW"),
+        1: (l, -b, "FL", "CCW"),
+        2: (-l, -b, "BL", "CW"),
+        3: (-l, b, "BR", "CCW"),
     }
-    for idx, (x, y, name, dirn) in rotors.items():
+    for idx, (bx, by, name, dirn) in rotors.items():
+        x, y = by, bx  # convert body frame to matplotlib coordinates
         import math  # local import (used below for spin arrowhead)
         ax.add_patch(Circle((x, y), 0.42, fc=C_LIGHT, ec=C_HEADER, lw=2, zorder=2))
         ax.text(x, y, f"{idx}\n{name}", ha="center", va="center",
@@ -325,11 +329,16 @@ def fig_actuator_layout():
                     zorder=3)
         ax.text(x, y - 0.82, dirn, ha="center", fontproperties=FP_B,
                 color=C_ORANGE, fontsize=9, zorder=3)
+        # servo pair label (outer α_i + inner β_i) above each rotor
+        ax.text(x, y + 0.66, f"α{idx}/β{idx}", ha="center",
+                fontproperties=FP_B, color=C_PURPLE, fontsize=8.5, zorder=3)
 
     ax.text(0, -2.55,
-            "actuator_sp 索引:  [0..3]=Ω   [4..7]=α(外舵机)   [8..11]=β(内舵机)",
-            ha="center", fontproperties=FP, color="#1f2730", fontsize=8.8)
-    title(ax, "图 6.1  MorphQuad 执行器布局 (机体顶视)", 0, 2.45, fs=13)
+            "执行器编号:  电机 0..3 (Omega 0..3)   舵机 [4]=a0 [5]=b0 [6]=a1 [7]=b1 "
+            "[8]=a2 [9]=b2 [10]=a3 [11]=b3",
+            ha="center", fontproperties=FP, color="#1f2730", fontsize=8.2)
+    title(ax, "图 6.1  MorphQuad 执行器布局 (机体顶视, 电机 0=RF 逆时针编号)",
+          0, 2.75, fs=12.5)
     plt.savefig(os.path.join(HERE, "actuator_layout.png"), dpi=160,
                 bbox_inches="tight", facecolor="white")
     plt.close(fig)
