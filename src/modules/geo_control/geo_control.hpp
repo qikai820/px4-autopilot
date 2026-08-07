@@ -100,6 +100,24 @@ private:
 			       const matrix::Vector3f &vel, const matrix::Vector3f &omega,
 			       uint64_t timestamp_sample);
 
+	/**
+	 * Lee SO(3) attitude torque with the complete angular-acceleration feedforward:
+	 *   τ = -kR·e_R - kΩ·e_Ω + Ω×JΩ - J( Ω̂ RᵀRd Ωd - RᵀRd Ω̇d )
+	 * The feedforward uses the rate reference Ωd = omega_sp and its finite-difference
+	 * derivative Ω̇d. e_Ω must already be integrated (see updateIntegrators) so that
+	 * _rate_int is current when this is called.
+	 * @param R            current attitude (world-from-body)
+	 * @param R_sp         desired attitude (world-from-body)
+	 * @param omega        current body angular velocity
+	 * @param omega_sp     desired body angular velocity (rate reference)
+	 * @param omega_d_in_B RᵀRd·Ωd, desired rate expressed in the current body frame
+	 * @param dt           time step [s]
+	 * @return desired torque (body frame)
+	 */
+	matrix::Vector3f computeAttitudeTorque(const matrix::Dcmf &R, const matrix::Dcmf &R_sp,
+					       const matrix::Vector3f &omega, const matrix::Vector3f &omega_sp,
+					       const matrix::Vector3f &omega_d_in_B, float dt);
+
 	void publish_wrench(const matrix::Vector3f &f_des_body, const matrix::Vector3f &tau_des,
 			    uint64_t timestamp_sample);
 
@@ -177,6 +195,8 @@ private:
 	// Integrator states
 	matrix::Vector3f _rate_int{};   ///< attitude/rate error integrator (torque loop)
 	matrix::Vector3f _vel_int{};    ///< velocity error integrator (force loop)
+
+	matrix::Vector3f _omega_sp_prev{};   ///< previous rate reference, for finite-difference Ω̇d feedforward
 
 	// Actuator saturation feedback from control allocator
 	matrix::Vector<bool, 3> _torque_sat_pos{};

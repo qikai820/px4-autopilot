@@ -206,6 +206,31 @@ void GeoControl::publish_setpoints(const Vector3f &f_des_world, const Vector3f &
 	_ang_accel_sp_pub.publish(ang_accel_sp);
 }
 
+matrix::Vector3f GeoControl::computeAttitudeTorque(const Dcmf &R, const Dcmf &R_sp,
+		const Vector3f &omega, const Vector3f &omega_sp,
+		const Vector3f &omega_d_in_B, float dt)
+{
+	// Attitude error (Lee SO(3)): e_R = 1/2 (Rdᵀ R − Rᵀ Rd)^∨
+	const Dcmf e_R_mat = (R_sp.transpose() * R - R.transpose() * R_sp) * 0.5f;
+	const Vector3f e_R(e_R_mat(2, 1), e_R_mat(0, 2), e_R_mat(1, 0));
+
+	Vector3f kR(_param_gc_rp_p.get(), _param_gc_rp_p.get(), _param_gc_yaw_p.get());
+	Vector3f kOmega(_param_gc_rp_rate_p.get(), _param_gc_rp_rate_p.get(), _param_gc_yaw_rate_p.get());
+	Matrix3f J = matrix::diag(Vector3f(_param_gc_inertia_xx.get(), _param_gc_inertia_yy.get(),
+					  _param_gc_inertia_zz.get()));
+
+	// Complete Lee SO(3) angular-acceleration feedforward:
+	//   τ_ff = −J ( Ω̂ RᵀRd Ωd − RᵀRd Ω̇d )
+	// Ωd = desired body rate (omega_sp); Ω̇d from finite difference of the rate
+	// reference. Note Ω̂ is the CURRENT angular velocity, so Ω̂ RᵀRd Ωd = ω × ω_d_in_B.
+	const Dcmf RtRd = R.transpose() * R_sp;
+	const Vector3f omega_dot_d = (omega_sp - _omega_sp_prev) / dt;
+	_omega_sp_prev = omega_sp;
+	const Vector3f ff = -J * (omega.cross(omega_d_in_B) - RtRd * omega_dot_d);
+
+	return -kR.emult(e_R) - kOmega.emult(omega - omega_d_in_B) + _rate_int + omega.cross(J * omega) + ff;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Manual mode: RC sticks → angular rate + velocity references
 // ─────────────────────────────────────────────────────────────────────────────
@@ -271,20 +296,9 @@ void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &omega,
 		_q_att_ref.normalize();
 	}
 
-	// ── Attitude loop → desired torque (closed loop) ──
+	// ── Attitude loop → desired torque (closed loop, Lee SO(3) with feedforward) ──
 	const Dcmf R(R_q);
 	const Dcmf R_sp(_q_att_ref);
-	const Dcmf e_R_mat = (R_sp.transpose() * R - R.transpose() * R_sp) * 0.5f;
-	Vector3f e_R(e_R_mat(2, 1), e_R_mat(0, 2), e_R_mat(1, 0));
-
-	Vector3f kR(_param_gc_rp_p.get(), _param_gc_rp_p.get(), _param_gc_yaw_p.get());
-	Vector3f kOmega(_param_gc_rp_rate_p.get(), _param_gc_rp_rate_p.get(), _param_gc_yaw_rate_p.get());
-
-	Matrix3f J = matrix::diag(Vector3f(
-					   _param_gc_inertia_xx.get(),
-					   _param_gc_inertia_yy.get(),
-					   _param_gc_inertia_zz.get()));
-
 	Vector3f omega_d_in_B = R.transpose() * R_sp * omega_sp;
 	Vector3f e_omega = omega - omega_d_in_B;
 
@@ -294,7 +308,7 @@ void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &omega,
 		updateIntegrators(e_omega, Vector3f(0.f, 0.f, 0.f), dt);
 	}
 
-	Vector3f tau_des = -kR.emult(e_R) - kOmega.emult(e_omega) + _rate_int + omega.cross(J * omega);
+	Vector3f tau_des = computeAttitudeTorque(R, R_sp, omega, omega_sp, omega_d_in_B, dt);
 
 	const Vector3f f_des_world = R * f_des_body;   // for throttle-norm debug only
 
@@ -385,19 +399,8 @@ void GeoControl::control_step_position(const Quatf &R_q, const Vector3f &pos,
 	Vector3f f_des_world = -kv.emult(e_v) - _vel_int - mass * g;
 	Vector3f f_des_body = R.transpose() * f_des_world;
 
-	// ── Attitude loop → desired torque ──
+	// ── Attitude loop → desired torque (Lee SO(3) with feedforward) ──
 	const Dcmf R_sp(_q_att_ref);
-	const Dcmf e_R_mat = (R_sp.transpose() * R - R.transpose() * R_sp) * 0.5f;
-	Vector3f e_R(e_R_mat(2, 1), e_R_mat(0, 2), e_R_mat(1, 0));
-
-	Vector3f kR(_param_gc_rp_p.get(), _param_gc_rp_p.get(), _param_gc_yaw_p.get());
-	Vector3f kOmega(_param_gc_rp_rate_p.get(), _param_gc_rp_rate_p.get(), _param_gc_yaw_rate_p.get());
-
-	Matrix3f J = matrix::diag(Vector3f(
-					   _param_gc_inertia_xx.get(),
-					   _param_gc_inertia_yy.get(),
-					   _param_gc_inertia_zz.get()));
-
 	Vector3f omega_d_in_B = R.transpose() * R_sp * omega_sp;
 	Vector3f e_omega = omega - omega_d_in_B;
 
@@ -405,7 +408,7 @@ void GeoControl::control_step_position(const Quatf &R_q, const Vector3f &pos,
 		updateIntegrators(e_omega, e_v, dt);
 	}
 
-	Vector3f tau_des = -kR.emult(e_R) - kOmega.emult(e_omega) + _rate_int + omega.cross(J * omega);
+	Vector3f tau_des = computeAttitudeTorque(R, R_sp, omega, omega_sp, omega_d_in_B, dt);
 
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
 	publish_setpoints(f_des_world, f_des_body, tau_des, _q_att_ref, vel_sp_world, omega, timestamp_sample);
@@ -454,27 +457,16 @@ void GeoControl::control_step_offboard(const Quatf &R_q, const Vector3f &pos,
 	Vector3f f_des_world = -kp.emult(e_p) - kv.emult(e_v) - _vel_int - mass * g + mass * acc_sp;
 	Vector3f f_des_body = R.transpose() * f_des_world;
 
-	// ── Attitude loop → desired torque ──
-	const Dcmf e_R_mat = (R_sp.transpose() * R - R.transpose() * R_sp) * 0.5f;
-	Vector3f e_R(e_R_mat(2, 1), e_R_mat(0, 2), e_R_mat(1, 0));
-
-	Vector3f kR(_param_gc_rp_p.get(), _param_gc_rp_p.get(), _param_gc_yaw_p.get());
-	Vector3f kOmega(_param_gc_rp_rate_p.get(), _param_gc_rp_rate_p.get(), _param_gc_yaw_rate_p.get());
-
+	// ── Attitude loop → desired torque (Lee SO(3) with feedforward) ──
 	Vector3f omega_sp(0.f, 0.f, traj_sp.yawspeed);
 	Vector3f omega_d_in_B = R.transpose() * R_sp * omega_sp;
 	Vector3f e_omega = omega - omega_d_in_B;
-
-	Matrix3f J = matrix::diag(Vector3f(
-					   _param_gc_inertia_xx.get(),
-					   _param_gc_inertia_yy.get(),
-					   _param_gc_inertia_zz.get()));
 
 	if (!_landed) {
 		updateIntegrators(e_omega, e_v, dt);
 	}
 
-	Vector3f tau_des = -kR.emult(e_R) - kOmega.emult(e_omega) + _rate_int + omega.cross(J * omega);
+	Vector3f tau_des = computeAttitudeTorque(R, R_sp, omega, omega_sp, omega_d_in_B, dt);
 
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
 	publish_setpoints(f_des_world, f_des_body, tau_des, Quatf(R_sp), vel_sp, omega, timestamp_sample);
@@ -517,27 +509,16 @@ void GeoControl::control_step_auto(const Quatf &R_q, const Vector3f &pos,
 	Vector3f f_des_world = -kp.emult(e_p) - kv.emult(e_v) - _vel_int - mass * g + mass * acc_sp;
 	Vector3f f_des_body = R.transpose() * f_des_world;
 
-	// ── Attitude loop → desired torque ──
-	const Dcmf e_R_mat = (R_sp.transpose() * R - R.transpose() * R_sp) * 0.5f;
-	Vector3f e_R(e_R_mat(2, 1), e_R_mat(0, 2), e_R_mat(1, 0));
-
-	Vector3f kR(_param_gc_rp_p.get(), _param_gc_rp_p.get(), _param_gc_yaw_p.get());
-	Vector3f kOmega(_param_gc_rp_rate_p.get(), _param_gc_rp_rate_p.get(), _param_gc_yaw_rate_p.get());
-
+	// ── Attitude loop → desired torque (Lee SO(3) with feedforward) ──
 	Vector3f omega_sp(0.f, 0.f, 0.f);
 	Vector3f omega_d_in_B = R.transpose() * R_sp * omega_sp;
 	Vector3f e_omega = omega - omega_d_in_B;
-
-	Matrix3f J = matrix::diag(Vector3f(
-					   _param_gc_inertia_xx.get(),
-					   _param_gc_inertia_yy.get(),
-					   _param_gc_inertia_zz.get()));
 
 	if (!_landed) {
 		updateIntegrators(e_omega, e_v, dt);
 	}
 
-	Vector3f tau_des = -kR.emult(e_R) - kOmega.emult(e_omega) + _rate_int + omega.cross(J * omega);
+	Vector3f tau_des = computeAttitudeTorque(R, R_sp, omega, omega_sp, omega_d_in_B, dt);
 
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
 	publish_setpoints(f_des_world, f_des_body, tau_des, Quatf(R_sp), vel_sp, omega, timestamp_sample);
