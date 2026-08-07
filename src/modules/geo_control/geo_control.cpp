@@ -154,8 +154,11 @@ void GeoControl::publish_setpoints(const Vector3f &f_des_world, const Vector3f &
 	const hrt_abstime now = hrt_absolute_time();
 	const float thrust_max = math::max(_param_gc_thrust_max.get(), 1.f);
 
-	// ── Normalized collective-throttle estimate (matching morphquad esc table) ──
-	// ‖f_des_world‖ spans ~0 (idle) … mass*g (hover≈0.4) … N_rotors*Tmax (full≈1.0).
+	// ── Normalized collective-throttle estimate (collective force fraction) ──
+	// throttle_norm = ‖f_des_world‖ / (N_rotors * TMAX) = ‖f‖/GC_THRUST_MAX. This is the
+	// TOTAL force fraction, NOT the per-rotor esc command. At hover ‖f‖ = mass*g, so
+	// throttle_norm ≈ 0.41 (44.7/110). The actual per-rotor motor command is the
+	// normalized rotor speed sqrt(T_i/TMAX) ≈ 0.64 at hover (see ActuatorEffectivenessMorphQuad).
 	const float throttle_norm = math::constrain(f_des_world.norm() / thrust_max, 0.f, 1.f);
 
 	// ── vehicle_local_position_setpoint (position/velocity debug + throttle est) ──

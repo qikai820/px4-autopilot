@@ -124,8 +124,10 @@ private:
 	/**
 	 * Publish debug setpoints (local-position / attitude / angular-acceleration) so the
 	 * desired wrench can be inspected with `listener`/ulog. The normalized throttle estimate
-	 * (hover≈0.4, full≈1.0, matching the morphquad esc table) is filled into
+	 * (collective force fraction, hover≈0.41, full≈1.0) is filled into
 	 * vehicle_local_position_setpoint.thrust[3] and vehicle_attitude_setpoint.thrust_body[3].
+	 * Note this is the TOTAL force fraction ‖f‖/(N_rotors*TMAX), distinct from the per-rotor
+	 * esc command sqrt(T_i/TMAX) ≈ 0.64 at hover.
 	 */
 	void publish_setpoints(const matrix::Vector3f &f_des_world, const matrix::Vector3f &f_des_body,
 			       const matrix::Vector3f &tau_des, const matrix::Quatf &q_att_ref,
