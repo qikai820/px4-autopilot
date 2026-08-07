@@ -103,13 +103,14 @@ void ActuatorEffectivenessMorphQuad::updateSetpoint(
 		float alpha, beta;
 		recoverServoAngles(t[i], i, alpha, beta);
 
-		// Motor command = normalized thrust fraction in [0,1] that the JSBSim
-		// morphquad model expects for fcs/esc-cmd-norm (esc=0.4 -> hover thrust,
-		// esc=1.0 -> TMAX per-rotor thrust). Previously this was omega/omega_max
-		// (~0.009 at hover), which the model interpreted as ~zero thrust and
-		// made the motors appear idle regardless of throttle.
+		// Rotor physical model: T_i = c_T * Ω_i^2  =>  Ω_i = sqrt(T_i / c_T).
+		// The JSBSim morphquad model consumes esc-cmd-norm = Ω / Ω_max, where
+		// esc=1.0 corresponds to TMAX per-rotor thrust. Since TMAX = c_T * Ω_max^2,
+		// the normalized motor command is sqrt(T_i / TMAX) — NOT the linear
+		// T_i/TMAX. Using T_i/TMAX (a previous bug) linearizes the rotor and
+		// produces the wrong (nonlinear) motor response at hover and full throttle.
 		const float t_norm = sqrtf(t[i][0] * t[i][0] + t[i][1] * t[i][1] + t[i][2] * t[i][2]);
-		omega_raw[i] = (t_norm < 0.01f) ? 0.f : (t_norm / tmax);
+		omega_raw[i] = (t_norm < 0.01f) ? 0.f : sqrtf(t_norm / tmax);
 		alpha_raw[i] = alpha / M_PI_F;
 		beta_raw[i] = beta / M_PI_F;
 	}
@@ -353,9 +354,9 @@ void ActuatorEffectivenessMorphQuad::computeUnallocatedWrench(
 		const float alpha_actual = actuator_sp(4 + 2 * i) * M_PI_F;
 		const float beta_actual  = actuator_sp(5 + 2 * i) * M_PI_F;
 
-		// Achieved thrust magnitude: actuator_sp(i) is the normalized thrust
-		// fraction in [0,1] (esc-cmd-norm), so T = fraction * TMAX.
-		const float t_mag = actuator_sp(i) * tmax;
+		// Achieved thrust magnitude: actuator_sp(i) is the normalized rotor
+		// speed (esc-cmd-norm = Ω/Ω_max), so T = (esc)^2 * TMAX = c_T * Ω^2.
+		const float t_mag = actuator_sp(i) * actuator_sp(i) * tmax;
 
 		// Thrust direction from dual-axis gimbal angles (alpha=outer/Yaw, beta=inner/Pitch)
 		// Forward kinematics: R = Ry(alpha) * Rx(beta), thrust along local z
