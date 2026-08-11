@@ -54,6 +54,8 @@
 #include <uORB/topics/manual_control_setpoint.h>
 #include <uORB/topics/trajectory_setpoint.h>
 #include <uORB/topics/control_allocator_status.h>
+#include <uORB/topics/actuator_motors.h>
+#include <uORB/topics/actuator_servos.h>
 #include <uORB/topics/parameter_update.h>
 #include <matrix/matrix/math.hpp>
 
@@ -70,6 +72,45 @@ public:
 	static GeoControl *instantiate(int argc, char *argv[]);
 	static int custom_command(int argc, char *argv[]);
 	static int print_usage(const char *reason = nullptr);
+	int print_status() override;
+
+	/** 注入固定 6D 力/力矩，从真实 ControlAllocator 读回各旋翼电机/舵机输出，
+	 *  验证 MorphQuad 控制分配。 */
+	int verify_allocation();
+
+	/** Acro 模式: 发布固定力/力矩并读回实际力/力矩用于验证。 */
+	void control_step_acro(uint64_t timestamp_sample);
+	int acro_command(int argc, char *argv[]);
+
+	/** 悬停测试: 注入 Fz=-mass*g，监控速度收敛。 */
+	int hover_command(int argc, char *argv[]);
+
+	/** Offboard 测试: 内部注入 trajectory_setpoint 实现闭环位置控制。 */
+	void control_step_offboard_test(uint64_t timestamp_sample);
+	int offboard_command(int argc, char *argv[]);
+	bool _offboard_test_active{false};
+	uint64_t _offboard_test_dur_us{0};
+	hrt_abstime _offboard_test_start{0};
+	matrix::Vector3f _offboard_pos_sp{};
+	float _offboard_yaw_sp{0.f};
+
+	/** 姿态测试: 跟踪期望欧拉角 (roll, pitch, yaw)。 */
+	void control_step_att_test(uint64_t timestamp_sample);
+	int att_test_command(int argc, char *argv[]);
+	bool _att_test_active{false};
+	float _att_test_roll{0.f};
+	float _att_test_pitch{0.f};
+	float _att_test_yaw{0.f};
+
+	/** 速度测试: 跟踪期望机体速度 (含姿态内环)。 */
+	void control_step_vel_test(uint64_t timestamp_sample);
+	int vel_test_command(int argc, char *argv[]);
+	bool _vel_test_active{false};
+	matrix::Vector3f _vel_test_sp{};
+
+	/** Sweep 模式: 自动 6D 力/力矩逐轴扫频。 */
+	void control_step_sweep(uint64_t timestamp_sample);
+	int sweep_command(int argc, char *argv[]);
 
 	bool init();
 
@@ -78,7 +119,8 @@ private:
 		MANUAL = 0,
 		OFFBOARD = 1,
 		AUTO = 2,
-		POSITION = 3
+		POSITION = 3,
+		ACRO = 4
 	};
 
 	void Run() override;
@@ -101,18 +143,17 @@ private:
 			       uint64_t timestamp_sample);
 
 	/**
-	 * Lee SO(3) attitude torque with the complete angular-acceleration feedforward:
+	 * Lee SO(3) 姿态力矩，含完整角加速度前馈:
 	 *   τ = -kR·e_R - kΩ·e_Ω + Ω×JΩ - J( Ω̂ RᵀRd Ωd - RᵀRd Ω̇d )
-	 * The feedforward uses the rate reference Ωd = omega_sp and its finite-difference
-	 * derivative Ω̇d. e_Ω must already be integrated (see updateIntegrators) so that
-	 * _rate_int is current when this is called.
-	 * @param R            current attitude (world-from-body)
-	 * @param R_sp         desired attitude (world-from-body)
-	 * @param omega        current body angular velocity
-	 * @param omega_sp     desired body angular velocity (rate reference)
-	 * @param omega_d_in_B RᵀRd·Ωd, desired rate expressed in the current body frame
-	 * @param dt           time step [s]
-	 * @return desired torque (body frame)
+	 * 前馈使用速率参考 Ωd = omega_sp 及其有限差分导数 Ω̇d。
+	 * e_Ω 必须先经过积分 (见 updateIntegrators)，使 _rate_int 在调用时有效。
+	 * @param R            当前姿态 (world-from-body)
+	 * @param R_sp         期望姿态 (world-from-body)
+	 * @param omega        当前机体角速度
+	 * @param omega_sp     期望机体角速度 (速率参考)
+	 * @param omega_d_in_B RᵀRd·Ωd, 在当前机体坐标系中表示的期望角速率
+	 * @param dt           时间步长 [s]
+	 * @return 期望力矩 (机体坐标系)
 	 */
 	matrix::Vector3f computeAttitudeTorque(const matrix::Dcmf &R, const matrix::Dcmf &R_sp,
 					       const matrix::Vector3f &omega, const matrix::Vector3f &omega_sp,
@@ -122,12 +163,12 @@ private:
 			    uint64_t timestamp_sample);
 
 	/**
-	 * Publish debug setpoints (local-position / attitude / angular-acceleration) so the
-	 * desired wrench can be inspected with `listener`/ulog. The normalized throttle estimate
-	 * (collective force fraction, hover≈0.41, full≈1.0) is filled into
-	 * vehicle_local_position_setpoint.thrust[3] and vehicle_attitude_setpoint.thrust_body[3].
-	 * Note this is the TOTAL force fraction ‖f‖/(N_rotors*TMAX), distinct from the per-rotor
-	 * esc command sqrt(T_i/TMAX) ≈ 0.64 at hover.
+	 * 发布调试指令 (local-position / attitude / angular-acceleration)，
+	 * 便于用 `listener`/ulog 检查期望力/力矩。归一化油门估计
+	 * (总力占比, 悬停≈0.41, 满油≈1.0) 填入
+	 * vehicle_local_position_setpoint.thrust[3] 和 vehicle_attitude_setpoint.thrust_body[3]。
+	 * 注意这是总力占比 ‖f‖/(N_rotors*TMAX)，不同于单路电机指令
+	 * sqrt(T_i/TMAX) ≈ 0.64 (悬停时)。
 	 */
 	void publish_setpoints(const matrix::Vector3f &f_des_world, const matrix::Vector3f &f_des_body,
 			       const matrix::Vector3f &tau_des, const matrix::Quatf &q_att_ref,
@@ -135,21 +176,21 @@ private:
 			       uint64_t timestamp_sample);
 
 	/**
-	 * Update integrators with anti-windup from actuator saturation feedback.
-	 * Follows the RateControl pattern from mc_rate_control.
-	 * @param e_omega angular velocity error (body frame)
-	 * @param e_v_world velocity error (NED world frame)
-	 * @param dt time step [s]
+	 * 更新积分器，含执行器饱和反馈抗饱和。
+	 * 遵循 mc_rate_control 的 RateControl 模式。
+	 * @param e_omega    角速度误差 (机体坐标系)
+	 * @param e_v_world  速度误差 (NED 世界坐标系)
+	 * @param dt         时间步长 [s]
 	 */
 	void updateIntegrators(const matrix::Vector3f &e_omega, const matrix::Vector3f &e_v_world,
 			       float dt);
 
 	/**
-	 * Reset all integrators to zero.
+	 * 清零所有积分器。
 	 */
 	void resetIntegrators();
 
-	// uORB Subscriptions
+	// uORB 订阅
 	uORB::SubscriptionCallbackWorkItem _sub_vehicle_local_position{this, ORB_ID(vehicle_local_position)};
 	uORB::Subscription _sub_vehicle_attitude{ORB_ID(vehicle_attitude)};
 	uORB::Subscription _sub_vehicle_attitude_setpoint{ORB_ID(vehicle_attitude_setpoint)};
@@ -162,14 +203,14 @@ private:
 	uORB::Subscription _sub_control_allocator_status{ORB_ID(control_allocator_status)};
 	uORB::SubscriptionInterval _parameter_update_sub{ORB_ID(parameter_update), 1_s};
 
-	// uORB Publications
+	// uORB 发布
 	uORB::Publication<vehicle_thrust_setpoint_s> _thrust_pub{ORB_ID(vehicle_thrust_setpoint)};
 	uORB::Publication<vehicle_torque_setpoint_s> _torque_pub{ORB_ID(vehicle_torque_setpoint)};
 	uORB::Publication<vehicle_local_position_setpoint_s> _local_pos_sp_pub{ORB_ID(vehicle_local_position_setpoint)};
 	uORB::Publication<vehicle_attitude_setpoint_s> _att_sp_pub{ORB_ID(vehicle_attitude_setpoint)};
 	uORB::Publication<vehicle_angular_acceleration_setpoint_s> _ang_accel_sp_pub{ORB_ID(vehicle_angular_acceleration_setpoint)};
 
-	// Parameters (GC_ prefix)
+	// 参数 (GC_ 前缀)
 	DEFINE_PARAMETERS(
 		(ParamFloat<px4::params::GC_MASS>) _param_gc_mass,
 		(ParamFloat<px4::params::GC_XY_P>) _param_gc_xy_p,
@@ -191,32 +232,68 @@ private:
 		(ParamFloat<px4::params::GC_VEL_I>) _param_gc_vel_i,
 		(ParamFloat<px4::params::GC_VEL_INT_LIM>) _param_gc_vel_int_lim,
 		(ParamFloat<px4::params::GC_THRUST_MAX>) _param_gc_thrust_max,
-		(ParamFloat<px4::params::GC_MAN_FMAX>) _param_gc_man_fmax
+		(ParamFloat<px4::params::GC_MAN_FMAX>) _param_gc_man_fmax,
+		// MorphQuad 分配几何参数 (从 CA_MQ_* 参数读取，用于重构)
+		(ParamFloat<px4::params::CA_MQ_L>) _param_ca_mq_l,
+		(ParamFloat<px4::params::CA_MQ_B>) _param_ca_mq_b,
+		(ParamFloat<px4::params::CA_MQ_TMAX>) _param_ca_mq_tmax
 	)
 
-	// Integrator states
-	matrix::Vector3f _rate_int{};   ///< attitude/rate error integrator (torque loop)
-	matrix::Vector3f _vel_int{};    ///< velocity error integrator (force loop)
+	// 积分器状态
+	matrix::Vector3f _rate_int{};   ///< 姿态/角速率误差积分器 (力矩环)
+	matrix::Vector3f _vel_int{};    ///< 速度误差积分器 (力环)
 
-	matrix::Vector3f _omega_sp_prev{};   ///< previous rate reference, for finite-difference Ω̇d feedforward
+	matrix::Vector3f _omega_sp_prev{};   ///< 前一速率参考，用于有限差分 Ω̇d 前馈
 
-	// Actuator saturation feedback from control allocator
+	// 控制分配器饱和反馈
 	matrix::Vector<bool, 3> _torque_sat_pos{};
 	matrix::Vector<bool, 3> _torque_sat_neg{};
 	matrix::Vector<bool, 3> _thrust_sat_pos{};
 	matrix::Vector<bool, 3> _thrust_sat_neg{};
 
-	// State flags
+	// 状态标志
 	bool _landed{true};
 	bool _armed{false};
+	uint8_t _nav_state_last{0};   ///< 最近一次 vehicle_status.nav_state, 供 `status` 诊断
 
-	// Manual mode: integrated attitude reference from rate commands
+	// 分配验证 (`verify` 命令): 固定力/力矩注入+读回。
+	// 激活时 control_step() 每周期注入 _verify_wrench (绕过正常
+	// 模式/解锁调度)，使 ControlAllocator 在已知力/力矩上运行。
+	bool _verify_active{false};
+	matrix::Vector<float, 6> _verify_wrench{};   ///< [fx,fy,fz,tx,ty,tz] 机体 FRD, N / N·m
+
+	// Acro 模式: 开环固定力/力矩注入，用于控制分配测试。
+	bool _acro_active{false};
+	matrix::Vector<float, 6> _acro_wrench{};      ///< [fx,fy,fz,tx,ty,tz] 机体 FRD
+	uint64_t _acro_duration_us{0};                 ///< 超时后自动关闭 (0=持续)
+	hrt_abstime _acro_start_time{0};               ///< acro 模式激活时刻
+	int _acro_reset_hold{0};                       ///< 短暂零力/力矩，复位舵机
+	static constexpr int ACRO_RESET_HOLD = 125;    ///< ~500ms 零力/力矩保持，舵机复位
+
+	// Sweep 模式: 自动 6D 力/力矩逐维扫频。
+	bool _sweep_active{false};
+	int _sweep_axis{0};           ///< 当前轴 (0=Fx,1=Fy,2=Fz,3=Tx,4=Ty,5=Tz)
+	int _sweep_step{0};           ///< 当前轴内步数 (0.._sweep_samples-1)
+	int _sweep_samples{10};       ///< 每轴采样点数 (0 → max)
+	float _sweep_max[6]{};        ///< 各轴最大值
+	int _sweep_hold_count{0};     ///< 当前采样点剩余保持步数
+	int _sweep_reset_hold{0};     ///< 扫频前短暂零力/力矩复位舵机
+	static constexpr int SWEEP_HOLD = 60;  ///< 每采样点保持 ~240ms (足够分配器收敛)
+	static constexpr int SWEEP_RESET_HOLD = 125;  ///< ~500ms 零力/力矩保持，舵机复位
+
+	// 手动模式: 角速率指令积分得到的姿态参考
 	matrix::Quatf _q_att_ref{1.f, 0.f, 0.f, 0.f};
 
-	// Position mode: integrated position setpoint for hold (re-init on (re)arm)
+	// 位置模式: 位置保持用积分位置指令 ((重新)解锁时初始化)
 	matrix::Vector3f _pos_sp{};
 	bool _pos_sp_init{false};
 
 	hrt_abstime _last_run{0};
 	perf_counter_t _loop_perf;
+
+	// 最近一次期望力/力矩 (机体坐标系), 通过 `info` 命令查看。
+	// publish_wrench() 中更新; custom_command 读取。
+	matrix::Vector3f _tau_des_last{};   ///< 最近期望力矩 [N·m], 机体坐标系
+	matrix::Vector3f _f_des_last{};     ///< 最近期望力 [N], 机体坐标系
+	hrt_abstime _wrench_timestamp{0};   ///< 最近力/力矩更新时间戳
 };
