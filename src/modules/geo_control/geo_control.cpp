@@ -36,6 +36,14 @@
 #include <px4_platform_common/log.h>
 #include <px4_platform_common/tasks.h>
 #include <lib/perf/perf_counter.h>
+
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <poll.h>
+#include <cstring>
 #include <lib/mathlib/mathlib.h>
 
 using namespace matrix;
@@ -1256,11 +1264,14 @@ int GeoControl::vel_test_command(int argc, char *argv[])
 
 int GeoControl::verify_allocation()
 {
-	// 验证 MorphQuad 控制分配: 注入固定机体 6D 力/力矩，
-	// 从真实 ControlAllocator 读回各旋翼电机+舵机输出。
-	// 实际力/力矩使用与 ActuatorEffectivenessMorphQuad 相同的
-	// 前向运动学重构 (t_i = T_i·(sinα cosβ, sinβ, -cosα cosβ),
-	// T_i = esc_i²·TMAX)，重构误差小即表示分配器收敛到指令力/力矩。
+	// ── 端到端验证 MorphQuad 控制分配 ──
+	// 双重对比: (1)前向运动学重构  (2)JSBSim 物理仿真实际力/力矩
+	//
+	// 链路: geo_control → ControlAllocator → MAVLink → bridge → JSBSim
+	//       JSBSim 合力/力矩 → bridge UDP :9871 → geo_control 读取
+	//
+	// JSBSim FK: t_i = T_i·(sinα cosβ, sinβ, -cosα cosβ),  T_i = esc_i²·TMAX
+	// 重构误差小 → 分配器收敛; JSBSim 误差小 → 物理模型与分配器一致
 	const float tmax = math::max(_param_ca_mq_tmax.get(), 1.f);
 	const float l = _param_ca_mq_l.get();
 	const float b = _param_ca_mq_b.get();
@@ -1268,17 +1279,40 @@ int GeoControl::verify_allocation()
 	static constexpr int NQ = 4;
 	const float lx[NQ] = { l,  l, -l, -l};
 	const float ly[NQ] = { b, -b, -b,  b};
+	static constexpr uint16_t WRENCH_PORT = 9871;  // bridge 力/力矩 UDP 反馈端口
 
 	uORB::Subscription sub_motors{ORB_ID(actuator_motors)};
 	uORB::Subscription sub_servos{ORB_ID(actuator_servos)};
 
+	// ── 打开 UDP socket 接收 JSBSim 实际力/力矩 ──
+	int wrench_fd = socket(AF_INET, SOCK_DGRAM, 0);
+	if (wrench_fd < 0) {
+		PX4_ERR("verify: 无法创建 UDP socket");
+		return -1;
+	}
+	{
+		int opt = 1;
+		setsockopt(wrench_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+		struct sockaddr_in addr{};
+		addr.sin_family = AF_INET;
+		addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+		addr.sin_port = htons(WRENCH_PORT);
+		if (bind(wrench_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+			PX4_ERR("verify: UDP bind :%d 失败 (bridge 是否已启动?)", (int)WRENCH_PORT);
+			::close(wrench_fd);
+			return -1;
+		}
+		// 非阻塞模式
+		fcntl(wrench_fd, F_SETFL, O_NONBLOCK);
+	}
+
 	// 60 组固定 6D 力/力矩: 每个自由度单轴斜坡 (6轴 × 10 个幅值)，
 	// 每个控制方向以递增幅值测试。
-	// scale = 各 DOF 斜坡终点 (力 N, 力矩 N·m)
 	const float scale[6] = {80.f, 80.f, 110.f, 18.f, 18.f, 10.f};  // fx,fy,fz,tx,ty,tz
 
-	PX4_INFO("MorphQuad 分配验证 — 60 组固定 6D 力/力矩");
-	PX4_INFO("舵机 FK: t_i = T_i·(sinα cosβ, sinβ, -cosα cosβ),  T_i = esc_i²·TMAX = %.2f N", (double)tmax);
+	PX4_INFO("MorphQuad 端到端分配验证 — 60 组固定 6D 力/力矩");
+	PX4_INFO("  FK: t_i = T_i·(sinα cosβ, sinβ, -cosα cosβ),  T_i = esc_i²·TMAX = %.2f N", (double)tmax);
+	PX4_INFO("  JSBSim 反馈: UDP :%d (bridge 力/力矩)", (int)WRENCH_PORT);
 
 	_verify_active = true;
 
@@ -1290,10 +1324,33 @@ int GeoControl::verify_allocation()
 
 		_verify_wrench = W;
 
-		// 等待控制器注入力/力矩，分配器收敛。
-		// Gauss-Newton 迭代约 6×/周期; 120 ms ≈ 数个控制周期
-		px4_usleep(120000);
+		// 等待控制分配器收敛 + JSBSim 物理仿真响应
+		// 链路: geo_control(4ms) → allocator(4ms) → MAVLink(~1ms) → bridge(4ms) → JSBSim(4ms)
+		// → server(4ms) → bridge(4ms) → UDP → geo_control。约需 100-150ms 稳定。
+		px4_usleep(150000);
 
+		// ── 读 JSBSim 实际力/力矩 (UDP) ──
+		double jsb_wrench[6] = {};
+		bool jsb_valid = false;
+		{
+			// 排空缓冲区，只保留最新一帧
+			double buf[6];
+			struct pollfd pfd{};
+			pfd.fd = wrench_fd;
+			pfd.events = POLLIN;
+			int last_read = 0;
+			while (::poll(&pfd, 1, 0) > 0) {
+				ssize_t n = recvfrom(wrench_fd, buf, sizeof(buf), 0, nullptr, nullptr);
+				if (n == (ssize_t)sizeof(buf)) {
+					memcpy(jsb_wrench, buf, sizeof(buf));
+					jsb_valid = true;
+					last_read++;
+				}
+				pfd.revents = 0;
+			}
+		}
+
+		// ── 读取执行器输出 (FK 重构) ──
 		actuator_motors_s motors{};
 		actuator_servos_s servos{};
 		sub_motors.copy(&motors);
@@ -1306,6 +1363,7 @@ int GeoControl::verify_allocation()
 			     k, (double)W(0), (double)W(1), (double)W(2),
 			     (double)W(3), (double)W(4), (double)W(5));
 
+		// 逐旋翼明细
 		for (int i = 0; i < NQ; ++i) {
 			const float esc = (i < actuator_motors_s::NUM_CONTROLS) ? motors.control[i] : NAN;
 			const float alpha = (2 * i < actuator_servos_s::NUM_CONTROLS) ? servos.control[2 * i] * M_PI_F : NAN;
@@ -1325,22 +1383,43 @@ int GeoControl::verify_allocation()
 				     (double)math::degrees(beta), (double)T);
 		}
 
-		matrix::Vector<float, 6> Wach{};
-		Wach(0) = f_ach(0); Wach(1) = f_ach(1); Wach(2) = f_ach(2);
-		Wach(3) = tau_ach(0); Wach(4) = tau_ach(1); Wach(5) = tau_ach(2);
-		matrix::Vector<float, 6> e_res = W - Wach;
-		float err_norm = 0.f;
+		// ── FK 重构对比 ──
+		float err_fk = 0.f;
+		{
+			matrix::Vector<float, 6> Wfk{};
+			Wfk(0)=f_ach(0); Wfk(1)=f_ach(1); Wfk(2)=f_ach(2);
+			Wfk(3)=tau_ach(0); Wfk(4)=tau_ach(1); Wfk(5)=tau_ach(2);
+			for (int j=0; j<6; ++j) { float e=W(j)-Wfk(j); err_fk += e*e; }
+			err_fk = sqrtf(err_fk);
+		}
 
-		for (int j = 0; j < 6; ++j) { err_norm += e_res(j) * e_res(j); }
+		// ── JSBSim 物理对比 ──
+		double err_jsb = -1.0;
+		if (jsb_valid) {
+			err_jsb = 0.0;
+			for (int j = 0; j < 6; ++j) {
+				double e = (double)W(j) - jsb_wrench[j];
+				err_jsb += e * e;
+			}
+			err_jsb = sqrt(err_jsb);
+		}
 
-		err_norm = sqrtf(err_norm);
-
-		PX4_INFO_RAW("    ach F=(%7.2f,%7.2f,%7.2f) T=(%6.2f,%6.2f,%6.2f)  |err|=%8.3f\n",
+		PX4_INFO_RAW("    FK:  F=(%7.2f,%7.2f,%7.2f) T=(%6.2f,%6.2f,%6.2f)  |err|=%7.3f\n",
 			     (double)f_ach(0), (double)f_ach(1), (double)f_ach(2),
 			     (double)tau_ach(0), (double)tau_ach(1), (double)tau_ach(2),
-			     (double)err_norm);
+			     (double)err_fk);
+
+		if (jsb_valid) {
+			PX4_INFO_RAW("    JSB: F=(%7.2f,%7.2f,%7.2f) T=(%6.2f,%6.2f,%6.2f)  |err|=%7.3f\n",
+				     jsb_wrench[0], jsb_wrench[1], jsb_wrench[2],
+				     jsb_wrench[3], jsb_wrench[4], jsb_wrench[5],
+				     (double)err_jsb);
+		} else {
+			PX4_INFO_RAW("    JSB: (无数据 — bridge 力/力矩 UDP 反馈未到达)\n");
+		}
 	}
 
+	::close(wrench_fd);
 	_verify_active = false;
 	PX4_INFO("验证完成 — 注入已关闭，控制器恢复");
 	return 0;
