@@ -1316,6 +1316,9 @@ int GeoControl::verify_allocation()
 
 	_verify_active = true;
 
+	// 记录上一帧 JSBSim 时间戳，用于对齐检测
+	double jsb_timestamp_prev = 0.0;
+
 	for (int k = 0; k < 60; ++k) {
 		const int axis = k / 10;          // 0..5
 		const int m = (k % 10) + 1;       // 1..10
@@ -1324,31 +1327,44 @@ int GeoControl::verify_allocation()
 
 		_verify_wrench = W;
 
-		// 等待控制分配器收敛 + JSBSim 物理仿真响应
-		// 链路: geo_control(4ms) → allocator(4ms) → MAVLink(~1ms) → bridge(4ms) → JSBSim(4ms)
-		// → server(4ms) → bridge(4ms) → UDP → geo_control。约需 100-150ms 稳定。
-		px4_usleep(150000);
-
-		// ── 读 JSBSim 实际力/力矩 (UDP) ──
+		// ── 数据对齐: 等管道稳定 + 取新时间戳帧 ──
+		// 链路: geo_control → allocator → MAVLink → bridge → server → JSBSim
+		//       → server FK → bridge UDP → geo_control。往返 ~30-40ms。
 		double jsb_wrench[6] = {};
+		double jsb_timestamp = 0.0;
 		bool jsb_valid = false;
 		{
-			// 排空缓冲区，只保留最新一帧
-			double buf[6];
 			struct pollfd pfd{};
 			pfd.fd = wrench_fd;
 			pfd.events = POLLIN;
-			int last_read = 0;
+
+			// (1) 排空缓冲区 (旧数据)
+			double pkt[7];
 			while (::poll(&pfd, 1, 0) > 0) {
-				ssize_t n = recvfrom(wrench_fd, buf, sizeof(buf), 0, nullptr, nullptr);
-				if (n == (ssize_t)sizeof(buf)) {
-					memcpy(jsb_wrench, buf, sizeof(buf));
-					jsb_valid = true;
-					last_read++;
-				}
+				recvfrom(wrench_fd, pkt, sizeof(pkt), 0, nullptr, nullptr);
 				pfd.revents = 0;
 			}
+
+			// (2) 等管道稳定 + 新数据到达 (最多等 300ms)
+			bool aligned = false;
+			for (int retry = 0; retry < 30; retry++) {
+				px4_usleep(10000);  // 10ms
+
+				while (::poll(&pfd, 1, 0) > 0) {
+					ssize_t n = recvfrom(wrench_fd, pkt, sizeof(pkt), 0, nullptr, nullptr);
+					if (n == (ssize_t)sizeof(pkt) && pkt[0] > jsb_timestamp_prev) {
+						jsb_timestamp = pkt[0];
+						memcpy(jsb_wrench, &pkt[1], sizeof(jsb_wrench));
+						jsb_valid = true;
+						aligned = true;
+					}
+					pfd.revents = 0;
+				}
+
+				if (aligned) break;
+			}
 		}
+		jsb_timestamp_prev = jsb_timestamp;
 
 		// ── 读取执行器输出 (FK 重构) ──
 		actuator_motors_s motors{};
@@ -1410,10 +1426,10 @@ int GeoControl::verify_allocation()
 			     (double)err_fk);
 
 		if (jsb_valid) {
-			PX4_INFO_RAW("    JSB: F=(%7.2f,%7.2f,%7.2f) T=(%6.2f,%6.2f,%6.2f)  |err|=%7.3f\n",
+			PX4_INFO_RAW("    JSB: F=(%7.2f,%7.2f,%7.2f) T=(%6.2f,%6.2f,%6.2f)  |err|=%7.3f  t=%.3fs\n",
 				     jsb_wrench[0], jsb_wrench[1], jsb_wrench[2],
 				     jsb_wrench[3], jsb_wrench[4], jsb_wrench[5],
-				     (double)err_jsb);
+				     (double)err_jsb, jsb_timestamp);
 		} else {
 			PX4_INFO_RAW("    JSB: (无数据 — bridge 力/力矩 UDP 反馈未到达)\n");
 		}
