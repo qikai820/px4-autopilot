@@ -7,10 +7,11 @@
  *   z: down
  *
  * The paper writes its thrust vector with a positive-up z axis.  The
- * implementation below therefore uses the equivalent PX4 BODY vector
+ * implementation below uses the PX4 BODY vector, kept consistent with the
+ * JSBSim model (GimbalVectoring.xml: ty = +sin(beta)):
  *
  *   g_body(alpha,beta) = [ sin(alpha) cos(beta),
- *                         -sin(beta),
+ *                         +sin(beta),
  *                         -cos(alpha) cos(beta) ]^T
  *
  * The allocation itself is the paper's constant 6x12 matrix M:
@@ -97,14 +98,18 @@ void ActuatorEffectivenessMorphQuad::updateSetpoint(
 		//     Omega/Omega_MAX = sqrt(T/TMAX).
 		omega_cmd[i] = (T > 1e-5f) ? sqrtf(math::constrain(T / tmax, 0.f, 1.f)) : 0.f;
 
-		// PX4 actuator outputs are normalized. The JSBSim model converts
-		// alpha/pi and beta/pi back to radians.
-		alpha_cmd[i] = alpha / M_PI_F;
-		beta_cmd[i] = beta / M_PI_F;
+		// PX4 actuator outputs are normalized to [-1, 1], and the bridge
+		// maps ±1 -> ±π/2 rad (see configs/morphquad.xml scale=π/2).
+		// Therefore normalize the servo angle by π/2, NOT by π.
+		alpha_cmd[i] = alpha / (M_PI_F / 2.f);
+		beta_cmd[i] = beta / (M_PI_F / 2.f);
+
+		// 假设 MOTORS 占 0..3，SERVOS 占 4..11
+		static constexpr int SERVO_OFFSET = NUM_ROTORS; // 4
 
 		const int motor_idx = i;
-		const int alpha_idx = 4 + 2 * i;
-		const int beta_idx = 5 + 2 * i;
+		const int alpha_idx = SERVO_OFFSET + 2 * i;
+		const int beta_idx  = SERVO_OFFSET + 2 * i + 1;
 
 		const float motor_actual = math::constrain(omega_cmd[i],
 							  actuator_min(motor_idx), actuator_max(motor_idx));
@@ -269,6 +274,21 @@ void ActuatorEffectivenessMorphQuad::computeThrustVectors(
 	N_M(6, 5) = 0.f; N_M(7, 5) = 0.f; N_M(8, 5) = -1.f;
 	N_M(9, 5) = 0.f; N_M(10,5) = 0.f; N_M(11,5) = 1.f;
 
+	// The basis satisfies M*N_M = 0 for any non-zero l,b.  Validate it now
+	// that N_M is fully populated; checking on an all-zero matrix before the
+	// fill would pass trivially and detect nothing.
+	{
+		Matrix<float, WRENCH_AXES, WRENCH_AXES> M_N_M = M * N_M;
+
+		for(int r = 0; r < WRENCH_AXES; ++r) {
+			for(int c = 0; c < WRENCH_AXES; ++c) {
+				if (fabsf(M_N_M(r, c)) > 1e-3f) {
+					PX4_ERR("Nullspace basis N_M is inconsistent with M at (%d,%d): %f", r, c, (double)M_N_M(r, c));
+				}
+			}
+		}
+	}
+
 	// Eq. (16): use the force direction to redistribute the 12-D thrust
 	// vector without changing the commanded wrench.
 	const Vector<float, WRENCH_AXES> c = computeNullspaceCoefficient(f_des);
@@ -301,6 +321,7 @@ void ActuatorEffectivenessMorphQuad::computeThrustVectors(
 		t_out[i][1] = t(3 * i + 1);
 		t_out[i][2] = t(3 * i + 2);
 	}
+
 }
 
 void ActuatorEffectivenessMorphQuad::recoverServoAngles(
@@ -319,15 +340,28 @@ void ActuatorEffectivenessMorphQuad::recoverServoAngles(
 	const float tz = t[2] / norm;
 
 	// PX4 BODY is FRD. The paper uses a positive-up z in Eq. (20).
-	// Therefore:
-	//   beta = asin(-ty)
+	// The JSBSim model (GimbalVectoring.xml) defines the body thrust unit
+	// vector as (sin a, sin b, -sqrt(1-..)), i.e. ty = +sin(beta). Keep the
+	// allocator consistent with that physical convention:
+	//   beta = asin(ty)
 	//   alpha = atan2(tx, -tz)
-	const float beta1 = asinf(math::constrain(-ty, -1.f, 1.f));
+	const float beta1 = asinf(math::constrain(ty, -1.f, 1.f));
 	const float alpha1 = atan2f(tx, -tz);
 
 	// Equivalent second trigonometric branch.
 	const float beta2 = M_PI_F - beta1;
 	const float alpha2 = M_PI_F + alpha1;
+
+	// The servo actuator output is normalized to ±1 <-> ±π/2 rad
+	// (see updateSetpoint: alpha_cmd = alpha/(π/2) and bridge scale = π/2).
+	// Any gimbal angle beyond ±π/2 is therefore unrepresentable and would be
+	// clamped to ±1.0, which can make the minimal-motion branch selector latch
+	// onto the 180°-aliased trigonometric branch (e.g. after a prior infeasible
+	// wrench drove _alpha_prev to ±π). Cap the candidate window at the
+	// representable range so the alias is never selectable; the configured
+	// mechanical limit (CA_MQ_ALPM/BETM) still applies if tighter than π/2.
+	const float alpha_limit = math::min(math::radians(_param_ca_mq_alpm.get()), M_PI_F / 2.f);
+	const float beta_limit  = math::min(math::radians(_param_ca_mq_betm.get()),  M_PI_F / 2.f);
 
 	float best_alpha = alpha1;
 	float best_beta = beta1;
@@ -342,16 +376,16 @@ void ActuatorEffectivenessMorphQuad::recoverServoAngles(
 		for (int ka = -NR; ka <= NR; ++ka) {
 			const float a = a0 + 2.f * M_PI_F * static_cast<float>(ka);
 
-			if (a < math::radians(-_param_ca_mq_alpm.get()) - 1e-4f ||
-			    a > math::radians(_param_ca_mq_alpm.get()) + 1e-4f) {
+			if (a < -alpha_limit - 1e-4f ||
+			    a >  alpha_limit + 1e-4f) {
 				continue;
 			}
 
 			for (int kb = -NR; kb <= NR; ++kb) {
 				const float b = b0 + 2.f * M_PI_F * static_cast<float>(kb);
 
-				if (b < math::radians(-_param_ca_mq_betm.get()) - 1e-4f ||
-				    b > math::radians(_param_ca_mq_betm.get()) + 1e-4f) {
+				if (b < -beta_limit - 1e-4f ||
+				    b >  beta_limit + 1e-4f) {
 					continue;
 				}
 
@@ -413,8 +447,9 @@ void ActuatorEffectivenessMorphQuad::computeUnallocatedWrench(
 
 	for (int i = 0; i < NUM_ROTORS; ++i) {
 		const float esc = actuator_sp(i);
-		const float alpha = actuator_sp(4 + 2 * i) * M_PI_F;
-		const float beta = actuator_sp(5 + 2 * i) * M_PI_F;
+		// 归一化 ±1 -> ±π/2 rad (与 updateSetpoint 输出和 bridge scale=π/2 一致)
+		const float alpha = actuator_sp(4 + 2 * i) * (M_PI_F / 2.f);
+		const float beta = actuator_sp(5 + 2 * i) * (M_PI_F / 2.f);
 
 		// Same actuator model as the JSBSim XML: T = TMAX * esc^2.
 		const float T = esc * esc * tmax;
@@ -424,7 +459,9 @@ void ActuatorEffectivenessMorphQuad::computeUnallocatedWrench(
 		const float sb = sinf(beta);
 		const float cb = cosf(beta);
 
-		const Vector3f g(sa * cb, -sb, -ca * cb);
+		// Body thrust unit vector. Must match JSBSim (GimbalVectoring.xml):
+		//   tx = sin(a), ty = +sin(b), tz = -cos(a)cos(b)
+		const Vector3f g(sa * cb, sb, -ca * cb);
 		const Vector3f t = T * g;
 		const Vector3f r(x[i], y[i], 0.f);
 
