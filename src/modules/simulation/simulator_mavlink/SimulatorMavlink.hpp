@@ -55,7 +55,9 @@
 #include <uORB/Publication.hpp>
 #include <uORB/Subscription.hpp>
 #include <uORB/SubscriptionInterval.hpp>
+#include <uORB/topics/actuator_motors.h>
 #include <uORB/topics/actuator_outputs.h>
+#include <uORB/topics/actuator_servos.h>
 #include <uORB/topics/battery_status.h>
 #include <uORB/topics/differential_pressure.h>
 #include <uORB/topics/distance_sensor.h>
@@ -265,6 +267,8 @@ private:
 	// uORB subscription handlers
 	int _actuator_outputs_sub{-1};
 	actuator_outputs_s _actuator_outputs{};
+	uORB::Subscription _actuator_motors_sub{ORB_ID(actuator_motors)};
+	uORB::Subscription _actuator_servos_sub{ORB_ID(actuator_servos)};
 
 	uORB::Subscription _vehicle_status_sub{ORB_ID(vehicle_status)};
 	uORB::Subscription _vehicle_command_sub{ORB_ID(vehicle_command)};
@@ -319,6 +323,7 @@ private:
 	DEFINE_PARAMETERS(
 		(ParamInt<px4::params::MAV_TYPE>) _param_mav_type,
 		(ParamInt<px4::params::MAV_SYS_ID>) _param_mav_sys_id,
-		(ParamInt<px4::params::MAV_COMP_ID>) _param_mav_comp_id
+		(ParamInt<px4::params::MAV_COMP_ID>) _param_mav_comp_id,
+		(ParamInt<px4::params::SIM_MQ_BENCH>) _param_sim_mq_bench
 	)
 };

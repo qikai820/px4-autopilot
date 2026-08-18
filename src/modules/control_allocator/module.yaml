@@ -611,7 +611,7 @@ parameters:
             unit: m
             min: 0.01
             max: 1.0
-            default: 0.17
+            default: 0.25
 
         CA_MQ_B:
             description:
@@ -625,7 +625,24 @@ parameters:
             unit: m
             min: 0.01
             max: 1.0
-            default: 0.17
+            default: 0.225
+
+        CA_MQ_Z:
+            description:
+                short: Rotor-plane vertical position relative to the center of gravity
+                long: |
+                  Vertical coordinate of the common rotor plane relative to the
+                  center of gravity in the PX4 body FRD frame. A negative value
+                  places the rotor plane above the center of gravity. This term
+                  is required to correctly allocate the pitch/roll torque caused
+                  by a horizontal thrust vector.
+            type: float
+            decimal: 3
+            increment: 0.005
+            unit: m
+            min: -1.0
+            max: 1.0
+            default: -0.04
 
         CA_MQ_CT:
             description:
@@ -715,17 +732,18 @@ parameters:
                 short: Max per-rotor thrust at full throttle
                 long: |
                   Thrust produced by a single rotor pair at esc-cmd-norm = 1.0,
-                  matching the JSBSim morphquad model thrust table
-                  (esc=1.0 -> 6.182 lbf = 27.5 N). Used to normalize the motor
+                  matching the held-down JSBSim morphquad calibration
+                  (esc=1.0 -> approximately 8.88 lbf = 39.5 N per coaxial arm).
+                  Used to normalize the motor
                   actuator output into the [0,1] throttle fraction the model
-                  expects (esc=0.4 -> hover thrust).
+                  expects (esc≈0.53 -> hover thrust).
             type: float
             decimal: 3
             increment: 0.5
             unit: N
             min: 1.0
             max: 200.0
-            default: 27.5
+            default: 39.5
 
         CA_MQ_NS_GAIN:
             description:

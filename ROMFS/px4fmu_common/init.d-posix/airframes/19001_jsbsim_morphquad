@@ -25,8 +25,13 @@ param set-default CA_AIRFRAME 16
 
 # --- MorphQuad geometry (matches JSBSim morphquad.xml) ---
 param set-default CA_MQ_L 0.25
-param set-default CA_MQ_B 0.20
-param set-default CA_MQ_TMAX 27.5
+param set-default CA_MQ_B 0.225
+# Rotor plane is 4 cm above the CG in body-FRD coordinates (z < 0).
+param set-default CA_MQ_Z -0.04
+# Held-down JSBSim calibration: esc=0.638 produces 16.05 N per coaxial arm,
+# equivalent to TMAX=39.5 N for the allocator's T = TMAX * esc^2 model.
+param set-default CA_MQ_TMAX 39.5
+param set-default GC_THRUST_MAX 158.0
 
 # --- PWM output channel mapping ---
 # Motors: channels 1-4

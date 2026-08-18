@@ -32,6 +32,11 @@ using namespace matrix;
 
 namespace
 {
+// The installed servos have a +/-180 degree mechanical range.  PX4 actuator
+// setpoints are normalized to [-1, 1], so this is the shared conversion used
+// by the allocator and the JSBSim bridge.
+constexpr float kServoAngleRange = M_PI_F;
+
 Vector3f thrustUnitVector(float alpha, float beta)
 {
 	const float sa = sinf(alpha);
@@ -85,29 +90,12 @@ void ActuatorEffectivenessMorphQuad::updateSetpoint(
 			     control_sp(ControlAxis::THRUST_Y),
 			     control_sp(ControlAxis::THRUST_Z));
 
-	Vector3f f_alloc = f_req;
-
 	_motor_saturated = false;
 	_servo_saturated = false;
 	_allocation_saturated = false;
 
-	// Feasibility gate on the vertical command.
-	// In the PX4 body frame z points down, and a rotor's thrust unit vector is
-	//   tz = -cos(alpha) cos(beta) <= 0
-	// i.e. thrust can only point UP. A positive (downward) Fz is therefore
-	// physically impossible: rotors cannot "suck" the vehicle down. If such a
-	// command reached the minimum-norm solve it would drive the gimbal angles
-	// to the +/-pi/2 limit (alpha slam) and produce large parasitic forces.
-	// Clamp Fz to the achievable upper bound 0; the lower bound (max up-thrust)
-	// is already enforced by the per-rotor TMAX magnitude clip in
-	// computeThrustVectors().
-	if (f_alloc(2) > 0.f) {
-		f_alloc(2) = 0.f;
-		_allocation_saturated = true;
-	}
-
 	float t[NUM_ROTORS][3] {};
-	_allocation_saturated |= computeThrustVectors(f_alloc, tau_des, t);
+	_allocation_saturated |= computeThrustVectors(f_req, tau_des, t);
 
 	const float tmax = math::max(_param_ca_mq_tmax.get(), 0.001f);
 
@@ -130,10 +118,9 @@ void ActuatorEffectivenessMorphQuad::updateSetpoint(
 		omega_cmd[i] = (T > 1e-5f) ? sqrtf(math::constrain(T / tmax, 0.f, 1.f)) : 0.f;
 
 		// PX4 actuator outputs are normalized to [-1, 1], and the bridge
-		// maps ±1 -> ±π/2 rad (see configs/morphquad.xml scale=π/2).
-		// Therefore normalize the servo angle by π/2, NOT by π.
-		alpha_cmd[i] = alpha / (M_PI_F / 2.f);
-		beta_cmd[i] = beta / (M_PI_F / 2.f);
+		// maps +/-1 to the installed servo's +/-180 degree range.
+		alpha_cmd[i] = alpha / kServoAngleRange;
+		beta_cmd[i] = beta / kServoAngleRange;
 
 		// 假设 MOTORS 占 0..3，SERVOS 占 4..11
 		static constexpr int SERVO_OFFSET = NUM_ROTORS; // 4
@@ -157,8 +144,8 @@ void ActuatorEffectivenessMorphQuad::updateSetpoint(
 		actuator_sp(alpha_idx) = alpha_actual;
 		actuator_sp(beta_idx) = beta_actual;
 
-		_alpha_prev[i] = alpha_actual * (M_PI_F / 2.f);
-		_beta_prev[i] = beta_actual * (M_PI_F / 2.f);
+		_alpha_prev[i] = alpha_actual * kServoAngleRange;
+		_beta_prev[i] = beta_actual * kServoAngleRange;
 	}
 
 	computeUnallocatedWrench(f_req, tau_des, actuator_sp);
@@ -204,6 +191,7 @@ bool ActuatorEffectivenessMorphQuad::computeThrustVectors(
 {
 	const float l = _param_ca_mq_l.get();
 	const float b = _param_ca_mq_b.get();
+	const float z = _param_ca_mq_z.get();
 
 	// Rotor order is the same as the paper's M matrix:
 	//   0 RF (+l,+b)
@@ -211,14 +199,14 @@ bool ActuatorEffectivenessMorphQuad::computeThrustVectors(
 	//   2 LB (-l,-b)
 	//   3 RB (-l,+b)
 	//
-	// For each rotor r_i=[x_i,y_i,0], the torque is r_i x t_i.
+	// For each rotor r_i=[x_i,y_i,z], the torque is r_i x t_i.
 	// Hence the constant input matrix is exactly:
 	//
 	// [ 1 0 0 | 1 0 0 | 1 0 0 | 1 0 0 ]
 	// [ 0 1 0 | 0 1 0 | 0 1 0 | 0 1 0 ]
 	// [ 0 0 1 | 0 0 1 | 0 0 1 | 0 0 1 ]
-	// [ 0 0 b | 0 0-b | 0 0-b | 0 0 b ]
-	// [ 0 0-l | 0 0-l | 0 0 l | 0 0 l ]
+	// [-z 0 b | -z 0-b | -z 0-b | -z 0 b ]
+	// [ z 0-l |  z 0-l |  z 0 l |  z 0 l ]
 	// [ -b l 0 | b l 0 | b -l 0 | -b -l 0 ]
 	//
 	// This is the paper's Eq. (9)/(21), expressed in the PX4 body frame.
@@ -234,8 +222,10 @@ bool ActuatorEffectivenessMorphQuad::computeThrustVectors(
 		M(1, j + 1) = 1.f;
 		M(2, j + 2) = 1.f;
 
-		// r x t = [ y*tz, -x*tz, x*ty-y*tx ]
+		// r x t = [y*tz-z*ty, z*tx-x*tz, x*ty-y*tx]
+		M(3, j + 1) = -z;
 		M(3, j + 2) = y[i];
+		M(4, j + 0) = z;
 		M(4, j + 2) = -x[i];
 		M(5, j + 0) = -y[i];
 		M(5, j + 1) = x[i];
@@ -389,16 +379,11 @@ bool ActuatorEffectivenessMorphQuad::recoverServoAngles(
 	const float beta2 = M_PI_F - beta1;
 	const float alpha2 = M_PI_F + alpha1;
 
-	// The servo actuator output is normalized to ±1 <-> ±π/2 rad
-	// (see updateSetpoint: alpha_cmd = alpha/(π/2) and bridge scale = π/2).
-	// Any gimbal angle beyond ±π/2 is therefore unrepresentable and would be
-	// clamped to ±1.0, which can make the minimal-motion branch selector latch
-	// onto the 180°-aliased trigonometric branch (e.g. after a prior infeasible
-	// wrench drove _alpha_prev to ±π). Cap the candidate window at the
-	// representable range so the alias is never selectable; the configured
-	// mechanical limit (CA_MQ_ALPM/BETM) still applies if tighter than π/2.
-	const float alpha_limit = math::max(0.f, math::min(math::radians(_param_ca_mq_alpm.get()), M_PI_F / 2.f));
-	const float beta_limit  = math::max(0.f, math::min(math::radians(_param_ca_mq_betm.get()),  M_PI_F / 2.f));
+	// Equation (14) of the paper selects the equivalent inverse-kinematics
+	// branch nearest to the previous servo state.  The actual servo range is
+	// +/-180 degrees, so apply that hardware bound here.
+	const float alpha_limit = math::max(0.f, math::min(math::radians(_param_ca_mq_alpm.get()), kServoAngleRange));
+	const float beta_limit  = math::max(0.f, math::min(math::radians(_param_ca_mq_betm.get()),  kServoAngleRange));
 
 	float best_alpha = alpha1;
 	float best_beta = beta1;
@@ -479,6 +464,7 @@ void ActuatorEffectivenessMorphQuad::computeUnallocatedWrench(
 
 	const float l = _param_ca_mq_l.get();
 	const float b = _param_ca_mq_b.get();
+	const float z = _param_ca_mq_z.get();
 	const float tmax = math::max(_param_ca_mq_tmax.get(), 0.001f);
 
 	const float x[NUM_ROTORS] = { l, l, -l, -l };
@@ -489,9 +475,9 @@ void ActuatorEffectivenessMorphQuad::computeUnallocatedWrench(
 
 	for (int i = 0; i < NUM_ROTORS; ++i) {
 		const float esc = actuator_sp(i);
-		// 归一化 ±1 -> ±π/2 rad (与 updateSetpoint 输出和 bridge scale=π/2 一致)
-		const float alpha = actuator_sp(4 + 2 * i) * (M_PI_F / 2.f);
-		const float beta = actuator_sp(5 + 2 * i) * (M_PI_F / 2.f);
+		// Normalized +/-1 maps to the installed servo's +/-180 degree range.
+		const float alpha = actuator_sp(4 + 2 * i) * kServoAngleRange;
+		const float beta = actuator_sp(5 + 2 * i) * kServoAngleRange;
 
 		// Same actuator model as the JSBSim XML: T = TMAX * esc^2.
 		const float T = esc * esc * tmax;
@@ -500,7 +486,7 @@ void ActuatorEffectivenessMorphQuad::computeUnallocatedWrench(
 		//   tx = sin(a)cos(b), ty = +sin(b), tz = -cos(a)cos(b)
 		const Vector3f g = thrustUnitVector(alpha, beta);
 		const Vector3f t = T * g;
-		const Vector3f r(x[i], y[i], 0.f);
+		const Vector3f r(x[i], y[i], z);
 
 		f_achieved += t;
 		tau_achieved += r.cross(t);

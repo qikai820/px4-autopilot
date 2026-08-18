@@ -98,9 +98,25 @@ public:
 	void control_step_att_test(uint64_t timestamp_sample);
 	int att_test_command(int argc, char *argv[]);
 	bool _att_test_active{false};
+	uint64_t _att_test_duration_us{0};
+	hrt_abstime _att_test_start{0};
 	float _att_test_roll{0.f};
 	float _att_test_pitch{0.f};
 	float _att_test_yaw{0.f};
+	matrix::Vector3f _att_test_error_last{};
+	matrix::Vector3f _att_test_omega_last{};
+	bool _att_test_feedback_valid{false};
+
+	/** 自动姿态闭环验证: 依次施加 roll/pitch/yaw 正负阶跃并评分。 */
+	void control_step_att_verify(uint64_t timestamp_sample);
+	int att_verify_command(int argc, char *argv[]);
+	bool _att_verify_active{false};
+	int _att_verify_step{0};
+	hrt_abstime _att_verify_step_start{0};
+	matrix::Vector3f _att_verify_error_sum{};
+	float _att_verify_rate_sum{0.f};
+	int _att_verify_score_count{0};
+	int _att_verify_pass_count{0};
 
 	/** 速度测试: 跟踪期望机体速度 (含姿态内环)。 */
 	void control_step_vel_test(uint64_t timestamp_sample);
@@ -236,6 +252,7 @@ private:
 		// MorphQuad 分配几何参数 (从 CA_MQ_* 参数读取，用于重构)
 		(ParamFloat<px4::params::CA_MQ_L>) _param_ca_mq_l,
 		(ParamFloat<px4::params::CA_MQ_B>) _param_ca_mq_b,
+		(ParamFloat<px4::params::CA_MQ_Z>) _param_ca_mq_z,
 		(ParamFloat<px4::params::CA_MQ_TMAX>) _param_ca_mq_tmax
 	)
 

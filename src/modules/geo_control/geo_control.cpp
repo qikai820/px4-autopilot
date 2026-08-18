@@ -43,6 +43,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <poll.h>
+#include <cmath>
 #include <cstring>
 #include <lib/mathlib/mathlib.h>
 
@@ -170,8 +171,8 @@ void GeoControl::publish_setpoints(const Vector3f &f_des_world, const Vector3f &
 	// ── 归一化总推力估计 (总力占比) ──
 	// throttle_norm = ‖f_des_world‖ / (N_rotors * TMAX) = ‖f‖/GC_THRUST_MAX。
 	// 这是总力占比，而非单路电机指令。悬停时 ‖f‖ = mass*g，
-	// 因此 throttle_norm ≈ 0.41 (44.7/110)。实际单路电机指令为
-	// 归一化转速 sqrt(T_i/TMAX) ≈ 0.64 (悬停)，参见 ActuatorEffectivenessMorphQuad。
+	// 因此 throttle_norm ≈ 0.28 (44.7/158)。实际单路电机指令为
+	// 归一化转速 sqrt(T_i/TMAX) ≈ 0.53 (悬停)，参见 ActuatorEffectivenessMorphQuad。
 	const float throttle_norm = math::constrain(f_des_world.norm() / thrust_max, 0.f, 1.f);
 
 	// ── vehicle_local_position_setpoint (位置/速度调试 + 油门估计) ──
@@ -610,8 +611,22 @@ void GeoControl::control_step(const vehicle_local_position_s &local_pos)
 		return;
 	}
 
+	// 自动姿态闭环验证: 依次运行多轴阶跃并评分。
+	if (_att_verify_active) {
+		control_step_att_verify(local_pos.timestamp_sample);
+		return;
+	}
+
 	// 姿态测试: 跟踪期望欧拉角
 	if (_att_test_active) {
+		if (_att_test_duration_us > 0 &&
+		    hrt_absolute_time() - _att_test_start >= _att_test_duration_us) {
+			_att_test_active = false;
+			PX4_INFO("ATT_TEST: 完成，请切换到安全模式或执行 disarm");
+			publish_wrench(Vector3f(0.f, 0.f, 0.f), Vector3f(0.f, 0.f, 0.f), hrt_absolute_time());
+			return;
+		}
+
 		control_step_att_test(local_pos.timestamp_sample);
 		return;
 	}
@@ -888,6 +903,17 @@ int GeoControl::custom_command(int argc, char *argv[])
 			return inst->att_test_command(argc, argv);
 		}
 
+		if (!strcmp(argv[0], "att_verify")) {
+			GeoControl *inst = get_instance();
+
+			if (!inst) {
+				PX4_ERR("geo_control 未运行 — 请先启动");
+				return -1;
+			}
+
+			return inst->att_verify_command(argc, argv);
+		}
+
 		if (!strcmp(argv[0], "vel_test")) {
 			GeoControl *inst = get_instance();
 
@@ -1096,20 +1122,24 @@ void GeoControl::control_step_att_test(uint64_t timestamp_sample)
 
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
 
+	Eulerf euler_cur(R_q);
+	float roll_err = _att_test_roll - euler_cur.phi();
+	float pitch_err = _att_test_pitch - euler_cur.theta();
+	float yaw_err = _att_test_yaw - euler_cur.psi();
+
+	while (yaw_err > M_PI_F) { yaw_err -= 2.f * M_PI_F; }
+
+	while (yaw_err < -M_PI_F) { yaw_err += 2.f * M_PI_F; }
+
+	_att_test_error_last = Vector3f(roll_err, pitch_err, yaw_err);
+	_att_test_omega_last = omega;
+	_att_test_feedback_valid = true;
+
 	static hrt_abstime last_p = 0;
 	hrt_abstime now = hrt_absolute_time();
 
 	if (now - last_p > 500000) {
 		last_p = now;
-		Eulerf euler_cur(R_q);
-		float roll_err = _att_test_roll - euler_cur.phi();
-		float pitch_err = _att_test_pitch - euler_cur.theta();
-		float yaw_err = _att_test_yaw - euler_cur.psi();
-
-		while (yaw_err > M_PI_F) { yaw_err -= 2*M_PI_F; }
-
-		while (yaw_err < -M_PI_F) { yaw_err += 2*M_PI_F; }
-
 		PX4_INFO("ATT_TEST 指令(r=%.0f,p=%.0f,y=%.0f)° 实际(r=%.0f,p=%.0f,y=%.0f)° 误差(r=%.1f,p=%.1f,y=%.1f)° tau=(%.2f,%.2f,%.2f)",
 			 (double)math::degrees(_att_test_roll), (double)math::degrees(_att_test_pitch),
 			 (double)math::degrees(_att_test_yaw),
@@ -1133,6 +1163,8 @@ int GeoControl::att_test_command(int argc, char *argv[])
 
 	if (!strcmp(argv[1], "stop")) {
 		_att_test_active = false;
+		_att_test_duration_us = 0;
+		_att_test_feedback_valid = false;
 		resetIntegrators();
 		publish_wrench(Vector3f(0,0,0), Vector3f(0,0,0), hrt_absolute_time());
 		PX4_INFO("ATT_TEST: 已停止");
@@ -1148,8 +1180,10 @@ int GeoControl::att_test_command(int argc, char *argv[])
 
 	if (argc >= 5) { dur_s = atof(argv[4]); }
 
-	_offboard_test_dur_us = (uint64_t)(dur_s * 1e6f);
-	_offboard_test_start = hrt_absolute_time();
+	_att_verify_active = false;
+	_att_test_duration_us = (uint64_t)(dur_s * 1e6f);
+	_att_test_start = hrt_absolute_time();
+	_att_test_feedback_valid = false;
 	resetIntegrators();
 	_att_test_active = true;
 
@@ -1158,6 +1192,167 @@ int GeoControl::att_test_command(int argc, char *argv[])
 		 (double)(argc >= 3 ? atof(argv[2]) : 0.0),
 		 (double)(argc >= 4 ? atof(argv[3]) : 0.0),
 		 (double)dur_s);
+	return 0;
+}
+
+void GeoControl::control_step_att_verify(uint64_t timestamp_sample)
+{
+	struct AttitudeVerifyStep {
+		const char *name;
+		float roll_deg;
+		float pitch_deg;
+		float yaw_deg;
+	};
+
+	static constexpr AttitudeVerifyStep steps[] = {
+		{"roll +10",  10.f,   0.f,   0.f},
+		{"roll -10", -10.f,   0.f,   0.f},
+		{"pitch +10",  0.f,  10.f,   0.f},
+		{"pitch -10",  0.f, -10.f,   0.f},
+		{"yaw +15",    0.f,   0.f,  15.f},
+		{"yaw -15",    0.f,   0.f, -15.f},
+		{"level",      0.f,   0.f,   0.f},
+	};
+	static constexpr int step_count = sizeof(steps) / sizeof(steps[0]);
+	static constexpr hrt_abstime step_duration_us = 4_s;
+	static constexpr hrt_abstime score_start_us = 2_s;
+	static constexpr float max_mean_error_rad = 3.f * M_PI_F / 180.f;
+	static constexpr float max_mean_rate_rad_s = 0.35f;
+
+	if (_att_verify_step >= step_count) {
+		_att_verify_active = false;
+		return;
+	}
+
+	const hrt_abstime now = hrt_absolute_time();
+
+	if (_att_verify_step_start == 0) {
+		_att_verify_step_start = now;
+		_att_verify_error_sum.zero();
+		_att_verify_rate_sum = 0.f;
+		_att_verify_score_count = 0;
+		_att_test_feedback_valid = false;
+		resetIntegrators();
+
+		PX4_INFO("ATT_VERIFY [%d/%d] %s: r=%.0f p=%.0f y=%.0f deg",
+			 _att_verify_step + 1, step_count, steps[_att_verify_step].name,
+			 (double)steps[_att_verify_step].roll_deg,
+			 (double)steps[_att_verify_step].pitch_deg,
+			 (double)steps[_att_verify_step].yaw_deg);
+	}
+
+	_att_test_roll = math::radians(steps[_att_verify_step].roll_deg);
+	_att_test_pitch = math::radians(steps[_att_verify_step].pitch_deg);
+	_att_test_yaw = math::radians(steps[_att_verify_step].yaw_deg);
+	control_step_att_test(timestamp_sample);
+
+	const hrt_abstime elapsed = now - _att_verify_step_start;
+
+	if (elapsed >= score_start_us && _att_test_feedback_valid) {
+		_att_verify_error_sum += Vector3f(fabsf(_att_test_error_last(0)),
+						   fabsf(_att_test_error_last(1)),
+						   fabsf(_att_test_error_last(2)));
+		_att_verify_rate_sum += _att_test_omega_last.norm();
+		++_att_verify_score_count;
+	}
+
+	if (elapsed < step_duration_us) {
+		return;
+	}
+
+	Vector3f mean_error{};
+	float mean_rate = INFINITY;
+
+	if (_att_verify_score_count > 0) {
+		mean_error = _att_verify_error_sum / static_cast<float>(_att_verify_score_count);
+		mean_rate = _att_verify_rate_sum / static_cast<float>(_att_verify_score_count);
+	}
+
+	const bool pass = _att_verify_score_count > 0
+			  && mean_error(0) <= max_mean_error_rad
+			  && mean_error(1) <= max_mean_error_rad
+			  && mean_error(2) <= max_mean_error_rad
+			  && mean_rate <= max_mean_rate_rad_s;
+
+	if (pass) {
+		++_att_verify_pass_count;
+	}
+
+	PX4_INFO("ATT_VERIFY [%d/%d] %s: %s, mean_err=(%.2f,%.2f,%.2f) deg, mean_rate=%.3f rad/s, samples=%d",
+		 _att_verify_step + 1, step_count, steps[_att_verify_step].name,
+		 pass ? "PASS" : "FAIL",
+		 (double)math::degrees(mean_error(0)),
+		 (double)math::degrees(mean_error(1)),
+		 (double)math::degrees(mean_error(2)),
+		 (double)mean_rate, _att_verify_score_count);
+
+	++_att_verify_step;
+	_att_verify_step_start = 0;
+
+	if (_att_verify_step >= step_count) {
+		_att_verify_active = false;
+		_att_test_active = true;
+		_att_test_roll = 0.f;
+		_att_test_pitch = 0.f;
+		_att_test_yaw = 0.f;
+		_att_test_duration_us = 0;
+		_att_test_start = now;
+		_att_test_feedback_valid = false;
+		resetIntegrators();
+
+		PX4_INFO("ATT_VERIFY 完成: %d/%d 通过。已切换到水平悬停保持；完成后执行 'geo_control att_test stop' 再 disarm。",
+			 _att_verify_pass_count, step_count);
+	}
+}
+
+int GeoControl::att_verify_command(int argc, char *argv[])
+{
+	if (argc >= 2 && !strcmp(argv[1], "stop")) {
+		_att_verify_active = false;
+		_att_test_active = false;
+		_att_test_feedback_valid = false;
+		resetIntegrators();
+		publish_wrench(Vector3f(0.f, 0.f, 0.f), Vector3f(0.f, 0.f, 0.f), hrt_absolute_time());
+		PX4_INFO("ATT_VERIFY: 已停止，请切换到安全模式或执行 disarm");
+		return 0;
+	}
+
+	if (argc > 1) {
+		PX4_INFO_RAW("用法: geo_control att_verify [stop]\n");
+		PX4_INFO_RAW("  已切 Acro 且解锁后，自动运行 ±10° roll/pitch、±15° yaw 和回中阶跃。\n");
+		return 0;
+	}
+
+	vehicle_status_s vehicle_status{};
+	_sub_vehicle_status.copy(&vehicle_status);
+
+	if (vehicle_status.arming_state != vehicle_status.ARMING_STATE_ARMED) {
+		PX4_ERR("ATT_VERIFY: 请先切到 Acro 并解锁");
+		return -1;
+	}
+
+	if (vehicle_status.nav_state != vehicle_status.NAVIGATION_STATE_ACRO) {
+		PX4_ERR("ATT_VERIFY: 当前不是 Acro 模式，请先执行 commander mode acro");
+		return -1;
+	}
+
+	if (_verify_active || _att_test_active || _vel_test_active || _offboard_test_active ||
+	    _sweep_active || _acro_active) {
+		PX4_ERR("ATT_VERIFY: 另一个测试正在运行，请先停止它");
+		return -1;
+	}
+
+	_att_verify_active = true;
+	_att_verify_step = 0;
+	_att_verify_step_start = 0;
+	_att_verify_pass_count = 0;
+	_att_verify_score_count = 0;
+	_att_verify_error_sum.zero();
+	_att_verify_rate_sum = 0.f;
+	_att_test_feedback_valid = false;
+	resetIntegrators();
+
+	PX4_INFO("ATT_VERIFY: 已开始，7 个阶跃、每步 4 秒，后 2 秒用于评分");
 	return 0;
 }
 
@@ -1280,6 +1475,7 @@ int GeoControl::verify_allocation()
 	const float tmax = math::max(_param_ca_mq_tmax.get(), 1.f);
 	const float l = _param_ca_mq_l.get();
 	const float b = _param_ca_mq_b.get();
+	const float z = _param_ca_mq_z.get();
 
 	static constexpr int NQ = 4;
 	const float lx[NQ] = { l,  l, -l, -l};
@@ -1327,15 +1523,27 @@ int GeoControl::verify_allocation()
 
 	_verify_active = true;
 
+	// `verify` is a synchronous PXH command.  With JSBSim hold-down enabled
+	// there can be no new local-position samples, so Run() is not guaranteed to
+	// call control_step() while this command is waiting for the plant.  Publish
+	// the test wrench here as well; this keeps the real ControlAllocator fed at
+	// the same rate as the sampling loop instead of relying on that callback.
+	auto publish_verify_wrench = [&]() {
+		publish_wrench(Vector3f(_verify_wrench(0), _verify_wrench(1), _verify_wrench(2)),
+			      Vector3f(_verify_wrench(3), _verify_wrench(4), _verify_wrench(5)),
+			      hrt_absolute_time());
+	};
+
 	// 记录上一帧 JSBSim 时间戳，用于对齐检测
 	double jsb_timestamp_prev = 0.0;
 
-	auto sample_jsb_wrench = [&](double out[6], double &out_timestamp) -> bool {
+	auto sample_jsb_wrench = [&](double out[6], double &out_timestamp, bool &stable) -> bool {
 		for (int j = 0; j < 6; ++j) {
 			out[j] = 0.0;
 		}
 
 		out_timestamp = 0.0;
+		stable = false;
 
 		struct pollfd pfd{};
 		pfd.fd = wrench_fd;
@@ -1349,43 +1557,84 @@ int GeoControl::verify_allocation()
 			pfd.revents = 0;
 		}
 
-		// 等待 allocator/bridge/JSBSim 管道传播和电机模型短暂稳定。
-		for (int settle = 0; settle < 15; ++settle) {
+		// JSBSim 的电机/螺旋桨具有明显动态。固定 150 ms 后直接平均会把
+		// 瞬态当成稳态（特别是由 hover 降到低油门时），因此先等待管道传播，
+		// 再比较相邻两个平均窗口，直到所有 6 个量均收敛。
+		static constexpr int INITIAL_SETTLE_STEPS = 75; // 750 ms
+		static constexpr int WINDOW_STEPS = 25;         // 250 ms
+		static constexpr int MAX_WINDOWS = 6;
+		static constexpr double FORCE_SETTLE_N = 0.20;
+		static constexpr double TORQUE_SETTLE_NM = 0.05;
+
+		for (int settle = 0; settle < INITIAL_SETTLE_STEPS; ++settle) {
+			publish_verify_wrench();
 			px4_usleep(10000);
 		}
 
-		double sum[6] {};
-		int samples = 0;
+		double previous[6] {};
+		bool have_previous = false;
 
-		for (int retry = 0; retry < 30; ++retry) {
-			px4_usleep(10000);
+		for (int window = 0; window < MAX_WINDOWS; ++window) {
+			double sum[6] {};
+			int samples = 0;
 
-			while (::poll(&pfd, 1, 0) > 0) {
-				const ssize_t n = recvfrom(wrench_fd, pkt, sizeof(pkt), 0, nullptr, nullptr);
+			for (int retry = 0; retry < WINDOW_STEPS; ++retry) {
+				publish_verify_wrench();
+				px4_usleep(10000);
 
-				if (n == (ssize_t)sizeof(pkt) && pkt[0] > jsb_timestamp_prev) {
-					for (int j = 0; j < 6; ++j) {
-						sum[j] += pkt[j + 1];
+				while (::poll(&pfd, 1, 0) > 0) {
+					const ssize_t n = recvfrom(wrench_fd, pkt, sizeof(pkt), 0, nullptr, nullptr);
+
+					if (n == (ssize_t)sizeof(pkt) && pkt[0] > jsb_timestamp_prev) {
+						for (int j = 0; j < 6; ++j) {
+							sum[j] += pkt[j + 1];
+						}
+
+						out_timestamp = pkt[0];
+						jsb_timestamp_prev = pkt[0];
+						++samples;
 					}
 
-					out_timestamp = pkt[0];
-					jsb_timestamp_prev = pkt[0];
-					++samples;
+					pfd.revents = 0;
 				}
-
-				pfd.revents = 0;
 			}
+
+			if (samples <= 0) {
+				return false;
+			}
+
+			double current[6] {};
+
+			for (int j = 0; j < 6; ++j) {
+				current[j] = sum[j] / (double)samples;
+			}
+
+			if (have_previous) {
+				stable = true;
+
+				for (int j = 0; j < 6; ++j) {
+					const double tolerance = (j < 3) ? FORCE_SETTLE_N : TORQUE_SETTLE_NM;
+
+					if (std::fabs(current[j] - previous[j]) > tolerance) {
+						stable = false;
+						break;
+					}
+				}
+			}
+
+			for (int j = 0; j < 6; ++j) {
+				out[j] = current[j];
+				previous[j] = current[j];
+			}
+
+			if (stable) {
+				return true;
+			}
+
+			have_previous = true;
 		}
 
-		if (samples <= 0) {
-			return false;
-		}
-
-		for (int j = 0; j < 6; ++j) {
-			out[j] = sum[j] / (double)samples;
-		}
-
-		return true;
+		return true; // valid data, but the caller must not score an unsettled sample
 	};
 
 	for (int k = 0; k < 60; ++k) {
@@ -1400,18 +1649,23 @@ int GeoControl::verify_allocation()
 		// 每个采样点先回到纯 hover 并采集 JSBSim 基线。这样可以消除
 		// JSBSim 电机/螺旋桨模型和 esc²·TMAX 静态模型之间的绝对推力偏差。
 		_verify_wrench = hover_wrench;
-		for (int settle = 0; settle < 40; ++settle) { px4_usleep(8000); }
+		for (int settle = 0; settle < 40; ++settle) {
+			publish_verify_wrench();
+			px4_usleep(8000);
+		}
 
 		double jsb_hover[6] = {};
 		double jsb_hover_timestamp = 0.0;
-		const bool jsb_hover_valid = sample_jsb_wrench(jsb_hover, jsb_hover_timestamp);
+		bool jsb_hover_stable = false;
+		const bool jsb_hover_valid = sample_jsb_wrench(jsb_hover, jsb_hover_timestamp, jsb_hover_stable);
 
 		// 施加当前测试增量。
 		_verify_wrench = W;
 
 		double jsb_wrench[6] = {};
 		double jsb_timestamp = 0.0;
-		const bool jsb_valid = sample_jsb_wrench(jsb_wrench, jsb_timestamp);
+		bool jsb_stable = false;
+		const bool jsb_valid = sample_jsb_wrench(jsb_wrench, jsb_timestamp, jsb_stable);
 
 		// ── 读取执行器输出 (FK 重构) ──
 		actuator_motors_s motors{};
@@ -1430,9 +1684,9 @@ int GeoControl::verify_allocation()
 		// 逐旋翼明细
 		for (int i = 0; i < NQ; ++i) {
 			const float esc = (i < actuator_motors_s::NUM_CONTROLS) ? motors.control[i] : NAN;
-			// 归一化 ±1 -> ±π/2 rad (与分配器输出和 bridge scale=π/2 一致)
-			const float alpha = (2 * i < actuator_servos_s::NUM_CONTROLS) ? servos.control[2 * i] * (M_PI_F / 2.f) : NAN;
-			const float beta  = ((2 * i + 1) < actuator_servos_s::NUM_CONTROLS) ? servos.control[2 * i + 1] * (M_PI_F / 2.f) : NAN;
+			// 归一化 ±1 -> ±π rad，与分配器和 bridge 的舵机行程一致。
+			const float alpha = (2 * i < actuator_servos_s::NUM_CONTROLS) ? servos.control[2 * i] * M_PI_F : NAN;
+			const float beta  = ((2 * i + 1) < actuator_servos_s::NUM_CONTROLS) ? servos.control[2 * i + 1] * M_PI_F : NAN;
 
 			const float T = (PX4_ISFINITE(esc) ? esc * esc : 0.f) * tmax;
 			const float sa = sinf(alpha), ca = cosf(alpha);
@@ -1440,7 +1694,7 @@ int GeoControl::verify_allocation()
 			const matrix::Vector3f t_vec(T * sa * cb, T * sb, -T * ca * cb);
 
 			f_ach += t_vec;
-			const matrix::Vector3f r_i(lx[i], ly[i], 0.f);
+			const matrix::Vector3f r_i(lx[i], ly[i], z);
 			tau_ach += r_i.cross(t_vec);
 
 			PX4_INFO_RAW("    rotor%d: esc=%6.3f  a=%7.2f deg  b=%7.2f deg  |T|=%7.2f N\n",
@@ -1449,32 +1703,40 @@ int GeoControl::verify_allocation()
 		}
 
 		// ── FK 重构对比 ──
+		matrix::Vector<float, 6> allocated_wrench{};
+		allocated_wrench(0)=f_ach(0); allocated_wrench(1)=f_ach(1); allocated_wrench(2)=f_ach(2);
+		allocated_wrench(3)=tau_ach(0); allocated_wrench(4)=tau_ach(1); allocated_wrench(5)=tau_ach(2);
+
 		float err_fk = 0.f;
-		{
-			matrix::Vector<float, 6> Wfk{};
-			Wfk(0)=f_ach(0); Wfk(1)=f_ach(1); Wfk(2)=f_ach(2);
-			Wfk(3)=tau_ach(0); Wfk(4)=tau_ach(1); Wfk(5)=tau_ach(2);
-			for (int j=0; j<6; ++j) { float e=W(j)-Wfk(j); err_fk += e*e; }
-			err_fk = sqrtf(err_fk);
+
+		for (int j = 0; j < 6; ++j) {
+			const float e = W(j) - allocated_wrench(j);
+			err_fk += e * e;
 		}
+
+		err_fk = sqrtf(err_fk);
 
 		// ── JSBSim 物理增量对比 ──
 		double err_jsb = -1.0;
 		double jsb_delta[6] {};
 
-		if (jsb_hover_valid && jsb_valid) {
+		if (jsb_hover_valid && jsb_valid && jsb_hover_stable && jsb_stable) {
 			err_jsb = 0.0;
 			for (int j = 0; j < 6; ++j) {
 				jsb_delta[j] = jsb_wrench[j] - jsb_hover[j];
-				const double e = (double)dW(j) - jsb_delta[j];
+				// Compare the plant with the wrench actually represented by the
+				// actuator outputs, not the original request. This keeps intentional
+				// Fz clamping and thrust/servo saturation out of the plant error.
+				const double allocated_delta = (double)allocated_wrench(j) - (double)hover_wrench(j);
+				const double e = allocated_delta - jsb_delta[j];
 				err_jsb += e * e;
 			}
 			err_jsb = sqrt(err_jsb);
 		}
 
-		PX4_INFO_RAW("    FK:  F=(%7.2f,%7.2f,%7.2f) T=(%6.2f,%6.2f,%6.2f)  |err|=%7.3f\n",
-			     (double)f_ach(0), (double)f_ach(1), (double)f_ach(2),
-			     (double)tau_ach(0), (double)tau_ach(1), (double)tau_ach(2),
+		PX4_INFO_RAW("    FK:  F=(%7.2f,%7.2f,%7.2f) T=(%6.2f,%6.2f,%6.2f)  |request residual|=%7.3f\n",
+			     (double)allocated_wrench(0), (double)allocated_wrench(1), (double)allocated_wrench(2),
+			     (double)allocated_wrench(3), (double)allocated_wrench(4), (double)allocated_wrench(5),
 			     (double)err_fk);
 
 		if (jsb_hover_valid && jsb_valid) {
@@ -1486,19 +1748,30 @@ int GeoControl::verify_allocation()
 				     jsb_wrench[0], jsb_wrench[1], jsb_wrench[2],
 				     jsb_wrench[3], jsb_wrench[4], jsb_wrench[5],
 				     jsb_timestamp);
-			PX4_INFO_RAW("    ΔJSB:F=(%7.2f,%7.2f,%7.2f) T=(%6.2f,%6.2f,%6.2f)  |errΔ|=%7.3f\n",
-				     jsb_delta[0], jsb_delta[1], jsb_delta[2],
-				     jsb_delta[3], jsb_delta[4], jsb_delta[5],
-				     (double)err_jsb);
+
+			if (jsb_hover_stable && jsb_stable) {
+				PX4_INFO_RAW("    ΔJSB:F=(%7.2f,%7.2f,%7.2f) T=(%6.2f,%6.2f,%6.2f)  |err vs allocated|=%7.3f\n",
+					     jsb_delta[0], jsb_delta[1], jsb_delta[2],
+					     jsb_delta[3], jsb_delta[4], jsb_delta[5],
+					     (double)err_jsb);
+
+			} else {
+				PX4_WARN("verify: JSBSim wrench did not settle; this point is not scored");
+			}
 		} else {
 			PX4_INFO_RAW("    JSB: (无数据 — bridge 力/力矩 UDP 反馈未到达)\n");
 		}
 
 		// ── 采样后冷却: 回到纯悬停 ~500ms, 电机回中准备下一组 ──
 		_verify_wrench = hover_wrench;
-		for (int cool = 0; cool < 60; cool++) { px4_usleep(8000); }
+		for (int cool = 0; cool < 60; cool++) {
+			publish_verify_wrench();
+			px4_usleep(8000);
+		}
 	}
 
+	_verify_wrench = matrix::Vector<float, 6>{};
+	publish_verify_wrench();
 	::close(wrench_fd);
 	_verify_active = false;
 	PX4_INFO("验证完成 — 注入已关闭，控制器恢复");
@@ -1714,8 +1987,8 @@ void GeoControl::control_step_sweep(uint64_t timestamp_sample)
 
 	for (int i = 0; i < NQ; ++i) {
 		const float esc = (i < actuator_motors_s::NUM_CONTROLS) ? motors.control[i] : NAN;
-		const float alpha = (2*i < actuator_servos_s::NUM_CONTROLS) ? servos.control[2*i] * (M_PI_F / 2.f) : NAN;
-		const float beta  = ((2*i+1) < actuator_servos_s::NUM_CONTROLS) ? servos.control[2*i+1] * (M_PI_F / 2.f) : NAN;
+		const float alpha = (2*i < actuator_servos_s::NUM_CONTROLS) ? servos.control[2*i] * M_PI_F : NAN;
+		const float beta  = ((2*i+1) < actuator_servos_s::NUM_CONTROLS) ? servos.control[2*i+1] * M_PI_F : NAN;
 		esc_vals[i] = esc; alpha_deg[i] = math::degrees(alpha); beta_deg[i] = math::degrees(beta);
 
 		const float T = (PX4_ISFINITE(esc) ? esc*esc : 0.f) * tmax;
@@ -1877,12 +2150,16 @@ MorphQuad 几何控制器，输出推力与力矩指令。
 $ geo_control start
 $ geo_control status
 $ geo_control verify
+$ commander mode acro
+$ commander arm
+$ geo_control att_verify
 $ geo_control stop
 )DESCR_STR");
 
 	PRINT_MODULE_USAGE_NAME("geo_control", "controller");
 	PRINT_MODULE_USAGE_COMMAND("start");
 	PRINT_MODULE_USAGE_COMMAND_DESCR("verify", "注入 60 组固定 6D 力/力矩, 打印各旋翼电机/舵机输出");
+	PRINT_MODULE_USAGE_COMMAND_DESCR("att_verify", "已解锁 Acro 下自动测试 roll/pitch/yaw 姿态闭环");
 	PRINT_MODULE_USAGE_DEFAULT_COMMANDS();
 	return 0;
 }

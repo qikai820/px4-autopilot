@@ -216,14 +216,14 @@ parameters:
             Sum of the maximum thrust of every rotor, used to normalize the
             desired force into a [0,1] collective-throttle estimate for the
             debug setpoints. Should equal N_rotors * CA_MQ_TMAX
-            (4 * 27.5 = 110 N for the morphquad).
+            (4 * 39.5 = 158 N for the calibrated JSBSim morphquad).
         type: float
         unit: N
         min: 1.0
         max: 500.0
         increment: 0.5
         decimal: 1
-        default: 110.0
+        default: 158.0
 
       GC_MAN_FMAX:
         description:

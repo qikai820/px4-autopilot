@@ -125,6 +125,23 @@ void SimulatorMavlink::actuator_controls_from_outputs(mavlink_hil_actuator_contr
 		for (unsigned i = 0; i < actuator_outputs_s::NUM_ACTUATOR_OUTPUTS; i++) {
 			msg->controls[i] = _actuator_outputs.output[i];
 		}
+
+	} else if (_param_sim_mq_bench.get()) {
+		// geo_control verify publishes the four MorphQuad arm thrusts and eight
+		// gimbal commands directly. This bench-only route avoids the normal
+		// disarmed PWM output clamp while leaving the vehicle state unarmed.
+		actuator_motors_s motors{};
+		actuator_servos_s servos{};
+		_actuator_motors_sub.copy(&motors);
+		_actuator_servos_sub.copy(&servos);
+
+		for (unsigned i = 0; i < 4; i++) {
+			msg->controls[i] = PX4_ISFINITE(motors.control[i]) ? motors.control[i] : 0.f;
+		}
+
+		for (unsigned i = 0; i < 8; i++) {
+			msg->controls[4 + i] = PX4_ISFINITE(servos.control[i]) ? servos.control[i] : 0.f;
+		}
 	}
 
 	msg->mode = mode_flag_custom;

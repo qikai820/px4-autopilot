@@ -1,393 +1,235 @@
 # MorphQuad 推力分配算法设计报告
 
-> 基于论文：*MorphQuad: Morphable Quadrotor for Superhuman Maneuverability, Manipulation, and Resiliency* (arXiv:2607.02764v3)
+> 代码实现基准：`ActuatorEffectivenessMorphQuad`。理论参考：*MorphQuad: Morphable Quadrotor for Superhuman Maneuverability, Manipulation, and Resiliency*，arXiv:2607.02764v3。
 
----
+## 1. 问题定义与约束
 
-## 1. 引言
+给定 `geo_control` 发布的 Body-FRD 期望 wrench：
 
-### 1.1 研究背景
+$$
+\mathbf w_d=
+\begin{bmatrix}
+\mathbf f_d\\\boldsymbol\tau_d
+\end{bmatrix}
+\in\mathbb R^6,
+$$
 
-MorphQuad 是一种可变形四旋翼飞行器，其核心特征是每个旋翼系统通过**双轴万向节**独立铰接，能够在全向空间中任意指向推力方向。与传统四旋翼仅能产生沿机体 -z 方向的推力不同，MorphQuad 的 12 个独立控制输入（4 个电机转速 + 8 个舵机角度）使其成为**过驱动系统**，能够在六自由度空间中独立生成任意力和力矩。
+分配器求解四个旋翼系统的三维推力向量 `t_i`，再转化为四个归一化电机转速和八个舵机指令。
 
-### 1.2 问题定义
+实现约束如下：
 
-给定几何控制器输出的六维期望 wrench：
+- Body-FRD：x 向前、y 向右、z 向下；悬停推力为负 z；
+- 旋翼顺序为 RF、LF、LB、RB，位置分别为
+  `(+L,+B,Z)`、`(+L,-B,Z)`、`(-L,-B,Z)`、`(-L,+B,Z)`；
+- 当前 JSBSim 机型参数：`L=0.25 m`、`B=0.225 m`、`Z=-0.04 m`；
+- 每个旋翼系统最大分配推力为 `Tmax=CA_MQ_TMAX`；
+- 实际 α、β 舵机的机械范围为 ±180°，不是论文原型的 ±1080°。
 
-$$\mathbf{w}_d = \begin{bmatrix} \mathbf{f}_d \\ \boldsymbol{\tau}_d \end{bmatrix} \in \mathbb{R}^6$$
+## 2. 推力方向和执行器模型
 
-其中 $\mathbf{f}_d \in \mathbb{R}^3$ 为机体坐标系下的期望合力，$\boldsymbol{\tau}_d \in \mathbb{R}^3$ 为期望合力矩。
+在 PX4/JSBSim 的 FRD 坐标约定中，两个舵机角定义的单位推力方向是
 
-**推力分配问题**：将 $\mathbf{w}_d$ 分解为 4 个旋翼的推力向量 $\mathbf{t}_i \in \mathbb{R}^3$（$i = 1,2,3,4$），并从中反解出每个旋翼的：
-- 电机角速度 $\Omega_i$
-- 外舵机角度 $\alpha_i$（绕机体 y 轴旋转）
-- 内舵机角度 $\beta_i$（绕旋转后的 x 轴旋转）
+$$
+\mathbf g(\alpha,\beta)=
+\begin{bmatrix}
+\sin\alpha\cos\beta\\
+\sin\beta\\
+-\cos\alpha\cos\beta
+\end{bmatrix}.
+$$
 
-### 1.3 核心挑战
+中性位 `alpha=beta=0` 对应向上推力。`alpha=±π, beta=0` 对应向下推力，故正、负 z 力均能通过反转万向节方向实现。
 
-| 挑战 | 描述 |
-|------|------|
-| **过驱动** | 12 维输入 → 6 维输出，解不唯一，需最优性准则 |
-| **万向节锁** | 当推力方向平行于机体 y 轴时，内舵机 $\beta_i = \pm\pi/2$，外舵机 $\alpha_i$ 失去对推力方向的控制权 |
-| **下洗干扰** | 当期望力沿机体 x 轴且力矩为零时，四个旋翼推力共线，相邻旋翼的下洗气流相互干扰，导致推力模型失效 |
+分配器的电机模型为
 
----
+$$
+T_i=T_{max}u_{m,i}^2,\qquad
+\mathbf t_i=T_i\mathbf g(\alpha_i,\beta_i),\qquad
+u_{m,i}=\sqrt{T_i/T_{max}}.
+$$
 
-## 2. 算法总体架构
+JSBSim 使用电机和螺旋桨动态模型，物理推力不严格等于该二次模型；这属于模型标定误差，不改变推力方向与 wrench 几何。
 
-![图 2  推力分配算法流程](figures/algo_flow.png)
+## 3. 12 维推力向量分配
 
----
+定义堆叠向量
 
-## 3. 数学推导
+$$
+\mathbf t=[\mathbf t_0^\top,\mathbf t_1^\top,\mathbf t_2^\top,\mathbf t_3^\top]^\top\in\mathbb R^{12}.
+$$
 
-### 3.1 坐标系与旋翼几何
+总力和总力矩为
 
-**机体坐标系 (NED)**：x 向前，y 向右，z 向下。
+$$
+\mathbf f=\sum_{i=0}^3\mathbf t_i,\qquad
+\boldsymbol\tau=\sum_{i=0}^3\mathbf r_i\times\mathbf t_i.
+$$
 
-**X 型布局旋翼位置**（从质心 COM 出发）：
+因此
 
-| 旋翼 | 位置 $\mathbf{l}_i$ | 旋转方向 |
-|------|---------------------|---------|
-| 1 (前右) | $(+l, -b, 0)$ | CW |
-| 2 (前左) | $(+l, +b, 0)$ | CCW |
-| 3 (后左) | $(-l, +b, 0)$ | CW |
-| 4 (后右) | $(-l, -b, 0)$ | CCW |
+$$\mathbf w=\mathbf M\mathbf t,$$
 
-其中 $l$ 为半臂长（x 方向），$b$ 为半臂宽（y 方向），对角距离 $r = \sqrt{l^2 + b^2}$。
+其中 `M` 是由 `r_i` 构成的常数 6×12 输入矩阵。对每个旋翼，力矩项完整保留高度项：
 
-**双轴万向节参数化**：每个旋翼的推力方向由两个舵机角度决定：
-- $\alpha_i$：外舵机，绕机体 $j^B$（y 轴）旋转
-- $\beta_i$：内舵机，绕旋转后的 $i^B$（x 轴）旋转
+$$
+\mathbf r_i\times\mathbf t_i=
+\begin{bmatrix}
+y_i t_{z,i}-Zt_{y,i}\\
+Zt_{x,i}-x_i t_{z,i}\\
+x_i t_{y,i}-y_i t_{x,i}
+\end{bmatrix}.
+$$
 
-推力方向向量（论文 Eq. 3 在机体 FRD / NED，Z 向下 坐标系下的物理正确形式，
-中性舵 $\alpha_i=\beta_i=0$ 时推力沿 $-Z$ 即向上）：
+这对应论文的推力向量形式。早期仅使用 `r_i=(x_i,y_i,0)` 会漏掉水平推力带来的滚转/俯仰耦合，不能匹配当前 JSBSim 几何。
 
-$$\mathbf{G}_i(\alpha_i, \beta_i) = \begin{bmatrix} \sin\alpha_i \cos\beta_i \\ +\sin\beta_i \\ -\cos\alpha_i \cos\beta_i \end{bmatrix}$$
+### 3.1 最小范数解
 
-![图 3.1  双轴万向节推力方向几何 (NED, z 向下)](figures/thrust_geometry.png)
+代码调用 `matrix::geninv()` 求
 
-### 3.2 Wrench 方程
+$$\mathbf t_0=\mathbf M^+\mathbf w_d.$$
 
-每个旋翼的推力 $\mathbf{t}_i = c_t \mathbf{G}_i(\alpha_i, \beta_i) \Omega_i^2$，其中 $c_t$ 为推力系数。
+该 12 维解先满足线性 wrench 方程；尚未施加单旋翼幅值和舵机机械约束。
 
-总 wrench（论文 Eq. 8-9）：
+### 3.2 论文零空间修正
 
-$$\mathbf{w} = \begin{bmatrix} \mathbf{f} \\ \boldsymbol{\tau} \end{bmatrix} = c_t \mathbf{F}(\alpha, \beta) \boldsymbol{\Omega}^{\circ 2} = \mathbf{M} \mathbf{t}$$
+实现使用论文 Eq. (19) 的显式 12×6 零空间基 `N_M`，而不是临时的经验性 x/y 分量修改：
 
-其中：
-- $\mathbf{F} \in \mathbb{R}^{6 \times 4}$ 为每旋翼 wrench 方向矩阵
-- $\mathbf{M} \in \mathbb{R}^{6 \times 12}$ 为常数输入矩阵（由固定旋翼位置 $\mathbf{l}_i$ 决定）
-- $\mathbf{t} = [\mathbf{t}_1^\top, \mathbf{t}_2^\top, \mathbf{t}_3^\top, \mathbf{t}_4^\top]^\top \in \mathbb{R}^{12}$ 为堆叠的推力向量
+$$\mathbf t=\mathbf t_0+\mathbf N_M\mathbf c.$$
 
-**关键性质**：$\mathbf{M}$ 为宽矩阵（6×12），行满秩（rank = 6），因此系统过驱动，每个扰动都可被匹配抵消。
+代码中的 Eq. (16) 系数规则为：
 
-### 3.3 最小范数分解（论文 Eq. 12-13）
+$$
+c_1=c_3=c_5=\hat f_y,
+$$
 
-将每个旋翼的推力向量分解为四个分量：
+当 `hat(f)_x > 0` 时：
 
-$$\mathbf{t}_i = \frac{\mathbf{f}}{4} + \frac{\tau_x}{4b} k_{B,i}^{\text{roll}} - \frac{\tau_y}{4l} k_{B,i}^{\text{pitch}} + \frac{\tau_z}{4r} \hat{\mathbf{e}}_{\psi,i}$$
+$$c_2=-\hat f_x,\quad c_4=\hat f_x,\quad c_6=0,$$
 
-**各项物理含义**：
+否则：
 
-| 分量 | 表达式 | 物理意义 |
-|------|--------|---------|
-| 力共享 | $\mathbf{f}/4$ | 期望合力均分到 4 个旋翼 |
-| 滚转力矩 | $\frac{\tau_x}{4b} k_{B,i}^{\text{roll}}$ | 通过前后旋翼推力差产生滚转力矩 |
-| 俯仰力矩 | $-\frac{\tau_y}{4l} k_{B,i}^{\text{pitch}}$ | 通过左右旋翼推力差产生俯仰力矩 |
-| 偏航力矩 | $\frac{\tau_z}{4r} \hat{\mathbf{e}}_{\psi,i}$ | 通过推力在水平面的切向分量产生偏航力矩 |
+$$c_2=c_4=0,\quad c_6=-\hat f_x.$$
 
-**符号模式**（X 型布局）：
+其中 `hat(f)=f/||f||`；当 `||f||` 很小时，`c=0`。该修正用于规避 β 轴奇异位置和沿 x 轴的共线下洗。运行时检查 `M N_M≈0`，以防基矩阵与机体几何不一致。
 
-$$k_{B}^{\text{roll}} = \begin{bmatrix} +1 \\ -1 \\ -1 \\ +1 \end{bmatrix}, \quad k_{B}^{\text{pitch}} = \begin{bmatrix} -1 \\ -1 \\ +1 \\ +1 \end{bmatrix}$$
+### 3.3 推力幅值约束
 
-**偏航力矩单位向量**（论文 Eq. 13，位于 $i^B$-$j^B$ 平面，垂直于旋翼臂）：
+对每个 `t_i` 计算范数。如果最大范数超过 `Tmax`，所有 12 个分量使用同一缩放因子：
 
-$$\hat{\mathbf{e}}_{\psi,1} = \begin{bmatrix} -b/r \\ l/r \\ 0 \end{bmatrix}, \quad \hat{\mathbf{e}}_{\psi,2} = \begin{bmatrix} b/r \\ l/r \\ 0 \end{bmatrix}, \quad \hat{\mathbf{e}}_{\psi,3} = \begin{bmatrix} b/r \\ -l/r \\ 0 \end{bmatrix}, \quad \hat{\mathbf{e}}_{\psi,4} = \begin{bmatrix} -b/r \\ -l/r \\ 0 \end{bmatrix}$$
+$$s=\min_i\left(1,\frac{T_{max}}{\|\mathbf t_i\|}\right),\qquad \mathbf t\leftarrow s\mathbf t.$$
 
-**最优性**：该分解等价于 Moore-Penrose 伪逆解 $\mathbf{t} = \mathbf{M}^\dagger \mathbf{w}$，其中 $\mathbf{M}^\dagger = \mathbf{M}^\top(\mathbf{M}\mathbf{M}^\top)^{-1}$，具有最小范数（最优推力效率）。
+统一缩放保持每个推力向量的方向；逐轴裁剪会破坏方向并引入未建模的耦合。饱和产生的达到 wrench 在 `computeUnallocatedWrench()` 中重构并回报给 PX4。
 
-### 3.4 零空间修正（论文 Eq. 15-16）
+## 4. 逆运动学和限位
 
-由于 $\mathbf{M} \in \mathbb{R}^{6 \times 12}$ 行满秩，线性系统 $\mathbf{w} = \mathbf{M}\mathbf{t}$ 欠定，通解为：
+对非零 `t_i`，令 `hat(t_i)=[tx,ty,tz]^T`。两组等价解为
 
-$$\boxed{\mathbf{t} = \mathbf{M}^\dagger \mathbf{w} + \mathbf{N}_M \mathbf{c}}$$
+$$
+\beta_1=\arcsin(ty),\qquad \alpha_1=\operatorname{atan2}(tx,-tz),
+$$
 
-其中 $\mathbf{N}_M$ 为 $\mathbf{M}$ 的零空间基（常秩 6），$\mathbf{c} \in \mathbb{R}^6$ 为系数向量。
+$$
+\beta_2=\pi-\beta_1,\qquad \alpha_2=\pi+\alpha_1.
+$$
 
-**推论 1（Wrench 保持性）**：对任意 $\mathbf{c} \in \mathbb{R}^6$，零空间修正不改变净 wrench：
+算法枚举两个分支及有限个 `2π` 等价角，最小化
 
-$$\mathbf{M}\mathbf{t} = \mathbf{M}\mathbf{M}^\dagger \mathbf{w} + \mathbf{M}\mathbf{N}_M \mathbf{c} = \mathbf{w} + \mathbf{0} = \mathbf{w}$$
+$$|\alpha-\alpha_{prev}|+|\beta-\beta_{prev}|.$$
 
-**证明**：$\mathbf{M}\mathbf{M}^\dagger = \mathbf{I}_6$（行满秩），$\mathbf{M}\mathbf{N}_M = \mathbf{0}$（零空间定义）。∎
+接着将两个角限制为
 
-这意味着零空间修正**完全不影响**几何控制器的闭环误差动力学和几乎处处稳定性保证。
+$$
+|\alpha|\leq\min(CA\_MQ\_ALPM,180°),\qquad
+|\beta|\leq\min(CA\_MQ\_BETM,180°).
+$$
 
-**系数选择策略**（论文 Eq. 16）：
+零推力时保持上一组角度；若限位造成方向无法实现，则该差异记入 servo saturation 和 unallocated wrench。当前硬件只支持 ±180°，因此角度的 `2π` 枚举仅用于等价分支选择，不表示已经支持连续多圈旋转。
 
-**(a) 万向节锁避免**：当 $\mathbf{f} \parallel j^B$ 时，$\beta_i \to \pm\pi/2$，$\cos\beta_i \to 0$，外舵机失去控制权。
+归一化输出为
 
-$$c_1 = c_3 = c_5 = \langle \mathbf{f}/\|\mathbf{f}\|, j^B \rangle$$
+$$u_\alpha=\alpha/\pi,\qquad u_\beta=\beta/\pi.$$
 
-该修正引入一个与 $\mathbf{f}$ 接近 $j^B$ 轴程度成正比的排斥力，将内舵机推离奇异点。
+## 5. JSBSim 一致性要求
 
-**(b) 下洗干扰避免**：当 $\mathbf{f} \parallel i^B$ 且 $\boldsymbol{\tau} = 0$ 时，所有推力共线，相邻旋翼下洗相互干扰。
+桥接配置 `configs/morphquad.xml` 必须将八路舵机输出以 `scale=π` 转为弧度。JSBSim 的 `GimbalVectoring.xml` 需要把推力方向转换为推进器欧拉角：
 
-$$c_2 = -c_4 = -\langle \mathbf{f}/\|\mathbf{f}\|, i^B \rangle, \quad c_6 = 0 \quad (\text{当 } \langle \hat{\mathbf{f}}, i^B \rangle > 0)$$
+$$
+pitch=\operatorname{atan2}(\cos\alpha\cos\beta,\sqrt{t_x^2+t_y^2}),
+\qquad yaw=\operatorname{atan2}(t_y,t_x).
+$$
 
-该修正打破共线性，使上下旋翼对不再直接对冲。
+这里 `pitch` 的第一项等于 `-t_z`，不能替换为始终非负的 `sqrt(1-t_x^2-t_y^2)`。后者会丢失 z 方向符号，使 `alpha=±π` 仍然产生向上推力。
 
-### 3.5 舵机角度反解（论文 Eq. 14）
+## 6. 端到端验证算法
 
-给定推力向量 $\mathbf{t}_i$，定义单位推力方向 $\hat{\mathbf{t}}_i = \mathbf{t}_i / \|\mathbf{t}_i\| = [\hat{t}_{i,x}, \hat{t}_{i,y}, \hat{t}_{i,z}]^\top$。
+`geo_control verify` 在 JSBSim `<hold_down>1</hold_down>` 下验证整条分配链。测试集合为 6 个自由度各 10 个递增幅值，共 60 组。每一组执行：
 
-**电机角速度**：
-
-$$\Omega_i = \|\mathbf{t}_i\| / c_t$$
-
-**舵机角度**（双分支解）：
-
-$$\text{分支 1:} \quad \beta_i = \arcsin(\hat{t}_{i,y}), \quad \alpha_i = \text{atan2}(\hat{t}_{i,x}, -\hat{t}_{i,z})$$
-
-$$\text{分支 2:} \quad \beta_i = \pi - \arcsin(\hat{t}_{i,y}), \quad \alpha_i = \pi + \text{atan2}(\hat{t}_{i,x}, -\hat{t}_{i,z})$$
-
-**最小运动选择**：比较两个分支与上一时刻舵机位置 $(\alpha_i', \beta_i')$ 的距离，选择运动量最小的分支。同时检查 $\pm 2k\pi$ 缠绕（$|k| \leq n_r$），支持连续多圈旋转。
-
-**有效范围**：$\beta_i \in [-\pi/2, 3\pi/2]$，$\alpha_i \in [-\pi, \pi]$（通过 $\text{atan2}$ 自然覆盖）。
-
-### 3.6 几何控制器多模式输入
-
-几何控制器（`geo_control`）支持三种控制输入源，根据 `vehicle_status.nav_state` 自动切换：
-
-| 模式 | nav_state | 输入来源 | 控制逻辑 |
-|------|-----------|---------|---------|
-| Manual | MANUAL (0) | `manual_control_setpoint` | **力开环**：roll/pitch→机体 x/y 力，throttle→机体 z 力（含悬停配平）；aux1/aux2→姿态角速率 |
-| Position | POSCTL (3) | `manual_control_setpoint` | **位置闭环**：aux1/aux2→水平速度，throttle→垂向速度，摇杆居中定点保持（需位置源） |
-| Offboard | OFFBOARD (14) | `trajectory_setpoint` | 位置/速度/姿态设定点 |
-| Auto | 其他 | `vehicle_*_setpoint` | flight_mode_manager 输出 |
-
-#### Manual 模式摇杆映射（力开环）
-
-Manual 为**开环力控制**：姿态仍闭环，但位置/速度无反馈，摇杆直接指令机体三轴力。
-
-- **roll / pitch 摇杆 → 机体 x / y 力**（平移，开环）
-- **aux1 / aux2 摇杆 → roll / pitch 角速率**（姿态闭环）
-- **yaw 摇杆 → 偏航角速率**（不变）
-- **throttle → 机体 z 力**（含悬停配平）
-
-摇杆经死区处理后映射为：
-
-$$\mathbf{f}_{sp}^B = \begin{bmatrix} \text{deadzone}(\text{stick}_{roll}, dz) \\[4pt] \text{deadzone}(\text{stick}_{pitch}, dz) \\[4pt] -\text{deadzone}(\text{stick}_{throttle}, dz) \end{bmatrix} \cdot F_{\max} + \begin{bmatrix} 0 \\ 0 \\ -m g \end{bmatrix}$$
-
-$$\boldsymbol{\omega}_{sp} = \begin{bmatrix} \text{deadzone}(\text{stick}_{aux1}, dz) \\[4pt] \text{deadzone}(\text{stick}_{aux2}, dz) \\[4pt] \text{deadzone}(\text{stick}_{yaw}, dz) \end{bmatrix} \cdot \omega_{\max}$$
-
-其中 $dz$ 为死区参数（`GC_MAN_DZ`，默认 0.1），$\omega_{\max}$ 为最大角速率（`GC_MAN_RATE_MAX`，默认 1.5 rad/s），$F_{\max}$ 为每轴最大机体力（`GC_MAN_FMAX`，默认 20 N）。
-
-> **注**：
-> - 垂向力参考取自**油门杆**（`manual_sp.throttle`）。机体坐标系 z 轴向下，故悬停配平为 $-m g$（向上），且油门上推（$-\text{deadzone}(\text{throttle})$）对应更向上力 = 爬升。
-> - roll/pitch 与 aux1/aux2 的映射已对调：平移由主摇杆（roll/pitch）控制，姿态由 aux1/aux2 控制（见 `geo_control.cpp` `control_step_manual`）。
-> - 力开环模式无速度/位置反馈，速度积分器保持为零，仅有姿态（角速率）积分器工作。
-
-角速率参考通过四元数积分生成姿态参考 $R_{sp}$；期望力 $\mathbf{f}_{sp}^B$ 直接作为机体期望力发布（经分配器反解为电机转速与舵机角），不做速度 P 环。
-
-#### Position 模式摇杆映射（位置闭环）
-
-Position 为**闭环位置控制**，需要有效位置源（GPS / 光流 / VIO）：
-
-- **aux1 / aux2 摇杆 → 机体水平速度**
-- **throttle → 垂向速度**
-- **roll / pitch / yaw 摇杆 → 姿态角速率**（保持手动姿态控制）
-- 摇杆居中时，位置外环将位置设定点保持当前位置（定点悬停）
-
-速度参考（机体）经转换到 NED 系后，叠加位置外环项 $\mathbf{v}_{sp} = \mathbf{v}_{sp}^{stick} + K_P(\mathbf{p}_{sp} - \mathbf{p})$，再通过速度 P 环生成期望力（见 `control_step_position`）。位置设定点 $\mathbf{p}_{sp}$ 在摇杆有指令时积分跟随、居中时保持。
-
-### 3.7 积分器与抗饱和
-
-为消除稳态误差，几何控制器在力矩环和力环各加入积分项：
-
-$$\boldsymbol{\tau}_{des} = -K_R \mathbf{e}_R - K_\Omega \mathbf{e}_\omega + \mathbf{I}_{rate} + \boldsymbol{\omega} \times (\mathbf{J}\boldsymbol{\omega})$$
-$$\mathbf{f}_{des}^W = -K_P \mathbf{e}_p - K_V \mathbf{e}_v - \mathbf{I}_{vel} - m\mathbf{g} + m\mathbf{a}_{sp}$$
-
-#### 积分更新律
-
-参考 PX4 `RateControl` 的实现：
-
-$$I_{rate}[k] = \text{clamp}\left(I_{rate}[k-1] + i_{factor} \cdot K_I \cdot e_\omega \cdot \Delta t,\; -I_{lim},\; +I_{lim}\right)$$
-
-其中非线性因子 $i_{factor} = \max(0, 1 - (e_\omega / 400°)^2)$ 在大误差时降低积分增益，防止剧烈机动时的 windup。
-
-#### 地面状态管理
-
-| 状态 | 积分器行为 |
-|------|-----------|
-| 解锁 (disarmed) | 积分器清零 |
-| 着陆 (landed) | 积分冻结（不更新） |
-| 空中 (armed + not landed) | 正常积分 + 抗饱和 |
-
-#### 抗饱和（条件积分）
-
-通过 `control_allocator_status` 获取执行器饱和反馈：
-
-- 若某轴正向饱和（`unallocated_torque[i] > 0`）：$e_\omega[i] \leftarrow \min(e_\omega[i], 0)$
-- 若某轴负向饱和（`unallocated_torque[i] < 0`）：$e_\omega[i] \leftarrow \max(e_\omega[i], 0)$
-- 力环同理，使用 `unallocated_thrust`
-
-#### 饱和信号来源
-
-`ActuatorEffectivenessMorphQuad` 重载 `getUnallocatedControl()`，在 `updateSetpoint()` 中检测执行器饱和后，从饱和后的实际输出重构 wrench：
-
-$$\mathbf{f}_{achieved} = \sum_{i=1}^{4} c_t \Omega_{i,clamped}^2 \cdot \mathbf{G}_i(\alpha_{i,clamped})$$
-$$\boldsymbol{\tau}_{achieved} = \sum_{i=1}^{4} \mathbf{l}_i \times \mathbf{t}_{i,achieved}$$
-$$\mathbf{w}_{unallocated} = \mathbf{w}_{des} - \mathbf{w}_{achieved}$$
-
----
-
-## 4. 算法伪代码
-
+```text
+设置 hover wrench
+等待 JSBSim 稳态，记录 W_hover
+持续发布目标 wrench W_test
+读取电机与舵机输出，按同一模型前向重构 W_alloc
+等待 JSBSim 稳态，记录 W_jsb
+比较 W_alloc - W_hover 与 W_jsb - W_hover
+回到 hover，进入下一点
 ```
-Algorithm: MorphQuad Thrust Allocation
-Input:  f_des ∈ R^3, tau_des ∈ R^3, (alpha_prev, beta_prev) ∈ R^{4×2}
-Output: Omega[4], alpha[4], beta[4]
 
-// ========== Step 1: Minimum-norm decomposition ==========
-l ← half_length,  b ← half_width,  r ← sqrt(l² + b²)
+持续发布是必要的：`verify` 是同步 PXH 命令，保持架模式可能不触发本地位置更新，不能依赖普通控制循环发布测试 wrench。
 
-// Yaw unit vectors (Eq. 13)
-epsi[4][3] ← { {-b/r, l/r, 0}, {b/r, l/r, 0}, {b/r, -l/r, 0}, {-b/r, -l/r, 0} }
-roll_sign[4]  ← { +1, -1, -1, +1 }
-pitch_sign[4] ← { -1, -1, +1, +1 }
+验证分为两层：
 
-for i = 0 to 3 do:
-    t[i][0] ← f_des[0]/4 + roll_sign[i]·tau_des[0]/(4b) + tau_des[2]·epsi[i][0]/(4r)
-    t[i][1] ← f_des[1]/4 - pitch_sign[i]·tau_des[1]/(4l) + tau_des[2]·epsi[i][1]/(4r)
-    t[i][2] ← f_des[2]/4
+1. **前向重构**：检测分配器、归一化、索引和几何是否一致；未饱和点应为零请求残差。
+2. **JSBSim 物理增量**：检测 bridge、万向节方向、推进器模型和实际力矩符号；以悬停基线相减，隔离绝对推力曲线误差。
 
-// ========== Step 2: Null-space correction (Eq. 15-16) ==========
-f_norm ← ||f_des||
-if f_norm > 0.01 then:
-    f_hat ← f_des / f_norm
+已完成的 60 组保持架复测确认：`Fz=+10.27 N` 的 JSBSim 结果从修复前约 `-12.01 N` 变为约 `+12.01 N`。这验证了 z 符号映射修复；幅值差异仍需要推力曲线标定。
 
-    // (a) Gimbal lock avoidance
-    y_corr ← 0.3 · |f_hat·j^B| · f_norm / 4
-    for i = 0 to 3 do:
-        t[i][1] ← t[i][1] + (-1)^i · y_corr
+### 6.1 自动姿态闭环测试
 
-    // (b) Downwash avoidance
-    if |f_hat·i^B| > 0.7 then:
-        x_corr ← 0.2 · (f_hat·i^B) · f_norm / 10
-        for i = 0 to 3 do:
-            t[i][0] ← t[i][0] + (i < 2 ? +1 : -1) · x_corr
+`geo_control att_verify` 用于验证几何姿态环，而非控制分配的静态正确性。它只允许在已解锁的 Acro 模式下启动；由于需要真实姿态变化，JSBSim 必须关闭 `hold_down`，且 `SIM_MQ_BENCH` 必须为 0。
 
-// ========== Step 3: Servo angle recovery (Eq. 14) ==========
-for i = 0 to 3 do:
-    t_norm ← ||t[i]||
-    Omega[i] ← t_norm / c_t
+测试序列为：`roll +10°`、`roll -10°`、`pitch +10°`、`pitch -10°`、`yaw +15°`、`yaw -15°`、水平回中。每个序列点保持 4 秒，2 秒后开始累积：
 
-    if t_norm < 0.01 then:
-        alpha[i] ← alpha_prev[i],  beta[i] ← beta_prev[i]
-        continue
+$$
+\bar e=\frac{1}{N}\sum_{k=1}^{N}|e_{RPY,k}|,\qquad
+\bar\omega=\frac{1}{N}\sum_{k=1}^{N}\|\omega_k\|.
+$$
 
-    t_hat ← t[i] / t_norm
+默认通过条件是三个分量的 `bar(e)` 均不大于 3°，且 `bar(omega)` 不大于 0.35 rad/s。所有点结束后，控制器保持水平悬停，等待操作员停止测试并执行安全退出。
 
-    // Two branches
-    beta1  ←  arcsin(t_hat[1])
-    alpha1 ←  atan2(t_hat[0], -t_hat[2])
-    beta2  ←  π - beta1
-    alpha2 ←  π + alpha1
+## 7. 算法伪代码
 
-    // Minimal-motion selection
-    d1 ← |alpha1 - alpha_prev[i]| + |beta1 - beta_prev[i]|
-    d2 ← |alpha2 - alpha_prev[i]| + |beta2 - beta_prev[i]|
-    if d2 < d1 then:
-        alpha[i] ← alpha2,  beta[i] ← beta2
+```text
+input: f_des, tau_des, previous servo angles
+M = build_wrench_matrix(L, B, Z)
+t = pinv(M) * [f_des; tau_des]
+t += N_M * paper_eq16_coefficient(f_des)
+
+if any norm(t_i) > Tmax:
+    t *= common_scale_to_tmax(t)
+
+for each rotor i:
+    if norm(t_i) is near zero:
+        alpha, beta = previous_angles[i]
+        motor = 0
     else:
-        alpha[i] ← alpha1,  beta[i] ← beta1
+        alpha, beta = nearest_valid_inverse_kinematics(t_i, previous_angles[i])
+        motor = sqrt(norm(t_i) / Tmax)
 
-    // Multi-revolution wrap check
-    for k = -n_r to n_r, k ≠ 0:
-        alpha_wrap ← alpha[i] + 2πk
-        if |alpha_wrap - alpha_prev[i]| < best_dist then:
-            alpha[i] ← alpha_wrap
+    write motor[i], alpha/pi, beta/pi
 
-    beta[i] ← clamp(beta[i], -π/2, 3π/2)
-    alpha_prev[i] ← alpha[i],  beta_prev[i] ← beta[i]
+reconstruct achieved wrench if a thrust, servo, or actuator limit was active
 ```
 
-> **注**：此处 pitch 项符号为负（`-pitch_sign`），与论文 Eq. (12) 一致。原伪代码中为正号，系符号推导错误。正确推导：$\tau_y = \sum(l_{ix} t_{iz} - l_{iz} t_{ix})$，代入 X 型布局旋翼位置可得 $t_{iy}$ 的 pitch 贡献符号为 $[-1, +1, +1, -1]$。
+## 8. 边界与后续工作
 
----
+- `CA_MQ_TMAX` 是分配近似模型的标定值；应补充覆盖低/高转速和反向推力的推力曲线。
+- 每个旋翼目前共享相同的 `Z` 值；实际结构若不共面，应使用逐旋翼位置参数。
+- 保持架验证确认分配和模型方向，不等价于自由飞行稳定性测试。
+- 若换用多圈舵机，需一并更改 PX4 输出协议、`CA_MQ_ALPM/BETM` 上限、bridge 缩放和连续角状态管理；不能仅提高参数上限。
 
-## 5. 关键设计决策
+## 9. 版本记录
 
-### 5.1 为什么选择 Pattern B（updateSetpoint 覆盖）而非 Pattern A（矩阵填充）
-
-PX4 的控制分配框架支持两种模式：
-- **Pattern A**：在 `getEffectivenessMatrix()` 中填充 B 矩阵，框架自动做 $\mathbf{u} = \mathbf{B}^{\text{pinv}} \mathbf{c}$
-- **Pattern B**：注册零矩阵，在 `updateSetpoint()` 中完全自定义分配逻辑
-
-MorphQuad 选择 **Pattern B**，原因：
-1. B 矩阵依赖于舵机角度 $(\alpha_i, \beta_i)$，是时变的，而 PX4 框架假设矩阵静态
-2. 论文算法包含非线性步骤（零空间修正、双分支选择），无法用线性矩阵表示
-3. 参考 `ActuatorEffectivenessHelicopter` 的成功先例（同样使用 Pattern B 处理斜盘非线性）
-
-### 5.2 零空间修正的简化实现
-
-论文 Eq. (16) 给出了完整的 6 维系数向量 $\mathbf{c}$ 选择策略。本实现做了以下简化：
-
-| 论文原文 | 本实现 | 理由 |
-|---------|--------|------|
-| 完整的 $\mathbf{N}_M$ 零空间基投影 | 直接在推力向量上添加 y/x 分量修正 | 避免 6×6 矩阵运算，降低计算负担 |
-| 条件分支选择 $c_2, c_4, c_6$ | 统一的前后对交替符号 | 简化逻辑，效果等价 |
-| 精确的 $\langle \hat{\mathbf{f}}, j^B \rangle$ 投影 | 使用 $|\hat{f}_y|$ 近似 | NED 坐标系下 $j^B = [0,1,0]^\top$，内积即 $f_y$ 分量 |
-
-增益系数 $k_{\text{gimbal}} = 0.3$、$k_{\text{downwash}} = 0.2$ 为可调参数，需通过飞行实验整定。
-
-### 5.3 连续旋转支持
-
-MorphQuad 的舵机支持 ±1080°（三圈）连续旋转。算法通过以下方式支持：
-1. 双分支解覆盖 $\beta \in [-\pi/2, 3\pi/2]$
-2. $\pm 2k\pi$ 缠绕检查（$n_r = 2$），确保选择运动量最小的缠绕方式
-3. 保存上一时刻角度 `_alpha_prev`、`_beta_prev` 作为参考
-
-### 5.4 积分器设计
-
-积分器参考 PX4 `RateControl` 类（`src/lib/rate_control/`）的实现模式：
-- 一阶矩形积分，带限幅
-- 非线性 I 因子抑制大误差 windup
-- 条件积分抗饱和（执行器饱和方向停止积分）
-- 地面冻结 + 解锁清零
-
-这比经典 back-calculation 抗饱和更简单，且已被 PX4 多旋翼控制器验证。
-
----
-
-## 6. 计算复杂度分析
-
-| 步骤 | 运算量 | 说明 |
-|------|--------|------|
-| 最小范数分解 | ~40 次乘加 | 4 旋翼 × 3 分量，含符号查找表 |
-| 零空间修正 | ~20 次乘加 + 2 次条件判断 | 仅在 $\|\mathbf{f}\| > 0.01$ 时执行 |
-| 舵机角度反解 | ~30 次运算/旋翼 | 含 atan2、asin、距离比较 |
-| **总计** | **~200 次浮点运算** | 在 800 Hz 控制频率下完全可行 |
-
-所有运算均为标量浮点操作，无矩阵求逆或迭代，适合嵌入式实时执行。
-
----
-
-## 7. 稳定性保证
-
-**推论 1**（论文）：零空间修正不改变 wrench，因此几何控制器的几乎处处指数稳定性不受影响。
-
-**实际含义**：
-- 闭环误差动力学与无修正时完全相同
-- 收敛到任意期望位姿（除零测集外）
-- 零空间修正仅影响执行器层面的内部状态（舵机角度），不影响飞行器的外环跟踪性能
-
----
-
-## 8. 参考文献
-
-1. Lee, T., Leok, M., McClamroch, N.H. "Geometric tracking control of a quadrotor UAV on SE(3)." CDC 2010.
-2. Díaz Peón González Pacheco, J. et al. "MorphQuad: Morphable Quadrotor for Superhuman Maneuverability, Manipulation, and Resiliency." arXiv:2607.02764v3, 2026.
-3. Michael, N. et al. "The GRASP multiple micro-UAV testbed." IEEE RAM 2010.
-4. Wu, Z. et al. "L1Quad: L1 Adaptive Augmentation of Geometric Control for Agile Quadrotors." IEEE TCST 2025.
+| 版本 | 日期 | 变更 |
+|---|---|---|
+| v0.7 | 2026-08-18 | 以当前分配器和最终保持架验证结果重写；明确 `CA_MQ_Z`、±180°限位、z 符号和标定限制 |
+| v0.8 | 2026-08-18 | 新增 `att_verify` 姿态闭环自动阶跃与评分算法 |

@@ -215,9 +215,10 @@ PARAM_DEFINE_FLOAT(GC_VEL_INT_LIM, 2.0);
  *
  * Sum of the maximum thrust of every rotor. Used to normalize the desired
  * force into a [0,1] collective-throttle estimate for the debug setpoints.
- * Should equal N_rotors * CA_MQ_TMAX (4 * 27.5 = 110 N for the morphquad).
+ * Should equal N_rotors * CA_MQ_TMAX (4 * 39.5 = 158 N for the calibrated
+ * JSBSim morphquad).
  *
  * @unit N
  * @group Geometric Controller
  */
-PARAM_DEFINE_FLOAT(GC_THRUST_MAX, 110.0);
+PARAM_DEFINE_FLOAT(GC_THRUST_MAX, 158.0);
