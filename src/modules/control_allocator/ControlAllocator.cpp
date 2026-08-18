@@ -655,6 +655,7 @@ void
 ControlAllocator::publish_actuator_controls()
 {
 	if (!_publish_controls) {
+		PX4_INFO("control allocation disabled");
 		return;
 	}
 

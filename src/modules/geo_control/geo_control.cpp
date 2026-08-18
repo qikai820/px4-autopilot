@@ -740,7 +740,10 @@ void GeoControl::control_step(const vehicle_local_position_s &local_pos)
 	// 根据 nav_state 确定控制模式
 	ControlMode mode = ControlMode::AUTO;
 
-	if (vehicle_status.nav_state == vehicle_status.NAVIGATION_STATE_MANUAL) {
+	if (vehicle_status.nav_state == vehicle_status.NAVIGATION_STATE_ACRO) {
+		mode = ControlMode::ACRO;
+
+	} else if (vehicle_status.nav_state == vehicle_status.NAVIGATION_STATE_MANUAL) {
 		mode = ControlMode::MANUAL;
 
 	} else if (vehicle_status.nav_state == vehicle_status.NAVIGATION_STATE_POSCTL) {
@@ -768,7 +771,7 @@ void GeoControl::control_step(const vehicle_local_position_s &local_pos)
 		break;
 
 	case ControlMode::ACRO:
-		// 在 control_step 前面已处理 (acro 绕过解锁检查)
+		control_step_acro(local_pos.timestamp_sample);
 		break;
 	}
 }
@@ -1265,13 +1268,15 @@ int GeoControl::vel_test_command(int argc, char *argv[])
 int GeoControl::verify_allocation()
 {
 	// ── 端到端验证 MorphQuad 控制分配 ──
-	// 双重对比: (1)前向运动学重构  (2)JSBSim 物理仿真实际力/力矩
+	// 双重对比: (1)前向运动学重构  (2)JSBSim 物理仿真实际力/力矩增量
 	//
 	// 链路: geo_control → ControlAllocator → MAVLink → bridge → JSBSim
 	//       JSBSim 合力/力矩 → bridge UDP :9871 → geo_control 读取
 	//
 	// JSBSim FK: t_i = T_i·(sinα cosβ, sinβ, -cosα cosβ),  T_i = esc_i²·TMAX
-	// 重构误差小 → 分配器收敛; JSBSim 误差小 → 物理模型与分配器一致
+	// 重构误差小 → 分配器收敛。
+	// JSBSim 使用电机/螺旋桨动态模型, 绝对推力通常不等于 esc²·TMAX。
+	// 因此 JSBSim 侧对比 hover 基线后的增量, 用于判断力/力矩耦合。
 	const float tmax = math::max(_param_ca_mq_tmax.get(), 1.f);
 	const float l = _param_ca_mq_l.get();
 	const float b = _param_ca_mq_b.get();
@@ -1310,61 +1315,103 @@ int GeoControl::verify_allocation()
 	// 每个控制方向以递增幅值测试。
 	const float scale[6] = {80.f, 80.f, 110.f, 18.f, 18.f, 10.f};  // fx,fy,fz,tx,ty,tz
 
-	PX4_INFO("MorphQuad 端到端分配验证 — 60 组固定 6D 力/力矩");
+	// ── 重力补偿: 每组测试力/力矩都叠加悬停推力, 飞机不落地 ──
+	// NED 下 Fz 向下为正, 悬停推力 = -mass*g (向上)
+	const float hover_fz = -_param_gc_mass.get() * 9.81f;
+	matrix::Vector<float, 6> hover_wrench{};
+	hover_wrench(2) = hover_fz;
+
+	PX4_INFO("MorphQuad 端到端分配验证 — 60 组固定 6D 力/力矩 (hover 基线 Fz=%.1f N)", (double)hover_fz);
 	PX4_INFO("  FK: t_i = T_i·(sinα cosβ, sinβ, -cosα cosβ),  T_i = esc_i²·TMAX = %.2f N", (double)tmax);
-	PX4_INFO("  JSBSim 反馈: UDP :%d (bridge 力/力矩)", (int)WRENCH_PORT);
+	PX4_INFO("  JSBSim 反馈: UDP :%d, 每组先采 hover 基线, 再比较 Δwrench", (int)WRENCH_PORT);
 
 	_verify_active = true;
 
 	// 记录上一帧 JSBSim 时间戳，用于对齐检测
 	double jsb_timestamp_prev = 0.0;
 
+	auto sample_jsb_wrench = [&](double out[6], double &out_timestamp) -> bool {
+		for (int j = 0; j < 6; ++j) {
+			out[j] = 0.0;
+		}
+
+		out_timestamp = 0.0;
+
+		struct pollfd pfd{};
+		pfd.fd = wrench_fd;
+		pfd.events = POLLIN;
+
+		double pkt[7];
+
+		// 排空旧数据, 后续只平均新命令稳定后的反馈。
+		while (::poll(&pfd, 1, 0) > 0) {
+			recvfrom(wrench_fd, pkt, sizeof(pkt), 0, nullptr, nullptr);
+			pfd.revents = 0;
+		}
+
+		// 等待 allocator/bridge/JSBSim 管道传播和电机模型短暂稳定。
+		for (int settle = 0; settle < 15; ++settle) {
+			px4_usleep(10000);
+		}
+
+		double sum[6] {};
+		int samples = 0;
+
+		for (int retry = 0; retry < 30; ++retry) {
+			px4_usleep(10000);
+
+			while (::poll(&pfd, 1, 0) > 0) {
+				const ssize_t n = recvfrom(wrench_fd, pkt, sizeof(pkt), 0, nullptr, nullptr);
+
+				if (n == (ssize_t)sizeof(pkt) && pkt[0] > jsb_timestamp_prev) {
+					for (int j = 0; j < 6; ++j) {
+						sum[j] += pkt[j + 1];
+					}
+
+					out_timestamp = pkt[0];
+					jsb_timestamp_prev = pkt[0];
+					++samples;
+				}
+
+				pfd.revents = 0;
+			}
+		}
+
+		if (samples <= 0) {
+			return false;
+		}
+
+		for (int j = 0; j < 6; ++j) {
+			out[j] = sum[j] / (double)samples;
+		}
+
+		return true;
+	};
+
 	for (int k = 0; k < 60; ++k) {
 		const int axis = k / 10;          // 0..5
 		const int m = (k % 10) + 1;       // 1..10
-		matrix::Vector<float, 6> W{};
-		W(axis) = (float)m / 10.f * scale[axis];
+		matrix::Vector<float, 6> dW{};
+		dW(axis) = (float)m / 10.f * scale[axis];
 
+		// 叠加悬停推力, 保持飞机不落地
+		matrix::Vector<float, 6> W = hover_wrench + dW;
+
+		// 每个采样点先回到纯 hover 并采集 JSBSim 基线。这样可以消除
+		// JSBSim 电机/螺旋桨模型和 esc²·TMAX 静态模型之间的绝对推力偏差。
+		_verify_wrench = hover_wrench;
+		for (int settle = 0; settle < 40; ++settle) { px4_usleep(8000); }
+
+		double jsb_hover[6] = {};
+		double jsb_hover_timestamp = 0.0;
+		const bool jsb_hover_valid = sample_jsb_wrench(jsb_hover, jsb_hover_timestamp);
+
+		// 施加当前测试增量。
 		_verify_wrench = W;
 
-		// ── 数据对齐: 等管道稳定 + 取新时间戳帧 ──
-		// 链路: geo_control → allocator → MAVLink → bridge → server → JSBSim
-		//       → server FK → bridge UDP → geo_control。往返 ~30-40ms。
 		double jsb_wrench[6] = {};
 		double jsb_timestamp = 0.0;
-		bool jsb_valid = false;
-		{
-			struct pollfd pfd{};
-			pfd.fd = wrench_fd;
-			pfd.events = POLLIN;
-
-			// (1) 排空缓冲区 (旧数据)
-			double pkt[7];
-			while (::poll(&pfd, 1, 0) > 0) {
-				recvfrom(wrench_fd, pkt, sizeof(pkt), 0, nullptr, nullptr);
-				pfd.revents = 0;
-			}
-
-			// (2) 等管道稳定 + 新数据到达 (最多等 300ms)
-			bool aligned = false;
-			for (int retry = 0; retry < 30; retry++) {
-				px4_usleep(10000);  // 10ms
-
-				while (::poll(&pfd, 1, 0) > 0) {
-					ssize_t n = recvfrom(wrench_fd, pkt, sizeof(pkt), 0, nullptr, nullptr);
-					if (n == (ssize_t)sizeof(pkt) && pkt[0] > jsb_timestamp_prev) {
-						jsb_timestamp = pkt[0];
-						memcpy(jsb_wrench, &pkt[1], sizeof(jsb_wrench));
-						jsb_valid = true;
-						aligned = true;
-					}
-					pfd.revents = 0;
-				}
-
-				if (aligned) break;
-			}
-		}
-		jsb_timestamp_prev = jsb_timestamp;
+		const bool jsb_valid = sample_jsb_wrench(jsb_wrench, jsb_timestamp);
 
 		// ── 读取执行器输出 (FK 重构) ──
 		actuator_motors_s motors{};
@@ -1375,15 +1422,17 @@ int GeoControl::verify_allocation()
 		matrix::Vector3f f_ach(0.f, 0.f, 0.f);
 		matrix::Vector3f tau_ach(0.f, 0.f, 0.f);
 
-		PX4_INFO_RAW("[%2d] 指令 F=(%7.2f,%7.2f,%7.2f) T=(%6.2f,%6.2f,%6.2f)\n",
+		PX4_INFO_RAW("[%2d] 指令 F=(%7.2f,%7.2f,%7.2f) T=(%6.2f,%6.2f,%6.2f)  Δaxis=%d Δ=%.2f\n",
 			     k, (double)W(0), (double)W(1), (double)W(2),
-			     (double)W(3), (double)W(4), (double)W(5));
+			     (double)W(3), (double)W(4), (double)W(5),
+			     axis, (double)dW(axis));
 
 		// 逐旋翼明细
 		for (int i = 0; i < NQ; ++i) {
 			const float esc = (i < actuator_motors_s::NUM_CONTROLS) ? motors.control[i] : NAN;
-			const float alpha = (2 * i < actuator_servos_s::NUM_CONTROLS) ? servos.control[2 * i] * M_PI_F : NAN;
-			const float beta  = ((2 * i + 1) < actuator_servos_s::NUM_CONTROLS) ? servos.control[2 * i + 1] * M_PI_F : NAN;
+			// 归一化 ±1 -> ±π/2 rad (与分配器输出和 bridge scale=π/2 一致)
+			const float alpha = (2 * i < actuator_servos_s::NUM_CONTROLS) ? servos.control[2 * i] * (M_PI_F / 2.f) : NAN;
+			const float beta  = ((2 * i + 1) < actuator_servos_s::NUM_CONTROLS) ? servos.control[2 * i + 1] * (M_PI_F / 2.f) : NAN;
 
 			const float T = (PX4_ISFINITE(esc) ? esc * esc : 0.f) * tmax;
 			const float sa = sinf(alpha), ca = cosf(alpha);
@@ -1409,12 +1458,15 @@ int GeoControl::verify_allocation()
 			err_fk = sqrtf(err_fk);
 		}
 
-		// ── JSBSim 物理对比 ──
+		// ── JSBSim 物理增量对比 ──
 		double err_jsb = -1.0;
-		if (jsb_valid) {
+		double jsb_delta[6] {};
+
+		if (jsb_hover_valid && jsb_valid) {
 			err_jsb = 0.0;
 			for (int j = 0; j < 6; ++j) {
-				double e = (double)W(j) - jsb_wrench[j];
+				jsb_delta[j] = jsb_wrench[j] - jsb_hover[j];
+				const double e = (double)dW(j) - jsb_delta[j];
 				err_jsb += e * e;
 			}
 			err_jsb = sqrt(err_jsb);
@@ -1425,14 +1477,26 @@ int GeoControl::verify_allocation()
 			     (double)tau_ach(0), (double)tau_ach(1), (double)tau_ach(2),
 			     (double)err_fk);
 
-		if (jsb_valid) {
-			PX4_INFO_RAW("    JSB: F=(%7.2f,%7.2f,%7.2f) T=(%6.2f,%6.2f,%6.2f)  |err|=%7.3f  t=%.3fs\n",
+		if (jsb_hover_valid && jsb_valid) {
+			PX4_INFO_RAW("    JSB0:F=(%7.2f,%7.2f,%7.2f) T=(%6.2f,%6.2f,%6.2f)  t=%.3fs\n",
+				     jsb_hover[0], jsb_hover[1], jsb_hover[2],
+				     jsb_hover[3], jsb_hover[4], jsb_hover[5],
+				     jsb_hover_timestamp);
+			PX4_INFO_RAW("    JSB: F=(%7.2f,%7.2f,%7.2f) T=(%6.2f,%6.2f,%6.2f)  t=%.3fs\n",
 				     jsb_wrench[0], jsb_wrench[1], jsb_wrench[2],
 				     jsb_wrench[3], jsb_wrench[4], jsb_wrench[5],
-				     (double)err_jsb, jsb_timestamp);
+				     jsb_timestamp);
+			PX4_INFO_RAW("    ΔJSB:F=(%7.2f,%7.2f,%7.2f) T=(%6.2f,%6.2f,%6.2f)  |errΔ|=%7.3f\n",
+				     jsb_delta[0], jsb_delta[1], jsb_delta[2],
+				     jsb_delta[3], jsb_delta[4], jsb_delta[5],
+				     (double)err_jsb);
 		} else {
 			PX4_INFO_RAW("    JSB: (无数据 — bridge 力/力矩 UDP 反馈未到达)\n");
 		}
+
+		// ── 采样后冷却: 回到纯悬停 ~500ms, 电机回中准备下一组 ──
+		_verify_wrench = hover_wrench;
+		for (int cool = 0; cool < 60; cool++) { px4_usleep(8000); }
 	}
 
 	::close(wrench_fd);
@@ -1443,102 +1507,111 @@ int GeoControl::verify_allocation()
 
 void GeoControl::control_step_acro(uint64_t timestamp_sample)
 {
-	// 复位保持: 发布一个小悬停偏置力 (Fz=-5N ≈ 10% 悬停) 以主动
-	// 将舵机角拉回 α=β=0。纯零力/力矩会让舵机因 e=0 → dθ=0
-	// 而冻结，需要弱向下偏置实现主动收敛。
-	if (_acro_reset_hold > 0) {
-		_acro_reset_hold--;
-		publish_wrench(Vector3f(0,0,-5), Vector3f(0,0,0), timestamp_sample);
+	if (!_acro_active) {
+		// 正常 ACRO 飞行模式: 确保6维力/力矩全部为零,
+		// 阻断 mc_rate_control 归一化推力 (-1..1) 被 MorphQuad 分配器
+		// 误当作牛顿解读，导致标准伪逆分配输出满油。
+		publish_wrench(Vector3f(0.f, 0.f, 0.f), Vector3f(0.f, 0.f, 0.f), timestamp_sample);
 		return;
 	}
 
+	// acro_command 模式: 注入固定力/力矩用于分配器验证
 	Vector3f f_cmd(_acro_wrench(0), _acro_wrench(1), _acro_wrench(2));
 	Vector3f tau_cmd(_acro_wrench(3), _acro_wrench(4), _acro_wrench(5));
 
 	publish_wrench(f_cmd, tau_cmd, timestamp_sample);
 
-	// 从控制分配器实际输出读回力/力矩。
-	// 前向运动学重构使用与 ActuatorEffectivenessMorphQuad
-	// 和 JSBSim morphquad.xml 相同的公式:
-	//   t_i = T_i * (sinα cosβ, sinβ, -cosα cosβ),  T_i = esc_i² * TMAX
-	const float tmax = math::max(_param_ca_mq_tmax.get(), 1.f);
-	const float l = _param_ca_mq_l.get();
-	const float b = _param_ca_mq_b.get();
-
-	static constexpr int NQ = 4;
-	const float lx[NQ] = { l,  l, -l, -l};
-	const float ly[NQ] = { b, -b, -b,  b};
-
-	uORB::Subscription sub_motors{ORB_ID(actuator_motors)};
-	uORB::Subscription sub_servos{ORB_ID(actuator_servos)};
-
-	actuator_motors_s motors{};
-	actuator_servos_s servos{};
-	sub_motors.copy(&motors);
-	sub_servos.copy(&servos);
-
-	Vector3f f_ach(0.f, 0.f, 0.f);
-	Vector3f tau_ach(0.f, 0.f, 0.f);
-	float esc_vals[NQ] = {};
-	float alpha_vals[NQ] = {};
-	float beta_vals[NQ] = {};
-
-	for (int i = 0; i < NQ; ++i) {
-		const float esc = (i < actuator_motors_s::NUM_CONTROLS) ? motors.control[i] : NAN;
-		const float alpha = (2 * i < actuator_servos_s::NUM_CONTROLS) ? servos.control[2 * i] * M_PI_F : NAN;
-		const float beta  = ((2 * i + 1) < actuator_servos_s::NUM_CONTROLS) ? servos.control[2 * i + 1] * M_PI_F : NAN;
-
-		esc_vals[i] = esc;
-		alpha_vals[i] = alpha;
-		beta_vals[i] = beta;
-
-		const float T = (PX4_ISFINITE(esc) ? esc * esc : 0.f) * tmax;
-		const float sa = sinf(alpha), ca = cosf(alpha);
-		const float sb = sinf(beta),  cb = cosf(beta);
-		const Vector3f t_vec(T * sa * cb, T * sb, -T * ca * cb);
-
-		f_ach += t_vec;
-		const Vector3f r_i(lx[i], ly[i], 0.f);
-		tau_ach += r_i.cross(t_vec);
-	}
-
-	// 每 0.5s 打印 (节流避免日志刷屏)
-	static hrt_abstime _last_acro_print = 0;
-	const hrt_abstime now = hrt_absolute_time();
-
-	if (now - _last_acro_print > 500000) {
-		_last_acro_print = now;
-
-		PX4_INFO_RAW("=== ACRO 力/力矩 [机体 FRD] ===\n");
-		PX4_INFO_RAW("  指令  F=(%8.2f,%8.2f,%8.2f) N  T=(%6.2f,%6.2f,%6.2f) Nm\n",
-			     (double)f_cmd(0), (double)f_cmd(1), (double)f_cmd(2),
-			     (double)tau_cmd(0), (double)tau_cmd(1), (double)tau_cmd(2));
-		PX4_INFO_RAW("  实际  F=(%8.2f,%8.2f,%8.2f) N  T=(%6.2f,%6.2f,%6.2f) Nm\n",
-			     (double)f_ach(0), (double)f_ach(1), (double)f_ach(2),
-			     (double)tau_ach(0), (double)tau_ach(1), (double)tau_ach(2));
-
-		float err_f = (f_cmd - f_ach).norm();
-		float err_tau = (tau_cmd - tau_ach).norm();
-		PX4_INFO_RAW("  误差  |ΔF|=%.3f N  |Δτ|=%.3f Nm\n", (double)err_f, (double)err_tau);
-
-		for (int i = 0; i < NQ; ++i) {
-			PX4_INFO_RAW("  rotor%d: esc=%-6.3f  α=%7.1f°  β=%7.1f°\n",
-				     i, (double)esc_vals[i],
-				     (double)math::degrees(alpha_vals[i]),
-				     (double)math::degrees(beta_vals[i]));
+	// 每秒打印分配器输出的电机/舵机值
+	{
+		static hrt_abstime last = 0;
+		hrt_abstime now = hrt_absolute_time();
+		if (now - last > 500000) {
+			last = now;
+			uORB::Subscription sub_motors{ORB_ID(actuator_motors)};
+			uORB::Subscription sub_servos{ORB_ID(actuator_servos)};
+			actuator_motors_s motors{};
+			actuator_servos_s servos{};
+			sub_motors.copy(&motors);
+			sub_servos.copy(&servos);
+			PX4_INFO_RAW("[ACRO] cmd F=(%.1f,%.1f,%.1f) T=(%.2f,%.2f,%.2f) esc=[%.3f,%.3f,%.3f,%.3f] servo=[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f]\n",
+				(double)f_cmd(0), (double)f_cmd(1), (double)f_cmd(2),
+				(double)tau_cmd(0), (double)tau_cmd(1), (double)tau_cmd(2),
+				(double)motors.control[0], (double)motors.control[1],
+				(double)motors.control[2], (double)motors.control[3],
+				(double)servos.control[0], (double)servos.control[1],
+				(double)servos.control[2], (double)servos.control[3],
+				(double)servos.control[4], (double)servos.control[5],
+				(double)servos.control[6], (double)servos.control[7]);
 		}
 	}
+
+	// actuator_motors_s motors{};
+	// actuator_servos_s servos{};
+	// sub_motors.copy(&motors);
+	// sub_servos.copy(&servos);
+
+	// Vector3f f_ach(0.f, 0.f, 0.f);
+	// Vector3f tau_ach(0.f, 0.f, 0.f);
+	// float esc_vals[NQ] = {};
+	// float alpha_vals[NQ] = {};
+	// float beta_vals[NQ] = {};
+
+	// for (int i = 0; i < NQ; ++i) {
+	// 	const float esc = (i < actuator_motors_s::NUM_CONTROLS) ? motors.control[i] : NAN;
+	// 	const float alpha = (2 * i < actuator_servos_s::NUM_CONTROLS) ? servos.control[2 * i] * M_PI_F : NAN;
+	// 	const float beta  = ((2 * i + 1) < actuator_servos_s::NUM_CONTROLS) ? servos.control[2 * i + 1] * M_PI_F : NAN;
+
+	// 	esc_vals[i] = esc;
+	// 	alpha_vals[i] = alpha;
+	// 	beta_vals[i] = beta;
+
+	// 	const float T = (PX4_ISFINITE(esc) ? esc * esc : 0.f) * tmax;
+	// 	const float sa = sinf(alpha), ca = cosf(alpha);
+	// 	const float sb = sinf(beta),  cb = cosf(beta);
+	// 	const Vector3f t_vec(T * sa * cb, T * sb, -T * ca * cb);
+
+	// 	f_ach += t_vec;
+	// 	const Vector3f r_i(lx[i], ly[i], 0.f);
+	// 	tau_ach += r_i.cross(t_vec);
+	// }
+
+	// // 每 0.5s 打印 (节流避免日志刷屏)
+	// static hrt_abstime _last_acro_print = 0;
+	// const hrt_abstime now = hrt_absolute_time();
+
+	// if (now - _last_acro_print > 500000) {
+	// 	_last_acro_print = now;
+
+	// 	PX4_INFO_RAW("=== ACRO 力/力矩 [机体 FRD] ===\n");
+	// 	PX4_INFO_RAW("  指令  F=(%8.2f,%8.2f,%8.2f) N  T=(%6.2f,%6.2f,%6.2f) Nm\n",
+	// 		     (double)f_cmd(0), (double)f_cmd(1), (double)f_cmd(2),
+	// 		     (double)tau_cmd(0), (double)tau_cmd(1), (double)tau_cmd(2));
+	// 	PX4_INFO_RAW("  实际  F=(%8.2f,%8.2f,%8.2f) N  T=(%6.2f,%6.2f,%6.2f) Nm\n",
+	// 		     (double)f_ach(0), (double)f_ach(1), (double)f_ach(2),
+	// 		     (double)tau_ach(0), (double)tau_ach(1), (double)tau_ach(2));
+
+	// 	float err_f = (f_cmd - f_ach).norm();
+	// 	float err_tau = (tau_cmd - tau_ach).norm();
+	// 	PX4_INFO_RAW("  误差  |ΔF|=%.3f N  |Δτ|=%.3f Nm\n", (double)err_f, (double)err_tau);
+
+	// 	for (int i = 0; i < NQ; ++i) {
+	// 		PX4_INFO_RAW("  rotor%d: esc=%-6.3f  α=%7.1f°  β=%7.1f°\n",
+	// 			     i, (double)esc_vals[i],
+	// 			     (double)math::degrees(alpha_vals[i]),
+	// 			     (double)math::degrees(beta_vals[i]));
+	// 	}
+	// }
 }
 
 int GeoControl::acro_command(int argc, char *argv[])
 {
 	// 用法:
 	//   geo_control acro Fx Fy Fz Tx Ty Tz [duration_s]
-	//   geo_control acro stop
+	//   geo_control acro stop    (别名: q / quit)
 	if (argc < 2) {
 		PX4_INFO_RAW("用法:\n");
 		PX4_INFO_RAW("  geo_control acro Fx Fy Fz Tx Ty Tz [duration_s]\n");
-		PX4_INFO_RAW("  geo_control acro stop\n");
+		PX4_INFO_RAW("  geo_control acro stop    (别名: q / quit)\n");
 		PX4_INFO_RAW("  (Fx/Fy/Fz 单位 N, Tx/Ty/Tz 单位 Nm, 机体 FRD 坐标系)\n");
 		PX4_INFO_RAW("  示例:\n");
 		PX4_INFO_RAW("    geo_control acro 0 0 -44.7 0 0 0   # 悬停推力 (4.56kg)\n");
@@ -1547,7 +1620,7 @@ int GeoControl::acro_command(int argc, char *argv[])
 		return 0;
 	}
 
-	if (!strcmp(argv[1], "stop")) {
+	if (!strcmp(argv[1], "stop") || !strcmp(argv[1], "q") || !strcmp(argv[1], "quit")) {
 		_acro_active = false;
 		publish_wrench(Vector3f(0,0,0), Vector3f(0,0,0), hrt_absolute_time());
 		PX4_INFO("ACRO: 已停止");
@@ -1589,7 +1662,7 @@ int GeoControl::acro_command(int argc, char *argv[])
 	PX4_INFO("ACRO: ON  F=(%.1f,%.1f,%.1f)N  T=(%.2f,%.2f,%.2f)Nm  %s",
 		 (double)fx, (double)fy, (double)fz,
 		 (double)tx, (double)ty, (double)tz,
-		 _acro_duration_us > 0 ? "(定时)" : "(持续, 用 'acro stop' 停止)");
+		 _acro_duration_us > 0 ? "(定时)" : "(持续, 用 'acro stop' / 'acro q' 停止)");
 	return 0;
 }
 
@@ -1641,8 +1714,8 @@ void GeoControl::control_step_sweep(uint64_t timestamp_sample)
 
 	for (int i = 0; i < NQ; ++i) {
 		const float esc = (i < actuator_motors_s::NUM_CONTROLS) ? motors.control[i] : NAN;
-		const float alpha = (2*i < actuator_servos_s::NUM_CONTROLS) ? servos.control[2*i] * M_PI_F : NAN;
-		const float beta  = ((2*i+1) < actuator_servos_s::NUM_CONTROLS) ? servos.control[2*i+1] * M_PI_F : NAN;
+		const float alpha = (2*i < actuator_servos_s::NUM_CONTROLS) ? servos.control[2*i] * (M_PI_F / 2.f) : NAN;
+		const float beta  = ((2*i+1) < actuator_servos_s::NUM_CONTROLS) ? servos.control[2*i+1] * (M_PI_F / 2.f) : NAN;
 		esc_vals[i] = esc; alpha_deg[i] = math::degrees(alpha); beta_deg[i] = math::degrees(beta);
 
 		const float T = (PX4_ISFINITE(esc) ? esc*esc : 0.f) * tmax;

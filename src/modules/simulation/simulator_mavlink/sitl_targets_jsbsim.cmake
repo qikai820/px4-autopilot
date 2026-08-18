@@ -21,7 +21,7 @@ if(JSBSIM_INCLUDE_DIR)
 	include(ExternalProject)
 	ExternalProject_Add(jsbsim_bridge
 		SOURCE_DIR ${PX4_SOURCE_DIR}/Tools/simulation/jsbsim/jsbsim_bridge
-		CMAKE_ARGS -DCMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX}
+		CMAKE_ARGS -DCMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX} -DJSBSIM_ROOT_DIR=${JSBSIM_ROOT_DIR}
 		BINARY_DIR ${PX4_BINARY_DIR}/build_jsbsim_bridge
 		INSTALL_COMMAND ""
 		DEPENDS git_jsbsim_bridge
@@ -37,6 +37,7 @@ if(JSBSIM_INCLUDE_DIR)
 		quadrotor_x
 		hexarotor_x
 		malolo
+		morphquad
 	)
 
 	set(worlds

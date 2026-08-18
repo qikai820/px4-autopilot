@@ -48,6 +48,7 @@ private:
 
 	bool _motor_saturated{false};
 	bool _servo_saturated{false};
+	bool _allocation_saturated{false};
 	float _unallocated_torque[3] {};
 	float _unallocated_thrust[3] {};
 
@@ -57,16 +58,16 @@ private:
 	 *     w = M t,       M is 6x12
 	 *     t0 = M^+ w
 	 *     t  = t0 + N_M c
-	 *     N_M = I - M^+ M
+	 *     N_M is the paper's explicit null-space basis
 	 *
 	 * t contains the four 3-D thrust vectors in PX4 BODY FRD coordinates.
 	 */
-	void computeThrustVectors(const matrix::Vector3f &f_des,
+	bool computeThrustVectors(const matrix::Vector3f &f_des,
 				  const matrix::Vector3f &tau_des,
 				  float t_out[NUM_ROTORS][3]);
 
-	/** Convert a thrust vector to continuous servo angles. */
-	void recoverServoAngles(const float t[3], int idx,
+	/** Convert a thrust vector to continuous servo angles; returns true if angle limiting changed the direction. */
+	bool recoverServoAngles(const float t[3], int idx,
 				float &alpha_out, float &beta_out);
 
 	void computeUnallocatedWrench(const matrix::Vector3f &f_des,

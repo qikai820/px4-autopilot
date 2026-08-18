@@ -65,6 +65,8 @@ px4_add_romfs_files(
 	1062_flightgear_tf-r1
 	1070_gazebo-classic_boat
 
+	19001_jsbsim_morphquad
+
 	2507_gazebo-classic_cloudship
 
 	3010_jsbsim_quadrotor_x

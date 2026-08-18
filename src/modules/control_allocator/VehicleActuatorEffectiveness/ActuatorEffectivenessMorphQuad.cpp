@@ -30,6 +30,19 @@
 
 using namespace matrix;
 
+namespace
+{
+Vector3f thrustUnitVector(float alpha, float beta)
+{
+	const float sa = sinf(alpha);
+	const float ca = cosf(alpha);
+	const float sb = sinf(beta);
+	const float cb = cosf(beta);
+
+	return Vector3f(sa * cb, sb, -ca * cb);
+}
+}
+
 ActuatorEffectivenessMorphQuad::ActuatorEffectivenessMorphQuad(ModuleParams *parent) :
 	ModuleParams(parent)
 {
@@ -68,21 +81,39 @@ void ActuatorEffectivenessMorphQuad::updateSetpoint(
 			      control_sp(ControlAxis::PITCH),
 			      control_sp(ControlAxis::YAW));
 
-	const Vector3f f_des(control_sp(ControlAxis::THRUST_X),
+	const Vector3f f_req(control_sp(ControlAxis::THRUST_X),
 			     control_sp(ControlAxis::THRUST_Y),
 			     control_sp(ControlAxis::THRUST_Z));
 
+	Vector3f f_alloc = f_req;
+
+	_motor_saturated = false;
+	_servo_saturated = false;
+	_allocation_saturated = false;
+
+	// Feasibility gate on the vertical command.
+	// In the PX4 body frame z points down, and a rotor's thrust unit vector is
+	//   tz = -cos(alpha) cos(beta) <= 0
+	// i.e. thrust can only point UP. A positive (downward) Fz is therefore
+	// physically impossible: rotors cannot "suck" the vehicle down. If such a
+	// command reached the minimum-norm solve it would drive the gimbal angles
+	// to the +/-pi/2 limit (alpha slam) and produce large parasitic forces.
+	// Clamp Fz to the achievable upper bound 0; the lower bound (max up-thrust)
+	// is already enforced by the per-rotor TMAX magnitude clip in
+	// computeThrustVectors().
+	if (f_alloc(2) > 0.f) {
+		f_alloc(2) = 0.f;
+		_allocation_saturated = true;
+	}
+
 	float t[NUM_ROTORS][3] {};
-	computeThrustVectors(f_des, tau_des, t);
+	_allocation_saturated |= computeThrustVectors(f_alloc, tau_des, t);
 
 	const float tmax = math::max(_param_ca_mq_tmax.get(), 0.001f);
 
 	float omega_cmd[NUM_ROTORS] {};
 	float alpha_cmd[NUM_ROTORS] {};
 	float beta_cmd[NUM_ROTORS] {};
-
-	_motor_saturated = false;
-	_servo_saturated = false;
 
 	for (int i = 0; i < NUM_ROTORS; ++i) {
 		const float T = sqrtf(t[i][0] * t[i][0] +
@@ -91,7 +122,7 @@ void ActuatorEffectivenessMorphQuad::updateSetpoint(
 
 		float alpha = _alpha_prev[i];
 		float beta = _beta_prev[i];
-		recoverServoAngles(t[i], i, alpha, beta);
+		_servo_saturated |= recoverServoAngles(t[i], i, alpha, beta);
 
 		// T = c_t * Omega^2 and TMAX = c_t * OMEGA_MAX^2.
 		// Therefore the normalized rotor-speed command is
@@ -125,9 +156,12 @@ void ActuatorEffectivenessMorphQuad::updateSetpoint(
 		actuator_sp(motor_idx) = motor_actual;
 		actuator_sp(alpha_idx) = alpha_actual;
 		actuator_sp(beta_idx) = beta_actual;
+
+		_alpha_prev[i] = alpha_actual * (M_PI_F / 2.f);
+		_beta_prev[i] = beta_actual * (M_PI_F / 2.f);
 	}
 
-	computeUnallocatedWrench(f_des, tau_des, actuator_sp);
+	computeUnallocatedWrench(f_req, tau_des, actuator_sp);
 }
 
 Vector<float, ActuatorEffectivenessMorphQuad::WRENCH_AXES>
@@ -164,7 +198,7 @@ ActuatorEffectivenessMorphQuad::computeNullspaceCoefficient(const Vector3f &f_de
 	return c;
 }
 
-void ActuatorEffectivenessMorphQuad::computeThrustVectors(
+bool ActuatorEffectivenessMorphQuad::computeThrustVectors(
 	const Vector3f &f_des, const Vector3f &tau_des,
 	float t_out[NUM_ROTORS][3])
 {
@@ -223,7 +257,7 @@ void ActuatorEffectivenessMorphQuad::computeThrustVectors(
 			t_out[i][1] = 0.f;
 			t_out[i][2] = 0.f;
 		}
-		return;
+		return true;
 	}
 
 	// Minimum-norm solution: t0 = M^+ w.
@@ -272,18 +306,20 @@ void ActuatorEffectivenessMorphQuad::computeThrustVectors(
 	N_M(0, 5) = 0.f; N_M(1, 5) = 0.f; N_M(2, 5) = -1.f;
 	N_M(3, 5) = 0.f; N_M(4, 5) = 0.f; N_M(5, 5) = 1.f;
 	N_M(6, 5) = 0.f; N_M(7, 5) = 0.f; N_M(8, 5) = -1.f;
-	N_M(9, 5) = 0.f; N_M(10,5) = 0.f; N_M(11,5) = 1.f;
+	N_M(9, 5) = 0.f; N_M(10,5) = 0.f; N_M(11,5) = 1.f; 
 
 	// The basis satisfies M*N_M = 0 for any non-zero l,b.  Validate it now
 	// that N_M is fully populated; checking on an all-zero matrix before the
 	// fill would pass trivially and detect nothing.
 	{
+		static bool nullspace_error_reported = false;
 		Matrix<float, WRENCH_AXES, WRENCH_AXES> M_N_M = M * N_M;
 
 		for(int r = 0; r < WRENCH_AXES; ++r) {
 			for(int c = 0; c < WRENCH_AXES; ++c) {
-				if (fabsf(M_N_M(r, c)) > 1e-3f) {
+				if (fabsf(M_N_M(r, c)) > 1e-3f && !nullspace_error_reported) {
 					PX4_ERR("Nullspace basis N_M is inconsistent with M at (%d,%d): %f", r, c, (double)M_N_M(r, c));
+					nullspace_error_reported = true;
 				}
 			}
 		}
@@ -322,9 +358,10 @@ void ActuatorEffectivenessMorphQuad::computeThrustVectors(
 		t_out[i][2] = t(3 * i + 2);
 	}
 
+	return scale < 1.f;
 }
 
-void ActuatorEffectivenessMorphQuad::recoverServoAngles(
+bool ActuatorEffectivenessMorphQuad::recoverServoAngles(
 	const float t[3], int idx, float &alpha_out, float &beta_out)
 {
 	const float norm = sqrtf(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]);
@@ -332,7 +369,7 @@ void ActuatorEffectivenessMorphQuad::recoverServoAngles(
 	if (norm < 1e-5f) {
 		alpha_out = _alpha_prev[idx];
 		beta_out = _beta_prev[idx];
-		return;
+		return false;
 	}
 
 	const float tx = t[0] / norm;
@@ -360,12 +397,13 @@ void ActuatorEffectivenessMorphQuad::recoverServoAngles(
 	// wrench drove _alpha_prev to ±π). Cap the candidate window at the
 	// representable range so the alias is never selectable; the configured
 	// mechanical limit (CA_MQ_ALPM/BETM) still applies if tighter than π/2.
-	const float alpha_limit = math::min(math::radians(_param_ca_mq_alpm.get()), M_PI_F / 2.f);
-	const float beta_limit  = math::min(math::radians(_param_ca_mq_betm.get()),  M_PI_F / 2.f);
+	const float alpha_limit = math::max(0.f, math::min(math::radians(_param_ca_mq_alpm.get()), M_PI_F / 2.f));
+	const float beta_limit  = math::max(0.f, math::min(math::radians(_param_ca_mq_betm.get()),  M_PI_F / 2.f));
 
 	float best_alpha = alpha1;
 	float best_beta = beta1;
 	float best_cost = INFINITY;
+	bool angle_limited = false;
 
 	// Compare both branches and multiple revolutions against the previous
 	// measured/commanded servo state. This is the paper's minimal-motion rule.
@@ -403,18 +441,22 @@ void ActuatorEffectivenessMorphQuad::recoverServoAngles(
 	// If no candidate survived the configured mechanical range, clamp the
 	// closest principal solution. The achieved-wrench feedback will expose the
 	// resulting allocation loss.
-	const float alpha_max = math::radians(_param_ca_mq_alpm.get());
-	const float beta_max = math::radians(_param_ca_mq_betm.get());
-
 	if (!PX4_ISFINITE(best_cost)) {
-		best_alpha = math::constrain(alpha1, -alpha_max, alpha_max);
-		best_beta = math::constrain(beta1, -beta_max, beta_max);
+		best_alpha = math::constrain(alpha1, -alpha_limit, alpha_limit);
+		best_beta = math::constrain(beta1, -beta_limit, beta_limit);
+		angle_limited = true;
 	}
+
+	const Vector3f target_dir(tx, ty, tz);
+	const Vector3f achieved_dir = thrustUnitVector(best_alpha, best_beta);
+	angle_limited |= (target_dir - achieved_dir).norm() > 1e-3f;
 
 	_alpha_prev[idx] = best_alpha;
 	_beta_prev[idx] = best_beta;
 	alpha_out = best_alpha;
 	beta_out = best_beta;
+
+	return angle_limited;
 }
 
 void ActuatorEffectivenessMorphQuad::computeUnallocatedWrench(
@@ -428,10 +470,10 @@ void ActuatorEffectivenessMorphQuad::computeUnallocatedWrench(
 	_unallocated_thrust[1] = 0.f;
 	_unallocated_thrust[2] = 0.f;
 
-	// Only calculate residuals when the actual actuator command differs from
-	// the unconstrained solution. This keeps the status message quiet in normal
-	// operation while still feeding anti-windup when clipping occurs.
-	if (!_motor_saturated && !_servo_saturated) {
+	// Keep the status quiet in normal operation while still feeding anti-windup
+	// for all allocation losses: internal feasibility gates, thrust scaling,
+	// servo angle limiting, and PX4 actuator output clipping.
+	if (!_allocation_saturated && !_motor_saturated && !_servo_saturated) {
 		return;
 	}
 
@@ -454,14 +496,9 @@ void ActuatorEffectivenessMorphQuad::computeUnallocatedWrench(
 		// Same actuator model as the JSBSim XML: T = TMAX * esc^2.
 		const float T = esc * esc * tmax;
 
-		const float sa = sinf(alpha);
-		const float ca = cosf(alpha);
-		const float sb = sinf(beta);
-		const float cb = cosf(beta);
-
 		// Body thrust unit vector. Must match JSBSim (GimbalVectoring.xml):
-		//   tx = sin(a), ty = +sin(b), tz = -cos(a)cos(b)
-		const Vector3f g(sa * cb, sb, -ca * cb);
+		//   tx = sin(a)cos(b), ty = +sin(b), tz = -cos(a)cos(b)
+		const Vector3f g = thrustUnitVector(alpha, beta);
 		const Vector3f t = T * g;
 		const Vector3f r(x[i], y[i], 0.f);
 
