@@ -78,28 +78,28 @@ PARAM_DEFINE_FLOAT(GC_Z_VEL_P, 0.5);
  *
  * @group Geometric Controller
  */
-PARAM_DEFINE_FLOAT(GC_RP_P, 6.0);
+PARAM_DEFINE_FLOAT(GC_RP_P, 1.0);
 
 /**
  * Geometric Controller Attitude Proportional Gain (Yaw)
  *
  * @group Geometric Controller
  */
-PARAM_DEFINE_FLOAT(GC_YAW_P, 2.5);
+PARAM_DEFINE_FLOAT(GC_YAW_P, 0.8);
 
 /**
  * Geometric Controller Angular Rate Proportional Gain (Roll/Pitch)
  *
  * @group Geometric Controller
  */
-PARAM_DEFINE_FLOAT(GC_RP_RATE_P, 0.5);
+PARAM_DEFINE_FLOAT(GC_RP_RATE_P, 0.8);
 
 /**
  * Geometric Controller Angular Rate Proportional Gain (Yaw)
  *
  * @group Geometric Controller
  */
-PARAM_DEFINE_FLOAT(GC_YAW_RATE_P, 0.5);
+PARAM_DEFINE_FLOAT(GC_YAW_RATE_P, 0.7);
 
 /**
  * Geometric Controller Inertia Matrix XX
@@ -181,7 +181,7 @@ PARAM_DEFINE_FLOAT(GC_MAN_FMAX, 20.0);
  *
  * @group Geometric Controller
  */
-PARAM_DEFINE_FLOAT(GC_RATE_I, 0.1);
+PARAM_DEFINE_FLOAT(GC_RATE_I, 0.0);
 
 /**
  * Geometric Controller Rate Integrator Limit

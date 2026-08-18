@@ -220,6 +220,8 @@ geo_control → ControlAllocator → SimulatorMavlink → MAVLink
 
 命令会依次测试 `roll ±10°`、`pitch ±10°`、`yaw ±15°` 和水平回中，共 7 步。每步保持 4 秒，后 2 秒统计三个欧拉角的平均绝对误差和机体平均角速度；默认判据为每轴平均误差不大于 3°、平均角速度不大于 0.35 rad/s。每一步输出 `PASS` 或 `FAIL`，完成后输出总通过数，并自动切换到零姿态的悬停保持。测试完成后应执行 `geo_control att_test stop`，再切换安全模式或 `disarm`。
 
+当前 JSBSim 基准增益为 `GC_RP_P=1.0`、`GC_RP_RATE_P=0.8`、`GC_YAW_P=0.8`、`GC_YAW_RATE_P=0.7`、`GC_RATE_I=0`。使用这组增益的自由飞行复测为 7/7 通过；旧的 `GC_RP_P=6.0`、`GC_RP_RATE_P=0.5` 组合阻尼不足，会造成持续姿态振荡。
+
 `att_verify` 不自动修改飞行模式、解锁状态或 `hold_down`，以避免测试命令绕过 PX4 的飞行安全状态机。
 
 ## 7. 文件清单

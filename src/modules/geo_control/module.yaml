@@ -62,7 +62,7 @@ parameters:
         max: 100
         increment: 0.1
         decimal: 1
-        default: 6.0
+        default: 1.0
 
       GC_YAW_P:
         description:
@@ -72,7 +72,7 @@ parameters:
         max: 100
         increment: 0.1
         decimal: 1
-        default: 2.5
+        default: 0.8
 
       GC_RP_RATE_P:
         description:
@@ -82,7 +82,7 @@ parameters:
         max: 100
         increment: 0.1
         decimal: 1
-        default: 0.5
+        default: 0.8
 
       GC_YAW_RATE_P:
         description:
@@ -92,7 +92,7 @@ parameters:
         max: 100
         increment: 0.1
         decimal: 1
-        default: 0.5
+        default: 0.7
 
       GC_INERTIA_XX:
         description:
@@ -177,7 +177,7 @@ parameters:
         max: 10
         increment: 0.01
         decimal: 3
-        default: 0.1
+        default: 0.0
 
       GC_RATE_INT_LIM:
         description:
