@@ -1,0 +1,5 @@
+menuconfig MODULES_UORB_UDP_BRIDGE
+	bool "uORB UDP JSON bridge"
+	default n
+	---help---
+		Publish selected uORB telemetry topics as UDP JSON for PlotJuggler.

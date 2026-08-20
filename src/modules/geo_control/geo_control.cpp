@@ -78,6 +78,7 @@ void GeoControl::parameters_update(bool force)
 void GeoControl::resetIntegrators()
 {
 	_rate_int.zero();
+	_att_int.zero();
 	_vel_int.zero();
 }
 
@@ -105,7 +106,10 @@ void GeoControl::updateIntegrators(const Vector3f &e_omega, const Vector3f &e_v_
 		float i_factor = rate_error / math::radians(400.f);
 		i_factor = math::max(0.f, 1.f - i_factor * i_factor);
 
-		float rate_i = _rate_int(i) + i_factor * rate_i_gain * rate_error * dt;
+		// e_omega = omega - omega_sp, while the control law applies the
+		// integral torque directly. Therefore the integral must oppose the
+		// measured rate error, just like the proportional rate term.
+		float rate_i = _rate_int(i) - i_factor * rate_i_gain * rate_error * dt;
 
 		if (PX4_ISFINITE(rate_i)) {
 			_rate_int(i) = math::constrain(rate_i, -rate_int_lim, rate_int_lim);
@@ -191,18 +195,22 @@ void GeoControl::publish_setpoints(const Vector3f &f_des_world, const Vector3f &
 	local_pos_sp.yawspeed = 0.f;
 	_local_pos_sp_pub.publish(local_pos_sp);
 
-	// ── vehicle_attitude_setpoint (期望姿态 + 机体推力) ──
-	vehicle_attitude_setpoint_s att_sp{};
-	att_sp.timestamp = now;
-	att_sp.q_d[0] = q_att_ref(0);
-	att_sp.q_d[1] = q_att_ref(1);
-	att_sp.q_d[2] = q_att_ref(2);
-	att_sp.q_d[3] = q_att_ref(3);
-	att_sp.thrust_body[0] = f_des_body(0) / thrust_max;
-	att_sp.thrust_body[1] = f_des_body(1) / thrust_max;
-	att_sp.thrust_body[2] = throttle_norm;
-	att_sp.yaw_sp_move_rate = 0.f;
-	_att_sp_pub.publish(att_sp);
+	// Dedicated debug topic for the geometric controller's desired attitude.
+	// This must not use vehicle_attitude_setpoint, which is an Offboard input.
+	geo_control_attitude_setpoint_s attitude_sp_debug{};
+	attitude_sp_debug.timestamp = now;
+	attitude_sp_debug.timestamp_sample = timestamp_sample;
+	for (int i = 0; i < 4; ++i) { attitude_sp_debug.q[i] = q_att_ref(i); }
+	const Eulerf euler_sp(q_att_ref);
+	attitude_sp_debug.roll = euler_sp.phi();
+	attitude_sp_debug.pitch = euler_sp.theta();
+	attitude_sp_debug.yaw = euler_sp.psi();
+	_attitude_sp_debug_pub.publish(attitude_sp_debug);
+
+	// vehicle_attitude_setpoint is an Offboard input topic. Do not republish
+	// debug data on it: otherwise the next Offboard cycle can consume our own
+	// positive-magnitude debug thrust as an external MAVLink thrust command
+	// (where negative Z means upward thrust), flipping the vertical force.
 
 	// ── vehicle_angular_acceleration_setpoint ──
 	// 期望角加速度: τ = J·α + ω×Jω  →  α = J⁻¹(τ − ω×Jω)
@@ -223,7 +231,7 @@ void GeoControl::publish_setpoints(const Vector3f &f_des_world, const Vector3f &
 }
 
 matrix::Vector3f GeoControl::computeAttitudeTorque(const Dcmf &R, const Dcmf &R_sp,
-		const Vector3f &omega, const Vector3f &omega_sp,
+		const Vector3f &omega, const Vector3f & /* omega_sp */,
 		const Vector3f &omega_d_in_B, float dt)
 {
 	// 姿态误差 (Lee SO(3)): e_R = 1/2 (Rdᵀ R − Rᵀ Rd)^∨
@@ -235,16 +243,25 @@ matrix::Vector3f GeoControl::computeAttitudeTorque(const Dcmf &R, const Dcmf &R_
 	Matrix3f J = matrix::diag(Vector3f(_param_gc_inertia_xx.get(), _param_gc_inertia_yy.get(),
 					  _param_gc_inertia_zz.get()));
 
-	// 完整 Lee SO(3) 角加速度前馈:
-	//   τ_ff = −J ( Ω̂ RᵀRd Ωd − RᵀRd Ω̇d )
-	// Ωd = 期望机体角速率 (omega_sp); Ω̇d 由速率参考的有限差分得到。
-	// 注意 Ω̂ 是当前角速度，故 Ω̂ RᵀRd Ωd = ω × ω_d_in_B。
-	const Dcmf RtRd = R.transpose() * R_sp;
-	const Vector3f omega_dot_d = (omega_sp - _omega_sp_prev) / dt;
-	_omega_sp_prev = omega_sp;
-	const Vector3f ff = -J * (omega.cross(omega_d_in_B) - RtRd * omega_dot_d);
+	// Do not differentiate the external desired rate. SET_ATTITUDE_TARGET is
+	// normally 50 Hz while this controller follows the state callback rate;
+	// finite-differencing it produced large, non-physical torque impulses.
+	// Integrate the attitude error separately from the rate error. The rate
+	// error can be zero while a constant aerodynamic/allocation torque bias
+	// still leaves a non-zero attitude error.
+	if (!_landed && PX4_ISFINITE(dt) && dt > 0.f && dt <= 0.05f) {
+		const float att_i = _param_gc_att_i.get();
+		const float att_lim = _param_gc_rate_int_lim.get();
+		for (int i = 0; i < 3; ++i) {
+			const float v = _att_int(i) - att_i * e_R(i) * dt;
+			_att_int(i) = PX4_ISFINITE(v) ? math::constrain(v, -att_lim, att_lim) : 0.f;
+		}
+	}
 
-	return -kR.emult(e_R) - kOmega.emult(omega - omega_d_in_B) + _rate_int + omega.cross(J * omega) + ff;
+	const Vector3f ff = -J * omega.cross(omega_d_in_B);
+
+	return -kR.emult(e_R) - kOmega.emult(omega - omega_d_in_B) + _rate_int + _att_int
+	       + omega.cross(J * omega) + ff;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -370,7 +387,7 @@ void GeoControl::control_step_position(const Quatf &R_q, const Vector3f &pos,
 	}
 
 	Vector3f omega_sp(p_sp, q_sp, r_sp);
-	Vector3f vel_sp_body(vx_sp_b, vy_sp_b, vz_sp_b);
+	Vector3f vel_sp_body(vx_sp_b, vy_sp_b, -vz_sp_b);
 
 	const Dcmf R(R_q);
 	Vector3f vel_sp_world_stick = R * vel_sp_body;
@@ -434,10 +451,31 @@ void GeoControl::control_step_offboard(const Quatf &R_q, const Vector3f &pos,
 				       const Vector3f &vel, const Vector3f &omega,
 				       uint64_t timestamp_sample)
 {
+	// ── Path 0: body-rate control (SET_ATTITUDE_TARGET with attitude ignored) ──
+	// MavlinkReceiver publishes this topic when all three body rates are valid.
+	// It must be handled before the attitude path: vehicle_attitude_setpoint is
+	// intentionally not updated for a rate-only MAVLink command.
+	vehicle_rates_setpoint_s rate_sp;
+
+	if (_sub_vehicle_rates_setpoint.update(&rate_sp)) {
+		_offboard_rate_sp = rate_sp;
+		_offboard_rate_sp_timestamp = hrt_absolute_time();
+	}
+
+	// The MAVLink setpoint stream is slower than the state callback. Keep the
+	// latest valid rate request active in every control cycle; after 500 ms let
+	// the trajectory/attitude paths take over again.
+	if (_offboard_rate_sp_timestamp != 0
+	    && hrt_elapsed_time(&_offboard_rate_sp_timestamp) < 500_ms) {
+		control_step_offboard_rates(R_q, pos, vel, omega, _offboard_rate_sp, timestamp_sample);
+		return;
+	}
+
 	trajectory_setpoint_s traj_sp;
 
 	// ── 路径1: 全状态位置+姿态控制 (SET_POSITION_TARGET_LOCAL_NED) ──
 	if (_sub_trajectory_sp.update(&traj_sp)) {
+		_offboard_external_alt_hold_active = false;
 
 		const float dt = math::constrain(static_cast<float>((hrt_absolute_time() - _last_run) * 1e-6f),
 						 0.001f, 0.05f);
@@ -509,6 +547,11 @@ void GeoControl::control_step_offboard(const Quatf &R_q, const Vector3f &pos,
 	const Dcmf R(R_q);
 	const Dcmf R_sp(q_sp);
 
+	if (!_offboard_external_alt_hold_active) {
+		_offboard_external_alt_sp = pos(2);
+		_offboard_external_alt_hold_active = true;
+	}
+
 	// ── 推力: 将外部归一化推力转换为牛顿 ──
 	// MAVLink fill_thrust() 对旋翼机: thrust_body[2] = -thrust (NED: 负 = 向上)
 	// 例: thrust=0.45 → thrust_body[2]=-0.45 → force_Z = -0.45 * GC_THRUST_MAX ≈ -49.5 N ≈ 悬停
@@ -519,9 +562,14 @@ void GeoControl::control_step_offboard(const Quatf &R_q, const Vector3f &pos,
 		thrust_cmd = -mass * 9.81f;
 	}
 
-	// ── 力: 机体 Z 推力 + 世界系 XY 速度阻尼 (抗漂移) ──
+	// ── 力: 机体 Z 推力 + 起始高度保持 + 世界系 XY 速度阻尼 ──
 	Vector3f f_des_body(0.f, 0.f, thrust_cmd);
 	Vector3f f_des_world = R * f_des_body;
+
+	// SET_ATTITUDE_TARGET 不带高度目标；以进入该路径时的高度为参考，
+	// 闭合 Z 位置/速度环，消除悬停推力建模误差造成的长期漂移。
+	f_des_world(2) -= _param_gc_z_p.get() * (pos(2) - _offboard_external_alt_sp);
+	f_des_world(2) -= _param_gc_z_vel_p.get() * vel(2);
 
 	// 轻量 XY 速度阻尼 (仅抗漂移，非位置保持)
 	const float damp_xy = mass * 0.5f;  // ~0.5 m/s 时间常数
@@ -542,6 +590,60 @@ void GeoControl::control_step_offboard(const Quatf &R_q, const Vector3f &pos,
 
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
 	publish_setpoints(f_des_world, f_des_body, tau_des, Quatf(R_sp), vel, omega, timestamp_sample);
+}
+
+void GeoControl::control_step_offboard_rates(const Quatf &R_q, const Vector3f &pos,
+		const Vector3f &vel,
+		const Vector3f &omega, const vehicle_rates_setpoint_s &rate_sp,
+		uint64_t timestamp_sample)
+{
+	Vector3f omega_sp(rate_sp.roll, rate_sp.pitch, rate_sp.yaw);
+
+	for (int i = 0; i < 3; i++) {
+		if (!PX4_ISFINITE(omega_sp(i))) {
+			omega_sp(i) = 0.f;
+		}
+	}
+
+	const float dt = math::constrain(static_cast<float>((hrt_absolute_time() - _last_run) * 1e-6f), 0.001f, 0.05f);
+	const float mass = _param_gc_mass.get();
+	const Dcmf R(R_q);
+
+	if (!_offboard_external_alt_hold_active) {
+		_offboard_external_alt_sp = pos(2);
+		_offboard_external_alt_hold_active = true;
+	}
+
+	float thrust_cmd = rate_sp.thrust_body[2] * _param_gc_thrust_max.get();
+
+	if (fabsf(thrust_cmd) < 0.5f) {
+		thrust_cmd = -mass * 9.81f;
+	}
+
+	Vector3f f_des_body(0.f, 0.f, thrust_cmd);
+	Vector3f f_des_world = R * f_des_body;
+	f_des_world(2) -= _param_gc_z_p.get() * (pos(2) - _offboard_external_alt_sp);
+	f_des_world(2) -= _param_gc_z_vel_p.get() * vel(2);
+	const float damp_xy = mass * 0.5f;
+	f_des_world(0) -= damp_xy * vel(0);
+	f_des_world(1) -= damp_xy * vel(1);
+	f_des_body = R.transpose() * f_des_world;
+
+	// With no attitude target, use the current attitude as R_d. This removes
+	// the attitude-error term and leaves the Lee rate loop plus rigid-body
+	// compensation to track the requested body angular velocity.
+	const Dcmf R_sp(R);
+	const Vector3f omega_d_in_B = omega_sp;
+	const Vector3f e_omega = omega - omega_sp;
+
+	if (!_landed) {
+		updateIntegrators(e_omega, Vector3f(0.f, 0.f, 0.f), dt);
+	}
+
+	const Vector3f tau_des = computeAttitudeTorque(R, R_sp, omega, omega_sp, omega_d_in_B, dt);
+	publish_wrench(f_des_body, tau_des, timestamp_sample);
+	publish_setpoints(f_des_world, f_des_body, tau_des, R_q, Vector3f(0.f, 0.f, 0.f), omega_sp,
+			  timestamp_sample);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -704,6 +806,7 @@ void GeoControl::control_step(const vehicle_local_position_s &local_pos)
 	if (!_armed) {
 		resetIntegrators();
 		_pos_sp_init = false;   // 下次解锁时重新初始化位置保持指令
+		_offboard_external_alt_hold_active = false;
 		publish_wrench(matrix::Vector3f(0.f, 0.f, 0.f), matrix::Vector3f(0.f, 0.f, 0.f),
 			       local_pos.timestamp_sample);
 		publish_setpoints(matrix::Vector3f(0.f, 0.f, 0.f), matrix::Vector3f(0.f, 0.f, 0.f),
@@ -768,6 +871,11 @@ void GeoControl::control_step(const vehicle_local_position_s &local_pos)
 		mode = ControlMode::OFFBOARD;
 	}
 
+	if (mode != ControlMode::OFFBOARD) {
+		_offboard_external_alt_hold_active = false;
+		_offboard_rate_sp_timestamp = 0;
+	}
+
 	switch (mode) {
 	case ControlMode::MANUAL:
 		control_step_manual(R_q, omega, local_pos.timestamp_sample);
@@ -806,8 +914,14 @@ void GeoControl::Run()
 	vehicle_local_position_s local_pos;
 
 	if (_sub_vehicle_local_position.update(&local_pos)) {
-		_last_run = local_pos.timestamp_sample;
+		const hrt_abstime now = hrt_absolute_time();
+
+		if (_last_run == 0) {
+			_last_run = now;
+		}
+
 		control_step(local_pos);
+		_last_run = now;
 	}
 
 	perf_end(_loop_perf);

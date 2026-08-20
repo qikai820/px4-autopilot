@@ -44,11 +44,13 @@
 #include <uORB/topics/vehicle_attitude.h>
 #include <uORB/topics/vehicle_attitude_setpoint.h>
 #include <uORB/topics/vehicle_angular_velocity.h>
+#include <uORB/topics/vehicle_rates_setpoint.h>
 #include <uORB/topics/vehicle_local_position.h>
 #include <uORB/topics/vehicle_local_position_setpoint.h>
 #include <uORB/topics/vehicle_angular_acceleration_setpoint.h>
 #include <uORB/topics/vehicle_thrust_setpoint.h>
 #include <uORB/topics/vehicle_torque_setpoint.h>
+#include <uORB/topics/geo_control_attitude_setpoint.h>
 #include <uORB/topics/vehicle_status.h>
 #include <uORB/topics/vehicle_land_detected.h>
 #include <uORB/topics/manual_control_setpoint.h>
@@ -93,6 +95,11 @@ public:
 	hrt_abstime _offboard_test_start{0};
 	matrix::Vector3f _offboard_pos_sp{};
 	float _offboard_yaw_sp{0.f};
+
+	// Rate- and attitude-only MAVLink commands do not carry a position setpoint.
+	// Hold their entry altitude so a closed-loop test remains in a safe envelope.
+	bool _offboard_external_alt_hold_active{false};
+	float _offboard_external_alt_sp{0.f};
 
 	/** 姿态测试: 跟踪期望欧拉角 (roll, pitch, yaw)。 */
 	void control_step_att_test(uint64_t timestamp_sample);
@@ -154,21 +161,28 @@ private:
 				   const matrix::Vector3f &vel, const matrix::Vector3f &omega,
 				   uint64_t timestamp_sample);
 
+	/** Offboard body-rate command path (MAVLink SET_ATTITUDE_TARGET body rates). */
+	void control_step_offboard_rates(const matrix::Quatf &R_q, const matrix::Vector3f &pos,
+					 const matrix::Vector3f &vel,
+					 const matrix::Vector3f &omega,
+					 const vehicle_rates_setpoint_s &rate_sp,
+					 uint64_t timestamp_sample);
+
 	void control_step_auto(const matrix::Quatf &R_q, const matrix::Vector3f &pos,
 			       const matrix::Vector3f &vel, const matrix::Vector3f &omega,
 			       uint64_t timestamp_sample);
 
 	/**
-	 * Lee SO(3) 姿态力矩，含完整角加速度前馈:
-	 *   τ = -kR·e_R - kΩ·e_Ω + Ω×JΩ - J( Ω̂ RᵀRd Ωd - RᵀRd Ω̇d )
-	 * 前馈使用速率参考 Ωd = omega_sp 及其有限差分导数 Ω̇d。
+	 * Lee SO(3) 姿态力矩，含陀螺耦合补偿:
+	 *   τ = -kR·e_R - kΩ·e_Ω + Ω×JΩ - J(Ω×RᵀRdΩd)
+	 * 不对外部速率设定值作有限差分。Offboard 指令频率低于控制
+	 * 周期时，该差分会形成不可实现的力矩脉冲。
 	 * e_Ω 必须先经过积分 (见 updateIntegrators)，使 _rate_int 在调用时有效。
 	 * @param R            当前姿态 (world-from-body)
 	 * @param R_sp         期望姿态 (world-from-body)
 	 * @param omega        当前机体角速度
 	 * @param omega_sp     期望机体角速度 (速率参考)
 	 * @param omega_d_in_B RᵀRd·Ωd, 在当前机体坐标系中表示的期望角速率
-	 * @param dt           时间步长 [s]
 	 * @return 期望力矩 (机体坐标系)
 	 */
 	matrix::Vector3f computeAttitudeTorque(const matrix::Dcmf &R, const matrix::Dcmf &R_sp,
@@ -179,10 +193,10 @@ private:
 			    uint64_t timestamp_sample);
 
 	/**
-	 * 发布调试指令 (local-position / attitude / angular-acceleration)，
+	 * 发布调试指令 (local-position / angular-acceleration)，
 	 * 便于用 `listener`/ulog 检查期望力/力矩。归一化油门估计
 	 * (总力占比, 悬停≈0.41, 满油≈1.0) 填入
-	 * vehicle_local_position_setpoint.thrust[3] 和 vehicle_attitude_setpoint.thrust_body[3]。
+	 * vehicle_local_position_setpoint.thrust[3]。
 	 * 注意这是总力占比 ‖f‖/(N_rotors*TMAX)，不同于单路电机指令
 	 * sqrt(T_i/TMAX) ≈ 0.64 (悬停时)。
 	 */
@@ -211,6 +225,7 @@ private:
 	uORB::Subscription _sub_vehicle_attitude{ORB_ID(vehicle_attitude)};
 	uORB::Subscription _sub_vehicle_attitude_setpoint{ORB_ID(vehicle_attitude_setpoint)};
 	uORB::Subscription _sub_vehicle_angular_velocity{ORB_ID(vehicle_angular_velocity)};
+	uORB::Subscription _sub_vehicle_rates_setpoint{ORB_ID(vehicle_rates_setpoint)};
 	uORB::Subscription _sub_local_pos_sp{ORB_ID(vehicle_local_position_setpoint)};
 	uORB::Subscription _sub_vehicle_status{ORB_ID(vehicle_status)};
 	uORB::Subscription _sub_vehicle_land_detected{ORB_ID(vehicle_land_detected)};
@@ -223,8 +238,8 @@ private:
 	uORB::Publication<vehicle_thrust_setpoint_s> _thrust_pub{ORB_ID(vehicle_thrust_setpoint)};
 	uORB::Publication<vehicle_torque_setpoint_s> _torque_pub{ORB_ID(vehicle_torque_setpoint)};
 	uORB::Publication<vehicle_local_position_setpoint_s> _local_pos_sp_pub{ORB_ID(vehicle_local_position_setpoint)};
-	uORB::Publication<vehicle_attitude_setpoint_s> _att_sp_pub{ORB_ID(vehicle_attitude_setpoint)};
 	uORB::Publication<vehicle_angular_acceleration_setpoint_s> _ang_accel_sp_pub{ORB_ID(vehicle_angular_acceleration_setpoint)};
+	uORB::Publication<geo_control_attitude_setpoint_s> _attitude_sp_debug_pub{ORB_ID(geo_control_attitude_setpoint)};
 
 	// 参数 (GC_ 前缀)
 	DEFINE_PARAMETERS(
@@ -244,6 +259,7 @@ private:
 		(ParamFloat<px4::params::GC_MAN_VEL_MAX>) _param_gc_man_vel_max,
 		(ParamFloat<px4::params::GC_MAN_DZ>) _param_gc_man_dz,
 		(ParamFloat<px4::params::GC_RATE_I>) _param_gc_rate_i,
+		(ParamFloat<px4::params::GC_ATT_I>) _param_gc_att_i,
 		(ParamFloat<px4::params::GC_RATE_INT_LIM>) _param_gc_rate_int_lim,
 		(ParamFloat<px4::params::GC_VEL_I>) _param_gc_vel_i,
 		(ParamFloat<px4::params::GC_VEL_INT_LIM>) _param_gc_vel_int_lim,
@@ -258,9 +274,13 @@ private:
 
 	// 积分器状态
 	matrix::Vector3f _rate_int{};   ///< 姿态/角速率误差积分器 (力矩环)
+	matrix::Vector3f _att_int{};    ///< 姿态误差积分器，用于消除稳态角度误差
 	matrix::Vector3f _vel_int{};    ///< 速度误差积分器 (力环)
 
-	matrix::Vector3f _omega_sp_prev{};   ///< 前一速率参考，用于有限差分 Ω̇d 前馈
+	// 最新的外部 body-rate 指令。速率环在每个控制周期运行，直到该
+	// 指令超时，不能仅在 50 Hz 的 MAVLink 新消息到达时运行。
+	vehicle_rates_setpoint_s _offboard_rate_sp{};
+	hrt_abstime _offboard_rate_sp_timestamp{0};
 
 	// 控制分配器饱和反馈
 	matrix::Vector<bool, 3> _torque_sat_pos{};

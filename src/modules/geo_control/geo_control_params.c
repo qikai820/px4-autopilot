@@ -181,7 +181,18 @@ PARAM_DEFINE_FLOAT(GC_MAN_FMAX, 20.0);
  *
  * @group Geometric Controller
  */
-PARAM_DEFINE_FLOAT(GC_RATE_I, 0.0);
+PARAM_DEFINE_FLOAT(GC_RATE_I, 0.10);
+
+/**
+ * Geometric Controller Attitude Error Integral Gain
+ *
+ * Integral gain for cancelling constant roll/pitch/yaw torque bias. This
+ * integrates the SO(3) attitude error, so a zero-rate but non-zero attitude
+ * error is corrected instead of becoming a steady-state offset.
+ *
+ * @group Geometric Controller
+ */
+PARAM_DEFINE_FLOAT(GC_ATT_I, 0.15);
 
 /**
  * Geometric Controller Rate Integrator Limit
