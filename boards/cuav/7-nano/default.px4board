@@ -88,3 +88,7 @@ CONFIG_SYSTEMCMDS_TUNE_CONTROL=y
 CONFIG_SYSTEMCMDS_UORB=y
 CONFIG_SYSTEMCMDS_VER=y
 CONFIG_SYSTEMCMDS_WORK_QUEUE=y
+
+# MorphQuad geometric control and its 6x12 allocator run on this queue.
+# 2240 bytes is insufficient for the matrix temporaries used by the allocator.
+CONFIG_WQ_NAV_AND_CONTROLLERS_STACKSIZE=4096
