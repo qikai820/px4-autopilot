@@ -92,3 +92,5 @@ CONFIG_SYSTEMCMDS_WORK_QUEUE=y
 # MorphQuad geometric control and its 6x12 allocator run on this queue.
 # 2240 bytes is insufficient for the matrix temporaries used by the allocator.
 CONFIG_WQ_NAV_AND_CONTROLLERS_STACKSIZE=4096
+# MorphQuad's 6x12 geninv() runs on wq:rate_ctrl and needs more stack.
+CONFIG_WQ_RATE_CTRL_STACKSIZE=8192
