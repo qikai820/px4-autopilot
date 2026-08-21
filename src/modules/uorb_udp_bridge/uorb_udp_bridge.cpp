@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <errno.h>
 
 using namespace time_literals;
 
@@ -69,7 +70,9 @@ public:
 
 	int print_status() override
 	{
-		PX4_INFO("UDP %s:%u at %.1f Hz, sent %u datagrams", _address, _port, (double)_rate_hz, _sent);
+		PX4_INFO("UDP fd=%d %s:%u at %.1f Hz, sent %lu datagrams (%lu bytes), errors %lu last_errno %d",
+			 _socket, _address, _port, (double)_rate_hz, (unsigned long)_sent,
+			 (unsigned long)_bytes_sent, (unsigned long)_send_errors, _last_errno);
 		return 0;
 	}
 
@@ -81,7 +84,17 @@ public:
 
 	void Run() override
 	{
-		if (should_exit()) { ScheduleClear(); return; }
+		if (should_exit()) {
+			close_socket();
+			ScheduleClear();
+			return;
+		}
+
+		// NuttX file descriptors belong to the task group that created them.
+		// Create the socket from the work-queue context where sendto() runs.
+		if (_socket < 0 && !open_socket()) {
+			return;
+		}
 
 		vehicle_attitude_s attitude{};
 		if (_attitude_sub.update(&attitude)) {
@@ -178,16 +191,35 @@ private:
 		if (port < 1 || port > 65535 || rate <= 0.f) { return false; }
 		char address_copy[INET_ADDRSTRLEN]{};
 		strncpy(address_copy, address, sizeof(address_copy) - 1);
-		const int sock = socket(AF_INET, SOCK_DGRAM, 0);
-		if (sock < 0) { PX4_ERR("UDP socket failed"); return false; }
 		struct sockaddr_in dest{};
 		dest.sin_family = AF_INET;
 		dest.sin_port = htons((uint16_t)port);
-		if (inet_aton(address, &dest.sin_addr) == 0) { ::close(sock); return false; }
-		close_socket(); _socket = sock; _dest = dest;
+		if (inet_aton(address, &dest.sin_addr) == 0) { return false; }
+		_dest = dest;
 		strncpy(_address, address_copy, sizeof(_address) - 1);
 		_port = (uint16_t)port; _rate_hz = rate;
 		ScheduleOnInterval((uint32_t)(1'000'000.f / rate));
+		return true;
+	}
+
+	bool open_socket()
+	{
+		const int sock = socket(AF_INET, SOCK_DGRAM, 0);
+
+		if (sock < 0) {
+			_last_errno = errno;
+			const hrt_abstime now = hrt_absolute_time();
+
+			if (now - _last_error_report > 1_s) {
+				PX4_WARN("socket(AF_INET, SOCK_DGRAM) failed: errno=%d", _last_errno);
+				_last_error_report = now;
+			}
+
+			return false;
+		}
+
+		_socket = sock;
+		PX4_INFO("UDP socket opened in work queue: fd=%d -> %s:%u", _socket, _address, _port);
 		return true;
 	}
 
@@ -221,12 +253,35 @@ private:
 	{
 		if (_length + 1 >= sizeof(_buffer)) { return; }
 		_buffer[_length++] = '}';
-		if (_socket >= 0) { ::sendto(_socket, _buffer, _length, MSG_DONTWAIT, (sockaddr *)&_dest, sizeof(_dest)); ++_sent; }
+
+		if (_socket >= 0) {
+			const ssize_t ret = ::sendto(_socket, _buffer, _length, 0,
+						     (sockaddr *)&_dest, sizeof(_dest));
+
+			if (ret >= 0) {
+				++_sent;
+				_bytes_sent += (uint32_t)ret;
+
+			} else {
+				++_send_errors;
+				_last_errno = errno;
+				const hrt_abstime now = hrt_absolute_time();
+
+				// Do not flood the NuttX console if the host is unreachable.
+				if (now - _last_error_report > 1_s) {
+					PX4_WARN("sendto %s:%u failed: errno=%d len=%lu",
+						 _address, _port, _last_errno, (unsigned long)_length);
+					_last_error_report = now;
+				}
+			}
+		}
+
 		_length = 0;
 	}
 
 	int _socket{-1}; sockaddr_in _dest{}; char _address[INET_ADDRSTRLEN] {"192.168.3.100"};
-	uint16_t _port{9870}; float _rate_hz{50.f}; uint32_t _sent{0};
+	uint16_t _port{9870}; float _rate_hz{50.f}; uint32_t _sent{0}; uint32_t _bytes_sent{0};
+	uint32_t _send_errors{0}; int _last_errno{0}; hrt_abstime _last_error_report{0};
 	char _buffer[1400]{}; char _topic[64]{}; size_t _length{0};
 	uORB::Subscription _attitude_sub{ORB_ID(vehicle_attitude)};
 	uORB::Subscription _geo_attitude_sp_sub{ORB_ID(geo_control_attitude_setpoint)};
