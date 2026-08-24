@@ -14,6 +14,22 @@ parameters:
         decimal: 2
         default: 4.56
 
+      GC_RATE_HZ:
+        description:
+          short: Geometric controller execution rate
+          long: |
+            Maximum execution rate of the geometric controller. The actual
+            rate normally follows vehicle_attitude_setpoint; when that topic
+            is not published, vehicle_attitude is used as the high-rate source.
+            Changes take effect without restarting the module.
+        type: float
+        unit: Hz
+        min: 10
+        max: 400
+        increment: 1
+        decimal: 0
+        default: 400
+
       GC_XY_P:
         description:
           short: Position proportional gain (XY)
@@ -42,7 +58,7 @@ parameters:
         max: 100
         increment: 0.1
         decimal: 1
-        default: 1.0
+        default: 1.5
 
       GC_Z_VEL_P:
         description:
@@ -52,7 +68,7 @@ parameters:
         max: 100
         increment: 0.1
         decimal: 1
-        default: 0.5
+        default: 0.8
 
       GC_RP_P:
         description:
@@ -62,7 +78,7 @@ parameters:
         max: 100
         increment: 0.1
         decimal: 1
-        default: 1.0
+        default: 6.0
 
       GC_YAW_P:
         description:
@@ -72,7 +88,7 @@ parameters:
         max: 100
         increment: 0.1
         decimal: 1
-        default: 0.8
+        default: 4.0
 
       GC_RP_RATE_P:
         description:
@@ -177,7 +193,17 @@ parameters:
         max: 10
         increment: 0.01
         decimal: 3
-        default: 0.0
+        default: 0.1
+
+      GC_ATT_I:
+        description:
+          short: Attitude error integral gain
+        type: float
+        min: 0
+        max: 10
+        increment: 0.01
+        decimal: 3
+        default: 0.15
 
       GC_RATE_INT_LIM:
         description:
@@ -197,7 +223,7 @@ parameters:
         max: 10
         increment: 0.05
         decimal: 2
-        default: 0.5
+        default: 0.1
 
       GC_VEL_INT_LIM:
         description:

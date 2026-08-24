@@ -221,7 +221,15 @@ private:
 	void resetIntegrators();
 
 	// uORB 订阅
-	uORB::SubscriptionCallbackWorkItem _sub_vehicle_local_position{this, ORB_ID(vehicle_local_position)};
+	// Use attitude setpoint publication as the control-loop wake-up source.
+	uORB::SubscriptionCallbackWorkItem _sub_vehicle_attitude_setpoint_event{this, ORB_ID(vehicle_attitude_setpoint)};
+	// vehicle_attitude is published at the IMU/control rate in configurations
+	// that do not publish a separate attitude setpoint topic.
+	uORB::SubscriptionCallbackWorkItem _sub_vehicle_attitude_event{this, ORB_ID(vehicle_attitude)};
+	// Fallback for modes/configurations that do not publish vehicle_attitude_setpoint.
+	uORB::SubscriptionCallbackWorkItem _sub_vehicle_local_position_event{this, ORB_ID(vehicle_local_position)};
+	// Position remains a regular subscription and is copied at each control tick.
+	uORB::Subscription _sub_vehicle_local_position{ORB_ID(vehicle_local_position)};
 	uORB::Subscription _sub_vehicle_attitude{ORB_ID(vehicle_attitude)};
 	uORB::Subscription _sub_vehicle_attitude_setpoint{ORB_ID(vehicle_attitude_setpoint)};
 	uORB::Subscription _sub_vehicle_angular_velocity{ORB_ID(vehicle_angular_velocity)};
@@ -244,6 +252,7 @@ private:
 	// 参数 (GC_ 前缀)
 	DEFINE_PARAMETERS(
 		(ParamFloat<px4::params::GC_MASS>) _param_gc_mass,
+		(ParamFloat<px4::params::GC_RATE_HZ>) _param_gc_rate_hz,
 		(ParamFloat<px4::params::GC_XY_P>) _param_gc_xy_p,
 		(ParamFloat<px4::params::GC_XY_VEL_P>) _param_gc_xy_vel_p,
 		(ParamFloat<px4::params::GC_Z_P>) _param_gc_z_p,

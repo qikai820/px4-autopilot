@@ -130,7 +130,9 @@ void ActuatorEffectivenessMorphQuad::updateSetpoint(
 		const int beta_idx  = SERVO_OFFSET + 2 * i + 1;
 
 		const float motor_actual = math::constrain(omega_cmd[i],
-							  actuator_min(motor_idx), actuator_max(motor_idx));
+							  actuator_min(motor_idx),
+							  math::min(actuator_max(motor_idx),
+									math::constrain(_param_ca_mq_mmax.get(), 0.f, 1.f)));
 		const float alpha_actual = math::constrain(alpha_cmd[i],
 							   actuator_min(alpha_idx), actuator_max(alpha_idx));
 		const float beta_actual = math::constrain(beta_cmd[i],
@@ -382,8 +384,11 @@ bool ActuatorEffectivenessMorphQuad::recoverServoAngles(
 	// Equation (14) of the paper selects the equivalent inverse-kinematics
 	// branch nearest to the previous servo state.  The actual servo range is
 	// +/-180 degrees, so apply that hardware bound here.
-	const float alpha_limit = math::max(0.f, math::min(math::radians(_param_ca_mq_alpm.get()), kServoAngleRange));
-	const float beta_limit  = math::max(0.f, math::min(math::radians(_param_ca_mq_betm.get()),  kServoAngleRange));
+	const float servo_global_limit = math::radians(_param_ca_mq_smax.get());
+	const float alpha_limit = math::max(0.f, math::min(math::min(math::radians(_param_ca_mq_alpm.get()),
+									 servo_global_limit), kServoAngleRange));
+	const float beta_limit  = math::max(0.f, math::min(math::min(math::radians(_param_ca_mq_betm.get()),
+									 servo_global_limit), kServoAngleRange));
 
 	float best_alpha = alpha1;
 	float best_beta = beta1;

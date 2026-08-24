@@ -41,7 +41,9 @@ private:
 		(ParamFloat<px4::params::CA_MQ_BETM>)  _param_ca_mq_betm,   ///< beta mechanical limit [deg]
 		(ParamFloat<px4::params::CA_MQ_GLG>)   _param_ca_mq_glg,    ///< retained for parameter compatibility; paper uses unit null-space coefficients
 		(ParamFloat<px4::params::CA_MQ_DWG>)   _param_ca_mq_dwg,    ///< retained for parameter compatibility; paper uses unit null-space coefficients
-		(ParamFloat<px4::params::CA_MQ_TMAX>)  _param_ca_mq_tmax     ///< max rotor-system thrust [N]
+		(ParamFloat<px4::params::CA_MQ_TMAX>)  _param_ca_mq_tmax,   ///< max rotor-system thrust [N]
+		(ParamFloat<px4::params::CA_MQ_MMAX>)  _param_ca_mq_mmax,   ///< global normalized motor throttle limit
+		(ParamFloat<px4::params::CA_MQ_SMAX>)  _param_ca_mq_smax    ///< global servo angle limit [deg]
 	)
 
 	float _alpha_prev[NUM_ROTORS] {};

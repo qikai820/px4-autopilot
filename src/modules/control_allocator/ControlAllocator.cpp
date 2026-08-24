@@ -717,33 +717,6 @@ ControlAllocator::publish_actuator_controls()
 		_actuator_servos_pub.publish(actuator_servos);
 	}
 
-	// 将 actuator_motors + actuator_servos 合并发布到 actuator_outputs_sim，
-	// 供 MavlinkStreamHILActuatorControls 发送给 JSBSim bridge。
-	// 否则 bridge 收不到控制分配器的输出 (只会收到 pwm_out_sim 的 mixer 输出)。
-	{
-		actuator_outputs_s sim_out{};
-		int idx = 0;
-
-		// Motors: [0, 1] 范围, 不可逆
-		for (int i = 0; i < actuator_motors_s::NUM_CONTROLS; i++) {
-			if (idx < actuator_outputs_s::NUM_ACTUATOR_OUTPUTS) {
-				sim_out.output[idx++] = PX4_ISFINITE(actuator_motors.control[i])
-					? actuator_motors.control[i] : 0.f;
-			}
-		}
-
-		// Servos: [-1, 1] 范围, 可逆
-		for (int i = 0; i < actuator_servos_s::NUM_CONTROLS; i++) {
-			if (idx < actuator_outputs_s::NUM_ACTUATOR_OUTPUTS) {
-				sim_out.output[idx++] = PX4_ISFINITE(actuator_servos.control[i])
-					? actuator_servos.control[i] : 0.f;
-			}
-		}
-
-		sim_out.noutputs = idx;
-		sim_out.timestamp = actuator_motors.timestamp;
-		_actuator_outputs_sim_pub.publish(sim_out);
-	}
 }
 
 void

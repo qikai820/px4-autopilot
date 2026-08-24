@@ -745,6 +745,30 @@ parameters:
             max: 200.0
             default: 39.5
 
+        CA_MQ_MMAX:
+            description:
+                short: MorphQuad maximum motor throttle
+                long: Global normalized maximum throttle for all MorphQuad motors.
+            type: float
+            decimal: 3
+            increment: 0.01
+            min: 0.0
+            max: 1.0
+            default: 1.0
+
+        CA_MQ_SMAX:
+            description:
+                short: MorphQuad maximum servo angle
+                long: Global absolute angle limit for all MorphQuad alpha and beta servos.
+                  The effective limit is the smaller of this value and CA_MQ_ALPM/CA_MQ_BETM.
+            type: float
+            decimal: 1
+            increment: 1
+            unit: deg
+            min: 0.0
+            max: 180.0
+            default: 180.0
+
         CA_MQ_NS_GAIN:
             description:
                 short: Null-space descent gain

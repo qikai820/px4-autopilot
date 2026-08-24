@@ -46,6 +46,16 @@
 PARAM_DEFINE_FLOAT(GC_MASS, 4.56);
 
 /**
+ * Geometric Controller maximum execution rate
+ *
+ * @unit Hz
+ * @min 10
+ * @max 400
+ * @group Geometric Controller
+ */
+PARAM_DEFINE_FLOAT(GC_RATE_HZ, 400.0);
+
+/**
  * Geometric Controller Position Proportional Gain (XY)
  *
  * @group Geometric Controller
@@ -64,28 +74,28 @@ PARAM_DEFINE_FLOAT(GC_XY_VEL_P, 0.5);
  *
  * @group Geometric Controller
  */
-PARAM_DEFINE_FLOAT(GC_Z_P, 1.0);
+PARAM_DEFINE_FLOAT(GC_Z_P, 1.5);
 
 /**
  * Geometric Controller Velocity Proportional Gain (Z)
  *
  * @group Geometric Controller
  */
-PARAM_DEFINE_FLOAT(GC_Z_VEL_P, 0.5);
+PARAM_DEFINE_FLOAT(GC_Z_VEL_P, 0.8);
 
 /**
  * Geometric Controller Attitude Proportional Gain (Roll/Pitch)
  *
  * @group Geometric Controller
  */
-PARAM_DEFINE_FLOAT(GC_RP_P, 1.0);
+PARAM_DEFINE_FLOAT(GC_RP_P, 6.0);
 
 /**
  * Geometric Controller Attitude Proportional Gain (Yaw)
  *
  * @group Geometric Controller
  */
-PARAM_DEFINE_FLOAT(GC_YAW_P, 0.8);
+PARAM_DEFINE_FLOAT(GC_YAW_P, 4.0);
 
 /**
  * Geometric Controller Angular Rate Proportional Gain (Roll/Pitch)
@@ -210,7 +220,7 @@ PARAM_DEFINE_FLOAT(GC_RATE_INT_LIM, 0.3);
  *
  * @group Geometric Controller
  */
-PARAM_DEFINE_FLOAT(GC_VEL_I, 0.5);
+PARAM_DEFINE_FLOAT(GC_VEL_I, 0.1);
 
 /**
  * Geometric Controller Velocity Integrator Limit

@@ -58,7 +58,9 @@ GeoControl::GeoControl() :
 
 bool GeoControl::init()
 {
-	if (!_sub_vehicle_local_position.registerCallback()) {
+	if (!_sub_vehicle_attitude_setpoint_event.registerCallback() ||
+	    !_sub_vehicle_attitude_event.registerCallback() ||
+	    !_sub_vehicle_local_position_event.registerCallback()) {
 		PX4_ERR("callback registration failed");
 		return false;
 	}
@@ -293,23 +295,21 @@ void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &omega,
 	float fz_body = -mass * 9.81f;   // 无摇杆输入时保持悬停推力 (向上)
 
 	if (has_manual) {
-		// 姿态: aux1/aux2 → roll/pitch 角速率 [rad/s] (闭环);
-		// yaw 摇杆 → yaw 角速率
-		p_sp = math::deadzone(manual_sp.aux1, dz) * rate_max;
+
+		p_sp = math::deadzone(manual_sp.aux1,  dz) * rate_max;
 		q_sp = math::deadzone(manual_sp.aux2, dz) * rate_max;
 		r_sp = math::deadzone(manual_sp.yaw,   dz) * rate_max;
 
-		// 力: roll/pitch → 机体 x/y 力 [N] (开环, 无反馈);
-		// throttle → 机体 z 力。机体 z 向下，悬停推力 -mass*g (向上)，
-		// 推油门增加向上力 (爬升)
+
 		const float fmax = _param_gc_man_fmax.get();
-		fy_body = math::deadzone(manual_sp.roll, dz) * fmax;
 		fx_body = math::deadzone(manual_sp.pitch, dz) * fmax;
-		fz_body = -mass * 9.81f - math::deadzone(manual_sp.throttle, dz) * fmax;
+		fy_body = math::deadzone(manual_sp.roll, dz) * fmax;
+		const float throttle = math::constrain((manual_sp.throttle + 1.f) * 0.5f, 0.f, 1.f);
+		const float thrust_max = math::max(_param_gc_thrust_max.get(), 0.f);
+		fz_body = -thrust_max * throttle * throttle;
 	}
 
 	Vector3f omega_sp(p_sp, q_sp, r_sp);
-	Vector3f f_des_body(fx_body, fy_body, fz_body);
 
 	// 角速率积分 → 姿态参考 (四元数积分)
 	const Vector3f omega_vec(omega_sp(0), omega_sp(1), omega_sp(2));
@@ -328,6 +328,11 @@ void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &omega,
 
 	// ── 姿态环 → 期望力矩 (闭环, Lee SO(3) 含前馈) ──
 	const Dcmf R(R_q);
+	// 集体推力保持在世界坐标系竖直方向。飞机滚转/俯仰时，
+	// 这里自动生成相反的机体系 Fx/Fy，使推力矢量不随机体倾斜。
+	// aux1/aux2 的水平开环力仍叠加在机体系中。
+	const Vector3f f_vertical_body = R.transpose() * Vector3f(0.f, 0.f, fz_body);
+	const Vector3f f_des_body = f_vertical_body + Vector3f(fx_body, fy_body, 0.f);
 	const Dcmf R_sp(_q_att_ref);
 	Vector3f omega_d_in_B = R.transpose() * R_sp * omega_sp;
 	Vector3f e_omega = omega - omega_d_in_B;
@@ -357,7 +362,12 @@ void GeoControl::control_step_position(const Quatf &R_q, const Vector3f &pos,
 	// 与手动模式相同的无 RC 回退: 保持上次/零指令，
 	// 使位置环保持悬停，而非回退为零力/力矩
 	manual_control_setpoint_s manual_sp{};
-	const bool has_manual = _sub_manual_control_sp.update(&manual_sp) && manual_sp.valid;
+	// manual_control_setpoint 的发布频率通常低于几何控制器。使用
+	// update() 会在两帧遥控消息之间返回 false，使油门瞬间回到 0，
+	// 从而造成 vehicle_local_position_setpoint.vz 在油门值和零之间跳变。
+	// 始终读取最近一帧，并仅在超过 500 ms 未更新时判定为失联。
+	const bool has_manual = _sub_manual_control_sp.copy(&manual_sp) && manual_sp.valid
+					&& (hrt_elapsed_time(&manual_sp.timestamp) < 500_ms);
 
 	const float dt = math::constrain(static_cast<float>((hrt_absolute_time() - _last_run) * 1e-6f),
 					 0.001f, 0.05f);
@@ -377,7 +387,10 @@ void GeoControl::control_step_position(const Quatf &R_q, const Vector3f &pos,
 	if (has_manual) {
 		// 姿态: 摇杆 [-1,1] → 角速率 [rad/s]
 		p_sp = math::deadzone(manual_sp.roll,  dz) * rate_max;
-		q_sp = math::deadzone(manual_sp.pitch, dz) * rate_max;
+		// RC pitch convention: pulling the stick toward the pilot is negative
+		// manual pitch. In body FRD/NED control, a positive q command is nose-up,
+		// so invert the RC pitch sign here.
+		q_sp = -math::deadzone(manual_sp.pitch, dz) * rate_max;
 		r_sp = math::deadzone(manual_sp.yaw,   dz) * rate_max;
 
 		// 摇杆 [-1,1] → 机体速度 [m/s] (aux1/aux2 水平, throttle 垂向)
@@ -902,7 +915,9 @@ void GeoControl::control_step(const vehicle_local_position_s &local_pos)
 void GeoControl::Run()
 {
 	if (should_exit()) {
-		_sub_vehicle_local_position.unregisterCallback();
+		_sub_vehicle_attitude_setpoint_event.unregisterCallback();
+		_sub_vehicle_attitude_event.unregisterCallback();
+		_sub_vehicle_local_position_event.unregisterCallback();
 		exit_and_cleanup();
 		return;
 	}
@@ -911,17 +926,38 @@ void GeoControl::Run()
 
 	parameters_update();
 
-	vehicle_local_position_s local_pos;
+	vehicle_attitude_setpoint_s att_sp_event{};
+	vehicle_attitude_s attitude_event_data{};
+	vehicle_local_position_s local_event{};
+	vehicle_local_position_s local_pos{};
 
-	if (_sub_vehicle_local_position.update(&local_pos)) {
+	const bool attitude_event = _sub_vehicle_attitude_setpoint_event.update(&att_sp_event);
+	const bool attitude_state_event = _sub_vehicle_attitude_event.update(&attitude_event_data);
+	const bool position_event = _sub_vehicle_local_position_event.update(&local_event);
+
+	// Prefer vehicle_attitude_setpoint as the timing source. If it is not
+	// published in the current flight-mode configuration, use local position
+	// as a fallback so the controller cannot stop producing actuator commands.
+	if ((attitude_event || attitude_state_event || position_event) &&
+	    _sub_vehicle_local_position.copy(&local_pos)) {
 		const hrt_abstime now = hrt_absolute_time();
 
 		if (_last_run == 0) {
 			_last_run = now;
 		}
 
-		control_step(local_pos);
-		_last_run = now;
+		// vehicle_attitude_setpoint is the wake-up source. The parameter limits
+		// execution to a lower rate when required; the actual rate cannot exceed
+		// the attitude-setpoint publication rate.
+		// The timestamp is deliberately checked after fetching the newest sample
+		// so the next callback always starts from fresh state data.
+		const float rate_hz = math::constrain(_param_gc_rate_hz.get(), 10.f, 400.f);
+		const hrt_abstime period_us = static_cast<hrt_abstime>(1e6f / rate_hz);
+
+		if ((now - _last_run) >= period_us) {
+			control_step(local_pos);
+			_last_run = now;
+		}
 	}
 
 	perf_end(_loop_perf);
@@ -2215,8 +2251,9 @@ int GeoControl::print_status()
 	// 诊断: 解锁后力/力矩为零通常表示控制器处于不处理的模式
 	// (nav_state 非 MANUAL/POSCTL/OFFBOARD → AUTO，后者需要
 	// flight_mode_manager 指令) 或未曾观察到 arming_state==ARMED
-	PX4_INFO("armed: %d, landed: %d, nav_state: %u, mass: %.3f",
-		 _armed, _landed, (unsigned)_nav_state_last, (double)_param_gc_mass.get());
+	PX4_INFO("armed: %d, landed: %d, nav_state: %u, mass: %.3f, rate_limit: %.1f Hz",
+		 _armed, _landed, (unsigned)_nav_state_last, (double)_param_gc_mass.get(),
+		 (double)_param_gc_rate_hz.get());
 
 	// 最近一次期望机体力/力矩 (FRD 坐标系)
 	const float f_mag = _f_des_last.norm();

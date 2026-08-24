@@ -59,6 +59,13 @@ case "$model" in
         hexarotor_x)
             MODEL_NAME="hexarotor_x"
             ;;
+        morphquad)
+            MODEL_NAME="MorphQuad_bridge"
+            # The external MorphQuad bridge uses the SITL UDP simulator link.
+            # Keep the variable in the PX4 process environment so px4-rc.mavlinksim
+            # starts simulator_mavlink on 14560 instead of TCP port 4560.
+            export PX4_SIM_UDP_PORT="${PX4_SIM_UDP_PORT:-14560}"
+            ;;
         *)
             echo "Unknown Model"
             exit 1
