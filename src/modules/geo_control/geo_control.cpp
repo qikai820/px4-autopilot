@@ -269,6 +269,18 @@ matrix::Vector3f GeoControl::computeAttitudeTorque(const Dcmf &R, const Dcmf &R_
 // ─────────────────────────────────────────────────────────────────────────────
 // 手动模式: RC 摇杆 → 角速率 + 速度参考
 // ─────────────────────────────────────────────────────────────────────────────
+void GeoControl::update_manual_level_hold(const Quatf &R_q, bool enabled)
+{
+	if (enabled && !_manual_level_hold_active) {
+		// AUX3 is a level-hold switch. Remove roll and pitch immediately while
+		// preserving the heading at the instant the switch is engaged.
+		const float yaw = Eulerf(R_q).psi();
+		_q_att_ref = Quatf(Eulerf(0.f, 0.f, yaw));
+	}
+
+	_manual_level_hold_active = enabled;
+}
+
 void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &omega,
 				     uint64_t timestamp_sample)
 {
@@ -278,7 +290,8 @@ void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &omega,
 	// 这样 vehicle_thrust_setpoint 保持非零，避免 land detector
 	// 判定"已着陆"而自动上锁。
 	manual_control_setpoint_s manual_sp{};
-	const bool has_manual = _sub_manual_control_sp.update(&manual_sp) && manual_sp.valid;
+	const bool has_manual = _sub_manual_control_sp.copy(&manual_sp) && manual_sp.valid
+					&& (hrt_elapsed_time(&manual_sp.timestamp) < 500_ms);
 
 	const float dt = math::constrain(static_cast<float>((hrt_absolute_time() - _last_run) * 1e-6f),
 					 0.001f, 0.05f);
@@ -295,6 +308,8 @@ void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &omega,
 	float fz_body = -mass * 9.81f;   // 无摇杆输入时保持悬停推力 (向上)
 
 	if (has_manual) {
+		const bool level_hold = manual_sp.aux3 > 0.5f;
+		update_manual_level_hold(R_q, level_hold);
 
 		p_sp = math::deadzone(manual_sp.aux1,  dz) * rate_max;
 		q_sp = math::deadzone(manual_sp.aux2, dz) * rate_max;
@@ -307,6 +322,18 @@ void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &omega,
 		const float throttle = math::constrain((manual_sp.throttle + 1.f) * 0.5f, 0.f, 1.f);
 		const float thrust_max = math::max(_param_gc_thrust_max.get(), 0.f);
 		fz_body = -thrust_max * throttle * throttle;
+
+		if (level_hold) {
+			// Ignore attitude and horizontal-force sticks while level hold is
+			// active. Keep the throttle live so vertical control remains usable.
+			p_sp = 0.f;
+			q_sp = 0.f;
+			fx_body = 0.f;
+			fy_body = 0.f;
+		}
+
+	} else {
+		update_manual_level_hold(R_q, false);
 	}
 
 	Vector3f omega_sp(p_sp, q_sp, r_sp);
@@ -385,6 +412,9 @@ void GeoControl::control_step_position(const Quatf &R_q, const Vector3f &pos,
 	float vz_sp_b = 0.f;
 
 	if (has_manual) {
+		const bool level_hold = manual_sp.aux3 > 0.5f;
+		update_manual_level_hold(R_q, level_hold);
+
 		// 姿态: 摇杆 [-1,1] → 角速率 [rad/s]
 		p_sp = math::deadzone(manual_sp.roll,  dz) * rate_max;
 		// RC pitch convention: pulling the stick toward the pilot is negative
@@ -397,6 +427,16 @@ void GeoControl::control_step_position(const Quatf &R_q, const Vector3f &pos,
 		vx_sp_b = math::deadzone(manual_sp.aux1, dz) * vel_max;
 		vy_sp_b = math::deadzone(manual_sp.aux2, dz) * vel_max;
 		vz_sp_b = math::deadzone(manual_sp.throttle, dz) * vel_max;
+
+		if (level_hold) {
+			// Hold the current level attitude and ignore only the attitude sticks.
+			// The three body-velocity commands remain effective.
+			p_sp = 0.f;
+			q_sp = 0.f;
+		}
+
+	} else {
+		update_manual_level_hold(R_q, false);
 	}
 
 	Vector3f omega_sp(p_sp, q_sp, r_sp);

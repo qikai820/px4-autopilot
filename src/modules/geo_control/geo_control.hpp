@@ -149,6 +149,7 @@ private:
 	void Run() override;
 	void parameters_update(bool force = false);
 	void control_step(const vehicle_local_position_s &local_pos);
+	void update_manual_level_hold(const matrix::Quatf &R_q, bool enabled);
 
 	void control_step_manual(const matrix::Quatf &R_q, const matrix::Vector3f &omega,
 				 uint64_t timestamp_sample);
@@ -329,6 +330,7 @@ private:
 
 	// 手动模式: 角速率指令积分得到的姿态参考
 	matrix::Quatf _q_att_ref{1.f, 0.f, 0.f, 0.f};
+	bool _manual_level_hold_active{false};
 
 	// 位置模式: 位置保持用积分位置指令 ((重新)解锁时初始化)
 	matrix::Vector3f _pos_sp{};
