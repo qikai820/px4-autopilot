@@ -1,0 +1,20 @@
+module_name: Viztra Visual Observation
+serial_config:
+    - command: viztra start -d ${SERIAL_DEV}
+      port_config_param:
+        name: VIZTRA_CFG
+        group: Sensors
+
+parameters:
+    - group: Sensors
+      definitions:
+        VIZTRA_TOUT:
+            description:
+                short: Viztra observation timeout
+                long: Maximum age of a valid Viztra serial frame or observation before it is reported stale.
+            type: int32
+            unit: ms
+            min: 50
+            max: 5000
+            default: 500
+            reboot_required: true

@@ -1,0 +1,5 @@
+menuconfig DRIVERS_VIZTRA
+	bool "viztra"
+	default n
+	---help---
+		Enable the read-only Viztra visual observation serial driver.
