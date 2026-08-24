@@ -745,6 +745,21 @@ parameters:
             max: 200.0
             default: 39.5
 
+        CA_MQ_TCURVE:
+            description:
+                short: MorphQuad motor thrust curve
+                long: |
+                  Selects the normalized motor-command to thrust mapping.
+                  Quadratic preserves the original model. Measured 15x5 uses
+                  the EFLUXER PRO 15x5.0 throttle/thrust table with piecewise
+                  linear interpolation; CA_MQ_TMAX remains the effective
+                  full-throttle thrust of one coaxial arm.
+            type: enum
+            values:
+                0: Quadratic
+                1: Measured 15x5
+            default: 0
+
         CA_MQ_MMAX:
             description:
                 short: MorphQuad maximum motor throttle

@@ -66,6 +66,10 @@ case "$model" in
             # starts simulator_mavlink on 14560 instead of TCP port 4560.
             export PX4_SIM_UDP_PORT="${PX4_SIM_UDP_PORT:-14560}"
             ;;
+        morphquad2)
+            MODEL_NAME="MorphQuad2_bridge"
+            export PX4_SIM_UDP_PORT="${PX4_SIM_UDP_PORT:-14560}"
+            ;;
         *)
             echo "Unknown Model"
             exit 1

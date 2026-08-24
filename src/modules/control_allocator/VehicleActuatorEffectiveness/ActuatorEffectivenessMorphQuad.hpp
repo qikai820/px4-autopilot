@@ -42,6 +42,7 @@ private:
 		(ParamFloat<px4::params::CA_MQ_GLG>)   _param_ca_mq_glg,    ///< retained for parameter compatibility; paper uses unit null-space coefficients
 		(ParamFloat<px4::params::CA_MQ_DWG>)   _param_ca_mq_dwg,    ///< retained for parameter compatibility; paper uses unit null-space coefficients
 		(ParamFloat<px4::params::CA_MQ_TMAX>)  _param_ca_mq_tmax,   ///< max rotor-system thrust [N]
+		(ParamInt<px4::params::CA_MQ_TCURVE>)  _param_ca_mq_tcurve, ///< motor command/thrust mapping
 		(ParamFloat<px4::params::CA_MQ_MMAX>)  _param_ca_mq_mmax,   ///< global normalized motor throttle limit
 		(ParamFloat<px4::params::CA_MQ_SMAX>)  _param_ca_mq_smax    ///< global servo angle limit [deg]
 	)
@@ -54,6 +55,9 @@ private:
 	bool _allocation_saturated{false};
 	float _unallocated_torque[3] {};
 	float _unallocated_thrust[3] {};
+
+	float commandFromThrust(float thrust, float thrust_max) const;
+	float thrustFromCommand(float command, float thrust_max) const;
 
 	/**
 	 * Exact MorphQuad allocation structure from the paper:

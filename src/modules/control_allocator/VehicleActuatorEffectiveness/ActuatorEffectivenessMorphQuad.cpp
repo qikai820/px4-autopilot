@@ -36,6 +36,16 @@ namespace
 // setpoints are normalized to [-1, 1], so this is the shared conversion used
 // by the allocator and the JSBSim bridge.
 constexpr float kServoAngleRange = M_PI_F;
+constexpr int kMeasuredThrustPoints = 18;
+constexpr float kMeasuredCommand[kMeasuredThrustPoints] = {
+	0.00f, 0.10f, 0.20f, 0.30f, 0.35f, 0.40f, 0.45f, 0.50f, 0.55f,
+	0.60f, 0.65f, 0.70f, 0.75f, 0.80f, 0.85f, 0.90f, 0.95f, 1.00f
+};
+constexpr float kMeasuredThrustNorm[kMeasuredThrustPoints] = {
+	0.00000000f, 0.01208848f, 0.04835391f, 0.10879630f, 0.15079365f, 0.20767196f,
+	0.26719577f, 0.32605820f, 0.37566138f, 0.43187831f, 0.48280423f, 0.56084656f,
+	0.62367725f, 0.68849206f, 0.76289683f, 0.83829365f, 0.90575397f, 1.00000000f
+};
 
 Vector3f thrustUnitVector(float alpha, float beta)
 {
@@ -46,6 +56,48 @@ Vector3f thrustUnitVector(float alpha, float beta)
 
 	return Vector3f(sa * cb, sb, -ca * cb);
 }
+}
+
+float ActuatorEffectivenessMorphQuad::commandFromThrust(float thrust, float thrust_max) const
+{
+	const float thrust_norm = math::constrain(thrust / math::max(thrust_max, 0.001f), 0.f, 1.f);
+
+	if (_param_ca_mq_tcurve.get() != 1) {
+		return sqrtf(thrust_norm);
+	}
+
+	for (int i = 1; i < kMeasuredThrustPoints; ++i) {
+		if (thrust_norm <= kMeasuredThrustNorm[i]) {
+			const float span = kMeasuredThrustNorm[i] - kMeasuredThrustNorm[i - 1];
+			const float ratio = (span > FLT_EPSILON)
+					    ? (thrust_norm - kMeasuredThrustNorm[i - 1]) / span : 0.f;
+			return kMeasuredCommand[i - 1] + ratio * (kMeasuredCommand[i] - kMeasuredCommand[i - 1]);
+		}
+	}
+
+	return 1.f;
+}
+
+float ActuatorEffectivenessMorphQuad::thrustFromCommand(float command, float thrust_max) const
+{
+	const float command_norm = math::constrain(command, 0.f, 1.f);
+
+	if (_param_ca_mq_tcurve.get() != 1) {
+		return command_norm * command_norm * thrust_max;
+	}
+
+	for (int i = 1; i < kMeasuredThrustPoints; ++i) {
+		if (command_norm <= kMeasuredCommand[i]) {
+			const float span = kMeasuredCommand[i] - kMeasuredCommand[i - 1];
+			const float ratio = (span > FLT_EPSILON)
+					    ? (command_norm - kMeasuredCommand[i - 1]) / span : 0.f;
+			const float thrust_norm = kMeasuredThrustNorm[i - 1]
+						  + ratio * (kMeasuredThrustNorm[i] - kMeasuredThrustNorm[i - 1]);
+			return thrust_norm * thrust_max;
+		}
+	}
+
+	return thrust_max;
 }
 
 ActuatorEffectivenessMorphQuad::ActuatorEffectivenessMorphQuad(ModuleParams *parent) :
@@ -112,10 +164,9 @@ void ActuatorEffectivenessMorphQuad::updateSetpoint(
 		float beta = _beta_prev[i];
 		_servo_saturated |= recoverServoAngles(t[i], i, alpha, beta);
 
-		// T = c_t * Omega^2 and TMAX = c_t * OMEGA_MAX^2.
-		// Therefore the normalized rotor-speed command is
-		//     Omega/Omega_MAX = sqrt(T/TMAX).
-		omega_cmd[i] = (T > 1e-5f) ? sqrtf(math::constrain(T / tmax, 0.f, 1.f)) : 0.f;
+		// Invert the selected motor curve so the model produces the requested
+		// physical thrust. Curve 0 preserves the original square-law mapping.
+		omega_cmd[i] = (T > 1e-5f) ? commandFromThrust(T, tmax) : 0.f;
 
 		// PX4 actuator outputs are normalized to [-1, 1], and the bridge
 		// maps +/-1 to the installed servo's +/-180 degree range.
@@ -484,8 +535,9 @@ void ActuatorEffectivenessMorphQuad::computeUnallocatedWrench(
 		const float alpha = actuator_sp(4 + 2 * i) * kServoAngleRange;
 		const float beta = actuator_sp(5 + 2 * i) * kServoAngleRange;
 
-		// Same actuator model as the JSBSim XML: T = TMAX * esc^2.
-		const float T = esc * esc * tmax;
+		// Use the same curve as the command inversion above when reporting the
+		// achieved wrench and allocation saturation.
+		const float T = thrustFromCommand(esc, tmax);
 
 		// Body thrust unit vector. Must match JSBSim (GimbalVectoring.xml):
 		//   tx = sin(a)cos(b), ty = +sin(b), tz = -cos(a)cos(b)

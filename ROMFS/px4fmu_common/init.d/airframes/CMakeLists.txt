@@ -109,6 +109,7 @@ if(CONFIG_MODULES_MC_RATE_CONTROL)
 
 		# [19000, 19999] MorphQuad
 		19001_morphquad
+		19002_morphquad2
 	)
 endif()
 
