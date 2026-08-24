@@ -51,6 +51,7 @@ px4_add_library(mixer_module
 	functions/FunctionICEngineControl.hpp
 	functions/FunctionLandingGear.hpp
 	functions/FunctionManualRC.hpp
+	functions/FunctionMorphingServo.hpp
 	functions/FunctionMotors.hpp
 	functions/FunctionParachute.hpp
 	functions/FunctionServos.hpp

@@ -1454,6 +1454,21 @@ PARAM_DEFINE_INT32(RC_MAP_FLTM_BTN, 0);
 PARAM_DEFINE_INT32(RC_MAP_AUX1, 0);
 
 /**
+ * Morphing servo slew rate
+ *
+ * Maximum rate of change for the Morphing Servo actuator output driven by
+ * AUX1. A value of 0.25 takes eight seconds to move across the full -1 to 1
+ * range. This parameter has no effect on normal RC AUX passthrough outputs.
+ *
+ * @unit normalized_thrust/s
+ * @min 0.01
+ * @max 10.0
+ * @decimal 2
+ * @group Morphing Servo
+ */
+PARAM_DEFINE_FLOAT(MORPH_SLEW, 0.25f);
+
+/**
  * AUX2 Passthrough RC channel
  *
  * @min 0

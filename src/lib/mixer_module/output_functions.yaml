@@ -36,6 +36,9 @@ functions:
 
     Gripper: 430
 
+    # AUX1-controlled airframe-shape servo with PX4-side slew limiting.
+    Morphing_Servo: 500
+
     Landing_Gear_Wheel: 440
 
     IC_Engine_Ignition: 450

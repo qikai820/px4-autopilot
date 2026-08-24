@@ -94,8 +94,9 @@ if(CONFIG_MODULES_MC_RATE_CONTROL)
 		# [9000, 9999] Octorotor +
 		9001_octo_+
 
-		# [11000, 11999] Hexa Cox
+		# [11000, 11999] Coaxial multirotors
 		11001_hexa_cox
+		11002_penta_cox_tail
 
 		# [12000, 12999] Octo Cox
 		12001_octo_cox

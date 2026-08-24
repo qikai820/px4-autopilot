@@ -1,0 +1,77 @@
+#!/bin/sh
+#
+# @name Penta coaxial inverted triangle with tail lift rotor
+#
+# @type Penta Coaxial Tail
+# @class Copter
+#
+# The two forward arms each have a coaxial rotor pair and are mechanically
+# linked to one morphing servo. That servo is controlled manually by RC AUX1
+# and is deliberately excluded from the flight-control allocation. Motor 5
+# is a reversible vertical-lift rotor located aft of the centre of gravity.
+#
+# @output Motor1 right upper, CW
+# @output Motor2 right lower, CCW
+# @output Motor3 left upper, CW
+# @output Motor4 left lower, CCW
+# @output Motor5 tail lift rotor, CW
+# @output Servo1 linked front-arm morphing servo (assign Morphing Servo in Actuators)
+#
+# @board bitcraze_crazyflie exclude
+# @board px4_fmu-v2 exclude
+#
+
+. ${R}etc/init.d/rc.mc_defaults
+
+# MAV_TYPE_HEXAROTOR is the closest MAVLink vehicle type available for this
+# five-motor multirotor. It affects telemetry presentation only.
+param set-default MAV_TYPE 13
+
+# Use the normal multirotor allocator. Pitch remains controlled by the flight
+# controller through the motors; the morphing servo is a separate RC output.
+param set-default CA_AIRFRAME 0
+
+# AUX1-driven Morphing Servo output rate, in normalized output per second.
+# 0.25 gives approximately eight seconds for a full -1 to +1 movement.
+param set-default MORPH_SLEW 0.25
+
+# All coordinates are in the PX4 body frame: +X forward, +Y right, +Z down.
+# Replace these baseline dimensions with the measured motor-axis positions
+# relative to the aircraft centre of gravity before flying.
+param set-default CA_ROTOR_COUNT 5
+
+# Motor 5 (bit 4) is a 3D/reversible DShot motor. This gives the allocator a
+# [-1, 1] command range for the tail rotor, so it can create both nose-up and
+# nose-down pitch torque. Motors 1-4 remain conventional unidirectional lift
+# motors. Positive Motor 5 command must produce upward thrust; configure the
+# propeller and ESC's DShot 3D direction accordingly. The tail ESC itself
+# must be configured for DShot 3D mode.
+param set-default CA_R_REV 16
+
+# Right forward coaxial pair.
+param set-default CA_ROTOR0_PX 0.25
+param set-default CA_ROTOR0_PY 0.35
+param set-default CA_ROTOR0_PZ -0.04
+param set-default CA_ROTOR0_KM -0.05
+
+param set-default CA_ROTOR1_PX 0.25
+param set-default CA_ROTOR1_PY 0.35
+param set-default CA_ROTOR1_PZ 0.04
+
+# Left forward coaxial pair.
+param set-default CA_ROTOR2_PX 0.25
+param set-default CA_ROTOR2_PY -0.35
+param set-default CA_ROTOR2_PZ -0.04
+param set-default CA_ROTOR2_KM -0.05
+
+param set-default CA_ROTOR3_PX 0.25
+param set-default CA_ROTOR3_PY -0.35
+param set-default CA_ROTOR3_PZ 0.04
+
+# Aft reversible vertical-thrust rotor. A negative X position gives it a
+# pitch lever arm. Use the measured moment ratio and set the sign to match
+# the actual forward rotation.
+param set-default CA_ROTOR4_PX -0.45
+param set-default CA_ROTOR4_PY 0.00
+param set-default CA_ROTOR4_PZ 0.00
+param set-default CA_ROTOR4_KM -0.025
