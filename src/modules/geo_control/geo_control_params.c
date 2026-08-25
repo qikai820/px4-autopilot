@@ -158,6 +158,102 @@ PARAM_DEFINE_FLOAT(GC_MAN_RATE_MAX, 1.5);
 PARAM_DEFINE_FLOAT(GC_MAN_VEL_MAX, 5.0);
 
 /**
+ * Geometric Controller maximum X velocity setpoint
+ *
+ * @unit m/s
+ * @min 0.1
+ * @max 20.0
+ * @decimal 1
+ * @group Geometric Controller
+ */
+PARAM_DEFINE_FLOAT(GC_VX_MAX, 2.0);
+
+/**
+ * Geometric Controller maximum Y velocity setpoint
+ *
+ * @unit m/s
+ * @min 0.1
+ * @max 20.0
+ * @decimal 1
+ * @group Geometric Controller
+ */
+PARAM_DEFINE_FLOAT(GC_VY_MAX, 2.0);
+
+/**
+ * Geometric Controller maximum Z velocity setpoint
+ *
+ * Positive NED Z is downward.
+ *
+ * @unit m/s
+ * @min 0.1
+ * @max 10.0
+ * @decimal 1
+ * @group Geometric Controller
+ */
+PARAM_DEFINE_FLOAT(GC_VZ_MAX, 1.0);
+
+/**
+ * Geometric Controller maximum X setpoint acceleration
+ *
+ * Limits the rate of change of the NED X velocity setpoint.
+ *
+ * @unit m/s^2
+ * @min 0.1
+ * @max 20.0
+ * @decimal 1
+ * @group Geometric Controller
+ */
+PARAM_DEFINE_FLOAT(GC_AX_MAX, 2.0);
+
+/**
+ * Geometric Controller maximum Y setpoint acceleration
+ *
+ * Limits the rate of change of the NED Y velocity setpoint.
+ *
+ * @unit m/s^2
+ * @min 0.1
+ * @max 20.0
+ * @decimal 1
+ * @group Geometric Controller
+ */
+PARAM_DEFINE_FLOAT(GC_AY_MAX, 2.0);
+
+/**
+ * Geometric Controller maximum Z setpoint acceleration
+ *
+ * Limits the rate of change of the NED Z velocity setpoint.
+ *
+ * @unit m/s^2
+ * @min 0.1
+ * @max 20.0
+ * @decimal 1
+ * @group Geometric Controller
+ */
+PARAM_DEFINE_FLOAT(GC_AZ_MAX, 1.0);
+
+/**
+ * Geometric Controller maximum manual roll angle
+ *
+ * @unit deg
+ * @min 1.0
+ * @max 85.0
+ * @decimal 0
+ * @group Geometric Controller
+ */
+PARAM_DEFINE_FLOAT(GC_ROLL_MAX, 20.0);
+
+/**
+ * Geometric Controller maximum manual pitch angle
+ *
+ * @unit deg
+ * @min 1.0
+ * @max 85.0
+ * @decimal 0
+ * @group Geometric Controller
+ */
+PARAM_DEFINE_FLOAT(GC_PITCH_MAX, 20.0);
+
+/**
  * Geometric Controller Manual Mode Stick Deadzone
  *
  * Deadzone applied to all stick inputs in manual mode.

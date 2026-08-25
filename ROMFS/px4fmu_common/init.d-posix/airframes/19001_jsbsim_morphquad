@@ -33,6 +33,16 @@ param set-default CA_MQ_Z -0.04
 param set-default CA_MQ_TMAX 39.5
 param set-default GC_THRUST_MAX 158.0
 
+# --- GeoControl manual Position-mode limits ---
+param set-default GC_VX_MAX 2.0
+param set-default GC_VY_MAX 2.0
+param set-default GC_VZ_MAX 1.0
+param set-default GC_AX_MAX 2.0
+param set-default GC_AY_MAX 2.0
+param set-default GC_AZ_MAX 1.0
+param set-default GC_ROLL_MAX 20.0
+param set-default GC_PITCH_MAX 20.0
+
 # --- PWM output channel mapping ---
 # Motors: channels 1-4
 param set-default PWM_MAIN_FUNC1 101

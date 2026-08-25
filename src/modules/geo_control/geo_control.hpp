@@ -38,6 +38,7 @@
 #include <px4_platform_common/module.h>
 #include <px4_platform_common/module_params.h>
 #include <px4_platform_common/px4_work_queue/ScheduledWorkItem.hpp>
+#include <lib/systemlib/mavlink_log.h>
 #include <uORB/Publication.hpp>
 #include <uORB/Subscription.hpp>
 #include <uORB/SubscriptionCallback.hpp>
@@ -150,6 +151,7 @@ private:
 	void parameters_update(bool force = false);
 	void control_step(const vehicle_local_position_s &local_pos);
 	void update_manual_level_hold(const matrix::Quatf &R_q, bool enabled);
+	void limit_manual_attitude_reference();
 
 	void control_step_manual(const matrix::Quatf &R_q, const matrix::Vector3f &omega,
 				 uint64_t timestamp_sample);
@@ -203,7 +205,8 @@ private:
 	 */
 	void publish_setpoints(const matrix::Vector3f &f_des_world, const matrix::Vector3f &f_des_body,
 			       const matrix::Vector3f &tau_des, const matrix::Quatf &q_att_ref,
-			       const matrix::Vector3f &vel_sp_world, const matrix::Vector3f &omega,
+			       const matrix::Vector3f &vel_sp_world, const matrix::Vector3f &accel_sp_world,
+			       const matrix::Vector3f &omega,
 			       uint64_t timestamp_sample);
 
 	/**
@@ -267,6 +270,14 @@ private:
 		(ParamFloat<px4::params::GC_INERTIA_ZZ>) _param_gc_inertia_zz,
 		(ParamFloat<px4::params::GC_MAN_RATE_MAX>) _param_gc_man_rate_max,
 		(ParamFloat<px4::params::GC_MAN_VEL_MAX>) _param_gc_man_vel_max,
+		(ParamFloat<px4::params::GC_VX_MAX>) _param_gc_vx_max,
+		(ParamFloat<px4::params::GC_VY_MAX>) _param_gc_vy_max,
+		(ParamFloat<px4::params::GC_VZ_MAX>) _param_gc_vz_max,
+		(ParamFloat<px4::params::GC_AX_MAX>) _param_gc_ax_max,
+		(ParamFloat<px4::params::GC_AY_MAX>) _param_gc_ay_max,
+		(ParamFloat<px4::params::GC_AZ_MAX>) _param_gc_az_max,
+		(ParamFloat<px4::params::GC_ROLL_MAX>) _param_gc_roll_max,
+		(ParamFloat<px4::params::GC_PITCH_MAX>) _param_gc_pitch_max,
 		(ParamFloat<px4::params::GC_MAN_DZ>) _param_gc_man_dz,
 		(ParamFloat<px4::params::GC_RATE_I>) _param_gc_rate_i,
 		(ParamFloat<px4::params::GC_ATT_I>) _param_gc_att_i,
@@ -331,10 +342,13 @@ private:
 	// 手动模式: 角速率指令积分得到的姿态参考
 	matrix::Quatf _q_att_ref{1.f, 0.f, 0.f, 0.f};
 	bool _manual_level_hold_active{false};
+	orb_advert_t _mavlink_log_pub{nullptr};
 
 	// 位置模式: 位置保持用积分位置指令 ((重新)解锁时初始化)
 	matrix::Vector3f _pos_sp{};
 	bool _pos_sp_init{false};
+	matrix::Vector3f _vel_sp_limited{};
+	bool _vel_sp_limited_init{false};
 
 	hrt_abstime _last_run{0};
 	perf_counter_t _loop_perf;

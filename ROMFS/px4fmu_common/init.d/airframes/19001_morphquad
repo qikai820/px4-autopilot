@@ -30,6 +30,16 @@ param set-default CA_METHOD 0
 # --- Enable geo_control module ---
 param set-default SYS_HAS_MC 1
 
+# --- GeoControl manual Position-mode limits ---
+param set-default GC_VX_MAX 2.0
+param set-default GC_VY_MAX 2.0
+param set-default GC_VZ_MAX 1.0
+param set-default GC_AX_MAX 2.0
+param set-default GC_AY_MAX 2.0
+param set-default GC_AZ_MAX 1.0
+param set-default GC_ROLL_MAX 20.0
+param set-default GC_PITCH_MAX 20.0
+
 # --- PWM output channel mapping ---
 # Motors: channels 1-4
 param set-default PWM_MAIN_FUNC1 101

@@ -159,10 +159,10 @@ parameters:
 
       GC_MAN_VEL_MAX:
         description:
-          short: Manual mode max velocity
+          short: Legacy manual mode max velocity
           long: |
-            Stick deflection of +/-1 maps to +/- this velocity.
-            aux1/aux2/aux3 sticks control body-frame x/y/z velocity.
+            Legacy common velocity limit retained for parameter compatibility.
+            Use GC_VX_MAX, GC_VY_MAX and GC_VZ_MAX for axis-specific limits.
         type: float
         unit: m/s
         min: 0.1
@@ -170,6 +170,109 @@ parameters:
         increment: 0.5
         decimal: 1
         default: 5.0
+
+      GC_VX_MAX:
+        description:
+          short: Maximum X velocity setpoint
+          long: |
+            Maximum absolute NED X velocity setpoint in Position mode.
+            Full AUX1 stick also maps to this body-X velocity before rotation.
+        type: float
+        unit: m/s
+        min: 0.1
+        max: 20.0
+        increment: 0.1
+        decimal: 1
+        default: 2.0
+
+      GC_VY_MAX:
+        description:
+          short: Maximum Y velocity setpoint
+          long: |
+            Maximum absolute NED Y velocity setpoint in Position mode.
+            Full AUX2 stick also maps to this body-Y velocity before rotation.
+        type: float
+        unit: m/s
+        min: 0.1
+        max: 20.0
+        increment: 0.1
+        decimal: 1
+        default: 2.0
+
+      GC_VZ_MAX:
+        description:
+          short: Maximum Z velocity setpoint
+          long: |
+            Maximum absolute NED Z velocity setpoint in Position mode.
+            Positive NED Z is downward. Full throttle-stick deflection maps
+            to this body-Z speed before rotation.
+        type: float
+        unit: m/s
+        min: 0.1
+        max: 10.0
+        increment: 0.1
+        decimal: 1
+        default: 1.0
+
+      GC_AX_MAX:
+        description:
+          short: Maximum X setpoint acceleration
+          long: Maximum rate of change of the NED X velocity setpoint in Position mode.
+        type: float
+        unit: m/s^2
+        min: 0.1
+        max: 20.0
+        increment: 0.1
+        decimal: 1
+        default: 2.0
+
+      GC_AY_MAX:
+        description:
+          short: Maximum Y setpoint acceleration
+          long: Maximum rate of change of the NED Y velocity setpoint in Position mode.
+        type: float
+        unit: m/s^2
+        min: 0.1
+        max: 20.0
+        increment: 0.1
+        decimal: 1
+        default: 2.0
+
+      GC_AZ_MAX:
+        description:
+          short: Maximum Z setpoint acceleration
+          long: Maximum rate of change of the NED Z velocity setpoint in Position mode.
+        type: float
+        unit: m/s^2
+        min: 0.1
+        max: 20.0
+        increment: 0.1
+        decimal: 1
+        default: 1.0
+
+      GC_ROLL_MAX:
+        description:
+          short: Maximum manual roll angle
+          long: Maximum absolute roll angle of the integrated attitude reference.
+        type: float
+        unit: deg
+        min: 1.0
+        max: 85.0
+        increment: 1.0
+        decimal: 0
+        default: 20.0
+
+      GC_PITCH_MAX:
+        description:
+          short: Maximum manual pitch angle
+          long: Maximum absolute pitch angle of the integrated attitude reference.
+        type: float
+        unit: deg
+        min: 1.0
+        max: 85.0
+        increment: 1.0
+        decimal: 0
+        default: 20.0
 
       GC_MAN_DZ:
         description:

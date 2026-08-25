@@ -168,7 +168,8 @@ void GeoControl::publish_wrench(const Vector3f &f_des_body, const Vector3f &tau_
 
 void GeoControl::publish_setpoints(const Vector3f &f_des_world, const Vector3f &f_des_body,
 				   const Vector3f &tau_des, const Quatf &q_att_ref,
-				   const Vector3f &vel_sp_world, const Vector3f &omega,
+				   const Vector3f &vel_sp_world, const Vector3f &accel_sp_world,
+				   const Vector3f &omega,
 				   uint64_t timestamp_sample)
 {
 	const hrt_abstime now = hrt_absolute_time();
@@ -187,9 +188,9 @@ void GeoControl::publish_setpoints(const Vector3f &f_des_world, const Vector3f &
 	local_pos_sp.vx = vel_sp_world(0);
 	local_pos_sp.vy = vel_sp_world(1);
 	local_pos_sp.vz = vel_sp_world(2);
-	local_pos_sp.acceleration[0] = 0.f;
-	local_pos_sp.acceleration[1] = 0.f;
-	local_pos_sp.acceleration[2] = 0.f;
+	local_pos_sp.acceleration[0] = accel_sp_world(0);
+	local_pos_sp.acceleration[1] = accel_sp_world(1);
+	local_pos_sp.acceleration[2] = accel_sp_world(2);
 	local_pos_sp.thrust[0] = f_des_body(0) / thrust_max;
 	local_pos_sp.thrust[1] = f_des_body(1) / thrust_max;
 	local_pos_sp.thrust[2] = throttle_norm;
@@ -276,9 +277,24 @@ void GeoControl::update_manual_level_hold(const Quatf &R_q, bool enabled)
 		// preserving the heading at the instant the switch is engaged.
 		const float yaw = Eulerf(R_q).psi();
 		_q_att_ref = Quatf(Eulerf(0.f, 0.f, yaw));
+		mavlink_log_info(&_mavlink_log_pub, "Geo control: level hold enabled");
+
+	} else if (!enabled && _manual_level_hold_active) {
+		mavlink_log_info(&_mavlink_log_pub, "Geo control: level hold disabled");
 	}
 
 	_manual_level_hold_active = enabled;
+}
+
+void GeoControl::limit_manual_attitude_reference()
+{
+	Eulerf attitude_ref(_q_att_ref);
+	const float roll_limit = math::radians(math::constrain(_param_gc_roll_max.get(), 1.f, 85.f));
+	const float pitch_limit = math::radians(math::constrain(_param_gc_pitch_max.get(), 1.f, 85.f));
+	const float roll = math::constrain(attitude_ref.phi(), -roll_limit, roll_limit);
+	const float pitch = math::constrain(attitude_ref.theta(), -pitch_limit, pitch_limit);
+	_q_att_ref = Quatf(Eulerf(roll, pitch, attitude_ref.psi()));
+	_q_att_ref.normalize();
 }
 
 void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &omega,
@@ -298,7 +314,7 @@ void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &omega,
 
 	const float rate_max = _param_gc_man_rate_max.get();
 	const float dz = _param_gc_man_dz.get();
-	const float mass = _param_gc_mass.get();
+	const float mass = math::max(_param_gc_mass.get(), 0.1f);
 
 	float p_sp = 0.f;
 	float q_sp = 0.f;
@@ -353,6 +369,8 @@ void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &omega,
 		_q_att_ref.normalize();
 	}
 
+	limit_manual_attitude_reference();
+
 	// ── 姿态环 → 期望力矩 (闭环, Lee SO(3) 含前馈) ──
 	const Dcmf R(R_q);
 	// 集体推力保持在世界坐标系竖直方向。飞机滚转/俯仰时，
@@ -374,8 +392,8 @@ void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &omega,
 	const Vector3f f_des_world = R * f_des_body;   // 仅用于 throttle-norm 调试
 
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
-	publish_setpoints(f_des_world, f_des_body, tau_des, _q_att_ref, Vector3f(0.f, 0.f, 0.f), omega,
-			  timestamp_sample);
+	publish_setpoints(f_des_world, f_des_body, tau_des, _q_att_ref, Vector3f(0.f, 0.f, 0.f),
+			  Vector3f(0.f, 0.f, 0.f), omega, timestamp_sample);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -400,9 +418,11 @@ void GeoControl::control_step_position(const Quatf &R_q, const Vector3f &pos,
 					 0.001f, 0.05f);
 
 	const float rate_max = _param_gc_man_rate_max.get();
-	const float vel_max = _param_gc_man_vel_max.get();
+	const float vx_max = math::max(_param_gc_vx_max.get(), 0.1f);
+	const float vy_max = math::max(_param_gc_vy_max.get(), 0.1f);
+	const float vz_max = math::max(_param_gc_vz_max.get(), 0.1f);
 	const float dz = _param_gc_man_dz.get();
-	const float mass = _param_gc_mass.get();
+	const float mass = math::max(_param_gc_mass.get(), 0.1f);
 
 	float p_sp = 0.f;
 	float q_sp = 0.f;
@@ -424,9 +444,9 @@ void GeoControl::control_step_position(const Quatf &R_q, const Vector3f &pos,
 		r_sp = math::deadzone(manual_sp.yaw,   dz) * rate_max;
 
 		// 摇杆 [-1,1] → 机体速度 [m/s] (aux1/aux2 水平, throttle 垂向)
-		vx_sp_b = math::deadzone(manual_sp.aux1, dz) * vel_max;
-		vy_sp_b = math::deadzone(manual_sp.aux2, dz) * vel_max;
-		vz_sp_b = math::deadzone(manual_sp.throttle, dz) * vel_max;
+		vx_sp_b = math::deadzone(manual_sp.aux1, dz) * vx_max;
+		vy_sp_b = math::deadzone(manual_sp.aux2, dz) * vy_max;
+		vz_sp_b = math::deadzone(manual_sp.throttle, dz) * vz_max;
 
 		if (level_hold) {
 			// Hold the current level attitude and ignore only the attitude sticks.
@@ -457,6 +477,33 @@ void GeoControl::control_step_position(const Quatf &R_q, const Vector3f &pos,
 
 	Vector3f kp_pos(_param_gc_xy_p.get(), _param_gc_xy_p.get(), _param_gc_z_p.get());
 	Vector3f vel_sp_world = vel_sp_world_stick + kp_pos.emult(_pos_sp - pos);
+	vel_sp_world(0) = math::constrain(vel_sp_world(0), -vx_max, vx_max);
+	vel_sp_world(1) = math::constrain(vel_sp_world(1), -vy_max, vy_max);
+	vel_sp_world(2) = math::constrain(vel_sp_world(2), -vz_max, vz_max);
+
+	// PX4-style acceleration limiting: constrain the velocity-setpoint slew
+	// rate, |delta velocity| <= acceleration_limit * dt, independently in NED.
+	const Vector3f accel_limit(math::max(_param_gc_ax_max.get(), 0.1f),
+				   math::max(_param_gc_ay_max.get(), 0.1f),
+				   math::max(_param_gc_az_max.get(), 0.1f));
+
+	if (!_vel_sp_limited_init) {
+		_vel_sp_limited(0) = math::constrain(vel(0), -vx_max, vx_max);
+		_vel_sp_limited(1) = math::constrain(vel(1), -vy_max, vy_max);
+		_vel_sp_limited(2) = math::constrain(vel(2), -vz_max, vz_max);
+		_vel_sp_limited_init = true;
+	}
+
+	const Vector3f vel_sp_previous = _vel_sp_limited;
+
+	for (int axis = 0; axis < 3; ++axis) {
+		const float max_delta = accel_limit(axis) * dt;
+		const float delta = math::constrain(vel_sp_world(axis) - _vel_sp_limited(axis), -max_delta, max_delta);
+		_vel_sp_limited(axis) += delta;
+	}
+
+	const Vector3f accel_trajectory_world = (_vel_sp_limited - vel_sp_previous) / dt;
+	vel_sp_world = _vel_sp_limited;
 
 	// 角速率积分 → 姿态参考 (四元数积分)
 	const Vector3f omega_vec(omega_sp(0), omega_sp(1), omega_sp(2));
@@ -473,11 +520,24 @@ void GeoControl::control_step_position(const Quatf &R_q, const Vector3f &pos,
 		_q_att_ref.normalize();
 	}
 
+	limit_manual_attitude_reference();
+
 	// ── 速度环 → 期望力 ──
 	Vector3f kv(_param_gc_xy_vel_p.get(), _param_gc_xy_vel_p.get(), _param_gc_z_vel_p.get());
 	Vector3f e_v = vel - vel_sp_world;
 	Vector3f g(0.f, 0.f, 9.81f);
-	Vector3f f_des_world = -kv.emult(e_v) - _vel_int - mass * g;
+
+	// Apply the acceleration limits to the actual translational command, not
+	// only to the published setpoint. The trajectory acceleration is the
+	// feed-forward term; velocity P/I feedback is converted from force to
+	// acceleration, then the combined non-gravity acceleration is clamped.
+	Vector3f accel_cmd_world = accel_trajectory_world - kv.emult(e_v) / mass - _vel_int / mass;
+
+	for (int axis = 0; axis < 3; ++axis) {
+		accel_cmd_world(axis) = math::constrain(accel_cmd_world(axis), -accel_limit(axis), accel_limit(axis));
+	}
+
+	Vector3f f_des_world = mass * (accel_cmd_world - g);
 	Vector3f f_des_body = R.transpose() * f_des_world;
 
 	// ── 姿态环 → 期望力矩 (Lee SO(3) 含前馈) ──
@@ -492,7 +552,8 @@ void GeoControl::control_step_position(const Quatf &R_q, const Vector3f &pos,
 	Vector3f tau_des = computeAttitudeTorque(R, R_sp, omega, omega_sp, omega_d_in_B, dt);
 
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
-	publish_setpoints(f_des_world, f_des_body, tau_des, _q_att_ref, vel_sp_world, omega, timestamp_sample);
+	publish_setpoints(f_des_world, f_des_body, tau_des, _q_att_ref, vel_sp_world, accel_cmd_world, omega,
+			  timestamp_sample);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -572,7 +633,7 @@ void GeoControl::control_step_offboard(const Quatf &R_q, const Vector3f &pos,
 		Vector3f tau_des = computeAttitudeTorque(R, R_sp, omega, omega_sp, omega_d_in_B, dt);
 
 		publish_wrench(f_des_body, tau_des, timestamp_sample);
-		publish_setpoints(f_des_world, f_des_body, tau_des, Quatf(R_sp), vel_sp, omega, timestamp_sample);
+		publish_setpoints(f_des_world, f_des_body, tau_des, Quatf(R_sp), vel_sp, acc_sp, omega, timestamp_sample);
 		return;
 	}
 
@@ -642,7 +703,8 @@ void GeoControl::control_step_offboard(const Quatf &R_q, const Vector3f &pos,
 	Vector3f tau_des = computeAttitudeTorque(R, R_sp, omega, omega_sp, omega_d_in_B, dt);
 
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
-	publish_setpoints(f_des_world, f_des_body, tau_des, Quatf(R_sp), vel, omega, timestamp_sample);
+	publish_setpoints(f_des_world, f_des_body, tau_des, Quatf(R_sp), vel, Vector3f(0.f, 0.f, 0.f), omega,
+			  timestamp_sample);
 }
 
 void GeoControl::control_step_offboard_rates(const Quatf &R_q, const Vector3f &pos,
@@ -695,8 +757,8 @@ void GeoControl::control_step_offboard_rates(const Quatf &R_q, const Vector3f &p
 
 	const Vector3f tau_des = computeAttitudeTorque(R, R_sp, omega, omega_sp, omega_d_in_B, dt);
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
-	publish_setpoints(f_des_world, f_des_body, tau_des, R_q, Vector3f(0.f, 0.f, 0.f), omega_sp,
-			  timestamp_sample);
+	publish_setpoints(f_des_world, f_des_body, tau_des, R_q, Vector3f(0.f, 0.f, 0.f),
+			  Vector3f(0.f, 0.f, 0.f), omega_sp, timestamp_sample);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -748,7 +810,7 @@ void GeoControl::control_step_auto(const Quatf &R_q, const Vector3f &pos,
 	Vector3f tau_des = computeAttitudeTorque(R, R_sp, omega, omega_sp, omega_d_in_B, dt);
 
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
-	publish_setpoints(f_des_world, f_des_body, tau_des, Quatf(R_sp), vel_sp, omega, timestamp_sample);
+	publish_setpoints(f_des_world, f_des_body, tau_des, Quatf(R_sp), vel_sp, acc_sp, omega, timestamp_sample);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -859,13 +921,14 @@ void GeoControl::control_step(const vehicle_local_position_s &local_pos)
 	if (!_armed) {
 		resetIntegrators();
 		_pos_sp_init = false;   // 下次解锁时重新初始化位置保持指令
+		_vel_sp_limited_init = false;
 		_offboard_external_alt_hold_active = false;
 		publish_wrench(matrix::Vector3f(0.f, 0.f, 0.f), matrix::Vector3f(0.f, 0.f, 0.f),
 			       local_pos.timestamp_sample);
 		publish_setpoints(matrix::Vector3f(0.f, 0.f, 0.f), matrix::Vector3f(0.f, 0.f, 0.f),
 				  matrix::Vector3f(0.f, 0.f, 0.f), matrix::Quatf(1.f, 0.f, 0.f, 0.f),
 				  matrix::Vector3f(0.f, 0.f, 0.f), matrix::Vector3f(0.f, 0.f, 0.f),
-				  local_pos.timestamp_sample);
+				  matrix::Vector3f(0.f, 0.f, 0.f), local_pos.timestamp_sample);
 		return;
 	}
 
@@ -927,6 +990,10 @@ void GeoControl::control_step(const vehicle_local_position_s &local_pos)
 	if (mode != ControlMode::OFFBOARD) {
 		_offboard_external_alt_hold_active = false;
 		_offboard_rate_sp_timestamp = 0;
+	}
+
+	if (mode != ControlMode::POSITION) {
+		_vel_sp_limited_init = false;
 	}
 
 	switch (mode) {
