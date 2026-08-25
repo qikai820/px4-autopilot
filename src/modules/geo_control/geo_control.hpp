@@ -256,6 +256,7 @@ private:
 	// 参数 (GC_ 前缀)
 	DEFINE_PARAMETERS(
 		(ParamFloat<px4::params::GC_MASS>) _param_gc_mass,
+		(ParamFloat<px4::params::GC_HOVER_THR>) _param_gc_hover_thr,
 		(ParamFloat<px4::params::GC_RATE_HZ>) _param_gc_rate_hz,
 		(ParamFloat<px4::params::GC_XY_P>) _param_gc_xy_p,
 		(ParamFloat<px4::params::GC_XY_VEL_P>) _param_gc_xy_vel_p,

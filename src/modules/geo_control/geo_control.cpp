@@ -527,17 +527,32 @@ void GeoControl::control_step_position(const Quatf &R_q, const Vector3f &pos,
 	Vector3f e_v = vel - vel_sp_world;
 	Vector3f g(0.f, 0.f, 9.81f);
 
+	// Match PX4 multicopter vertical control: use a calibrated normalized
+	// hover thrust for the vertical acceleration-to-thrust conversion.  The
+	// mass remains available for the horizontal force model, but no longer
+	// changes the vertical velocity feedback or gravity feed-forward directly.
+	const float thrust_max = math::max(_param_gc_thrust_max.get(), 1.f);
+	const float hover_thr = math::constrain(_param_gc_hover_thr.get(), 0.05f, 0.95f);
+	const float hover_force = hover_thr * thrust_max;
+	const float hover_mass = hover_force / g(2);
+
 	// Apply the acceleration limits to the actual translational command, not
 	// only to the published setpoint. The trajectory acceleration is the
 	// feed-forward term; velocity P/I feedback is converted from force to
 	// acceleration, then the combined non-gravity acceleration is clamped.
 	Vector3f accel_cmd_world = accel_trajectory_world - kv.emult(e_v) / mass - _vel_int / mass;
+	accel_cmd_world(2) = accel_trajectory_world(2)
+			   - kv(2) * e_v(2) / hover_mass
+			   - _vel_int(2) / hover_mass;
 
 	for (int axis = 0; axis < 3; ++axis) {
 		accel_cmd_world(axis) = math::constrain(accel_cmd_world(axis), -accel_limit(axis), accel_limit(axis));
 	}
 
 	Vector3f f_des_world = mass * (accel_cmd_world - g);
+	// Convert vertical acceleration using the calibrated hover force.  This
+	// keeps the velocity loop response stable when GC_MASS is approximate.
+	f_des_world(2) = hover_force * (accel_cmd_world(2) / g(2) - 1.f);
 	Vector3f f_des_body = R.transpose() * f_des_world;
 
 	// ── 姿态环 → 期望力矩 (Lee SO(3) 含前馈) ──

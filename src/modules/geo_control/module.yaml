@@ -14,6 +14,23 @@ parameters:
         decimal: 2
         default: 4.56
 
+      GC_HOVER_THR:
+        description:
+          short: Calibrated hover collective thrust
+          long: |
+            Normalized collective thrust required to hover. This follows the
+            PX4 multicopter acceleration-control convention and is used for
+            vertical thrust conversion, so vertical velocity feedback is not
+            scaled directly by GC_MASS. Calibrate from level hover or use
+            mass * g / GC_THRUST_MAX as the initial value.
+        type: float
+        unit: norm
+        min: 0.05
+        max: 0.95
+        increment: 0.001
+        decimal: 3
+        default: 0.35
+
       GC_RATE_HZ:
         description:
           short: Geometric controller execution rate
