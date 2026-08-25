@@ -87,11 +87,11 @@ PARAM_DEFINE_FLOAT(GC_XY_VEL_P, 0.5);
 PARAM_DEFINE_FLOAT(GC_Z_P, 1.5);
 
 /**
- * Geometric Controller Velocity Proportional Gain (Z)
+ * Geometric Controller vertical velocity-to-acceleration gain (Z)
  *
  * @group Geometric Controller
  */
-PARAM_DEFINE_FLOAT(GC_Z_VEL_P, 0.8);
+PARAM_DEFINE_FLOAT(GC_Z_VEL_P, 2.0);
 
 /**
  * Geometric Controller Attitude Proportional Gain (Roll/Pitch)

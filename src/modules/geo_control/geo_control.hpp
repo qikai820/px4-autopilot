@@ -297,7 +297,8 @@ private:
 	// 积分器状态
 	matrix::Vector3f _rate_int{};   ///< 姿态/角速率误差积分器 (力矩环)
 	matrix::Vector3f _att_int{};    ///< 姿态误差积分器，用于消除稳态角度误差
-	matrix::Vector3f _vel_int{};    ///< 速度误差积分器 (力环)
+	matrix::Vector3f _vel_int{};    ///< 水平速度误差积分器 (力环)
+	float _vel_int_z_accel{0.f};    ///< 垂向速度误差积分器 (加速度环)
 
 	// 最新的外部 body-rate 指令。速率环在每个控制周期运行，直到该
 	// 指令超时，不能仅在 50 Hz 的 MAVLink 新消息到达时运行。

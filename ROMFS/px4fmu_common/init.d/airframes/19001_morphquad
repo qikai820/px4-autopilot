@@ -30,6 +30,7 @@ param set-default CA_METHOD 0
 # --- Enable geo_control module ---
 param set-default SYS_HAS_MC 1
 param set-default GC_HOVER_THR 0.35
+param set-default GC_Z_VEL_P 2.0
 
 # --- GeoControl manual Position-mode limits ---
 param set-default GC_VX_MAX 2.0

@@ -41,6 +41,7 @@ param set-default CA_MQ_SMAX 180.0
 # --- Vehicle mass and measured body-axis inertia ---
 param set-default GC_MASS 6.8
 param set-default GC_HOVER_THR 0.351
+param set-default GC_Z_VEL_P 2.0
 param set-default GC_INERTIA_XX 0.182
 param set-default GC_INERTIA_YY 0.260
 param set-default GC_INERTIA_ZZ 0.384

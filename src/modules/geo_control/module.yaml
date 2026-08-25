@@ -79,13 +79,17 @@ parameters:
 
       GC_Z_VEL_P:
         description:
-          short: Velocity proportional gain (Z)
+          short: Vertical velocity-to-acceleration gain
+          long: |
+            PX4-style vertical velocity P gain. The velocity error is
+            converted directly to an acceleration command before hover-thrust
+            conversion; it is not divided by GC_MASS.
         type: float
         min: 0
         max: 100
         increment: 0.1
         decimal: 1
-        default: 0.8
+        default: 2.0
 
       GC_RP_P:
         description:
