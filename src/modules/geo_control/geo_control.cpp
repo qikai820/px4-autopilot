@@ -404,6 +404,104 @@ void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &omega,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 定高模式: 姿态/水平力手动，油门控制垂向速度闭环
+// ─────────────────────────────────────────────────────────────────────────────
+void GeoControl::control_step_altitude(const Quatf &R_q, const Vector3f &vel,
+					       const Vector3f &omega, uint64_t timestamp_sample)
+{
+	manual_control_setpoint_s manual_sp{};
+	const bool has_manual = _sub_manual_control_sp.copy(&manual_sp) && manual_sp.valid
+					&& (hrt_elapsed_time(&manual_sp.timestamp) < 500_ms);
+	const float dt = math::constrain(static_cast<float>((hrt_absolute_time() - _last_run) * 1e-6f),
+					 0.001f, 0.05f);
+	const float rate_max = _param_gc_man_rate_max.get();
+	const float dz = _param_gc_man_dz.get();
+	const float fmax = _param_gc_man_fmax.get();
+	const float vz_max = math::max(_param_gc_vz_max.get(), 0.1f);
+
+	float p_sp = 0.f;
+	float q_sp = 0.f;
+	float r_sp = 0.f;
+	float fx_body = 0.f;
+	float fy_body = 0.f;
+	float vz_sp = 0.f;
+
+	if (has_manual) {
+		const bool level_hold = manual_sp.aux3 > 0.5f;
+		update_manual_level_hold(R_q, level_hold);
+		p_sp = math::deadzone(manual_sp.roll, dz) * rate_max;
+		q_sp = -math::deadzone(manual_sp.pitch, dz) * rate_max;
+		r_sp = math::deadzone(manual_sp.yaw, dz) * rate_max;
+		fx_body = math::deadzone(manual_sp.pitch, dz) * fmax;
+		fy_body = math::deadzone(manual_sp.roll, dz) * fmax;
+		// Match Position mode: positive throttle commands a climb.
+		vz_sp = -math::deadzone(manual_sp.throttle, dz) * vz_max;
+
+		if (level_hold) {
+			p_sp = 0.f;
+			q_sp = 0.f;
+			fx_body = 0.f;
+			fy_body = 0.f;
+		}
+
+	} else {
+		update_manual_level_hold(R_q, false);
+	}
+
+	const Vector3f omega_sp(p_sp, q_sp, r_sp);
+	const float omega_norm = omega_sp.norm();
+
+	if (omega_norm > 1e-6f) {
+		const float angle = omega_norm * dt;
+		const Vector3f axis = omega_sp / omega_norm;
+		const float ha = angle * 0.5f;
+		_q_att_ref = _q_att_ref * Quatf(cosf(ha), axis(0) * sinf(ha), axis(1) * sinf(ha), axis(2) * sinf(ha));
+		_q_att_ref.normalize();
+	}
+
+	limit_manual_attitude_reference();
+
+	const Dcmf R(R_q);
+	const float thrust_max = math::max(_param_gc_thrust_max.get(), 1.f);
+	const float hover_thr = math::constrain(_param_gc_hover_thr.get(), 0.05f, 0.95f);
+	const float hover_force = hover_thr * thrust_max;
+
+	// Slew-limit the vertical velocity setpoint, as in Position mode.
+	if (!_vel_sp_limited_init) {
+		_vel_sp_limited(0) = vel(0);
+		_vel_sp_limited(1) = vel(1);
+		_vel_sp_limited(2) = vel(2);
+		_vel_sp_limited_init = true;
+	}
+	const float az_max = math::max(_param_gc_az_max.get(), 0.1f);
+	const float delta = math::constrain(vz_sp - _vel_sp_limited(2), -az_max * dt, az_max * dt);
+	const float vz_sp_limited = _vel_sp_limited(2) + delta;
+	const float accel_ff_z = delta / dt;
+	_vel_sp_limited(2) = vz_sp_limited;
+
+	const float e_v_z = vel(2) - vz_sp_limited;
+	float accel_cmd_z = accel_ff_z - _param_gc_z_vel_p.get() * e_v_z - _vel_int_z_accel;
+	accel_cmd_z = math::constrain(accel_cmd_z, -az_max, az_max);
+	const float fz_world = hover_force * (accel_cmd_z / 9.81f - 1.f);
+	const Vector3f f_vertical_body = R.transpose() * Vector3f(0.f, 0.f, fz_world);
+	const Vector3f f_des_body = f_vertical_body + Vector3f(fx_body, fy_body, 0.f);
+
+	const Dcmf R_sp(_q_att_ref);
+	const Vector3f omega_d_in_B = R.transpose() * R_sp * omega_sp;
+	const Vector3f e_omega = omega - omega_d_in_B;
+	if (!_landed) {
+		updateIntegrators(e_omega, Vector3f(0.f, 0.f, e_v_z), dt);
+	}
+
+	const Vector3f tau_des = computeAttitudeTorque(R, R_sp, omega, omega_sp, omega_d_in_B, dt);
+	const Vector3f f_des_world = R * f_des_body;
+	publish_wrench(f_des_body, tau_des, timestamp_sample);
+	publish_setpoints(f_des_world, f_des_body, tau_des, _q_att_ref,
+			  Vector3f(0.f, 0.f, vz_sp_limited), Vector3f(0.f, 0.f, accel_cmd_z),
+			  omega, timestamp_sample);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 位置模式: 级联位置外环 + 速度内环 (闭环)
 // 需要有效位置估计 (GPS / 光流 / VIO)。摇杆回中 → 位置保持。
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1004,6 +1102,9 @@ void GeoControl::control_step(const vehicle_local_position_s &local_pos)
 	} else if (vehicle_status.nav_state == vehicle_status.NAVIGATION_STATE_POSCTL) {
 		mode = ControlMode::POSITION;
 
+	} else if (vehicle_status.nav_state == vehicle_status.NAVIGATION_STATE_ALTCTL) {
+		mode = ControlMode::ALTITUDE;
+
 	} else if (vehicle_status.nav_state == vehicle_status.NAVIGATION_STATE_OFFBOARD) {
 		mode = ControlMode::OFFBOARD;
 	}
@@ -1013,7 +1114,7 @@ void GeoControl::control_step(const vehicle_local_position_s &local_pos)
 		_offboard_rate_sp_timestamp = 0;
 	}
 
-	if (mode != ControlMode::POSITION) {
+	if (mode != ControlMode::POSITION && mode != ControlMode::ALTITUDE) {
 		_vel_sp_limited_init = false;
 	}
 
@@ -1024,6 +1125,10 @@ void GeoControl::control_step(const vehicle_local_position_s &local_pos)
 
 	case ControlMode::POSITION:
 		control_step_position(R_q, pos, vel, omega, local_pos.timestamp_sample);
+		break;
+
+	case ControlMode::ALTITUDE:
+		control_step_altitude(R_q, vel, omega, local_pos.timestamp_sample);
 		break;
 
 	case ControlMode::OFFBOARD:

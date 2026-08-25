@@ -144,7 +144,8 @@ private:
 		OFFBOARD = 1,
 		AUTO = 2,
 		POSITION = 3,
-		ACRO = 4
+		ACRO = 4,
+		ALTITUDE = 5
 	};
 
 	void Run() override;
@@ -155,6 +156,8 @@ private:
 
 	void control_step_manual(const matrix::Quatf &R_q, const matrix::Vector3f &omega,
 				 uint64_t timestamp_sample);
+	void control_step_altitude(const matrix::Quatf &R_q, const matrix::Vector3f &vel,
+				   const matrix::Vector3f &omega, uint64_t timestamp_sample);
 
 	void control_step_position(const matrix::Quatf &R_q, const matrix::Vector3f &pos,
 				   const matrix::Vector3f &vel, const matrix::Vector3f &omega,
