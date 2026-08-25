@@ -429,8 +429,9 @@ void GeoControl::control_step_altitude(const Quatf &R_q, const Vector3f &vel,
 	if (has_manual) {
 		const bool level_hold = manual_sp.aux3 > 0.5f;
 		update_manual_level_hold(R_q, level_hold);
-		p_sp = math::deadzone(manual_sp.roll, dz) * rate_max;
-		q_sp = -math::deadzone(manual_sp.pitch, dz) * rate_max;
+		// Keep the exact Manual mapping: AUX1/AUX2 command roll/pitch rates.
+		p_sp = math::deadzone(manual_sp.aux1, dz) * rate_max;
+		q_sp = math::deadzone(manual_sp.aux2, dz) * rate_max;
 		r_sp = math::deadzone(manual_sp.yaw, dz) * rate_max;
 		fx_body = math::deadzone(manual_sp.pitch, dz) * fmax;
 		fy_body = math::deadzone(manual_sp.roll, dz) * fmax;
