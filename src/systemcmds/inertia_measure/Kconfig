@@ -1,0 +1,5 @@
+menuconfig SYSTEMCMDS_INERTIA_MEASURE
+	bool "inertia_measure"
+	default n
+	---help---
+		Enable the bifilar-pendulum inertia measurement command.
