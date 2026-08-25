@@ -36,8 +36,10 @@ param set-default CA_AIRFRAME 0
 param set-default MORPH_SLEW 0.25
 
 # All coordinates are in the PX4 body frame: +X forward, +Y right, +Z down.
-# Replace these baseline dimensions with the measured motor-axis positions
-# relative to the aircraft centre of gravity before flying.
+# The front motor-axis spacing is 0.90 m and the tail axis is 0.80 m aft of
+# the front-axis line. These coordinates use the triangle's geometric centroid
+# as the initial origin. Translate every X coordinate after measuring the true
+# aircraft centre of gravity before flying.
 param set-default CA_ROTOR_COUNT 5
 
 # Motor 5 (bit 4) is a 3D/reversible DShot motor. This gives the allocator a
@@ -49,29 +51,29 @@ param set-default CA_ROTOR_COUNT 5
 param set-default CA_R_REV 16
 
 # Right forward coaxial pair.
-param set-default CA_ROTOR0_PX 0.25
-param set-default CA_ROTOR0_PY 0.35
+param set-default CA_ROTOR0_PX 0.267
+param set-default CA_ROTOR0_PY 0.450
 param set-default CA_ROTOR0_PZ -0.04
 param set-default CA_ROTOR0_KM -0.05
 
-param set-default CA_ROTOR1_PX 0.25
-param set-default CA_ROTOR1_PY 0.35
+param set-default CA_ROTOR1_PX 0.267
+param set-default CA_ROTOR1_PY 0.450
 param set-default CA_ROTOR1_PZ 0.04
 
 # Left forward coaxial pair.
-param set-default CA_ROTOR2_PX 0.25
-param set-default CA_ROTOR2_PY -0.35
+param set-default CA_ROTOR2_PX 0.267
+param set-default CA_ROTOR2_PY -0.450
 param set-default CA_ROTOR2_PZ -0.04
 param set-default CA_ROTOR2_KM -0.05
 
-param set-default CA_ROTOR3_PX 0.25
-param set-default CA_ROTOR3_PY -0.35
+param set-default CA_ROTOR3_PX 0.267
+param set-default CA_ROTOR3_PY -0.450
 param set-default CA_ROTOR3_PZ 0.04
 
 # Aft reversible vertical-thrust rotor. A negative X position gives it a
 # pitch lever arm. Use the measured moment ratio and set the sign to match
 # the actual forward rotation.
-param set-default CA_ROTOR4_PX -0.45
+param set-default CA_ROTOR4_PX -0.533
 param set-default CA_ROTOR4_PY 0.00
 param set-default CA_ROTOR4_PZ 0.00
 param set-default CA_ROTOR4_KM -0.025
