@@ -93,7 +93,28 @@ parameters:
 
       GC_RP_P:
         description:
-          short: Attitude proportional gain (Roll/Pitch)
+          short: Legacy attitude proportional gain (Roll/Pitch)
+          long: Kept for parameter-file compatibility. Use GC_ROLL_P and GC_PITCH_P for new tuning.
+        type: float
+        min: 0
+        max: 100
+        increment: 0.1
+        decimal: 1
+        default: 6.0
+
+      GC_ROLL_P:
+        description:
+          short: Attitude proportional gain (Roll)
+        type: float
+        min: 0
+        max: 100
+        increment: 0.1
+        decimal: 1
+        default: 6.0
+
+      GC_PITCH_P:
+        description:
+          short: Attitude proportional gain (Pitch)
         type: float
         min: 0
         max: 100

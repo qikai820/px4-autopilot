@@ -101,6 +101,20 @@ PARAM_DEFINE_FLOAT(GC_Z_VEL_P, 2.0);
 PARAM_DEFINE_FLOAT(GC_RP_P, 6.0);
 
 /**
+ * Geometric Controller Attitude Proportional Gain (Roll)
+ *
+ * @group Geometric Controller
+ */
+PARAM_DEFINE_FLOAT(GC_ROLL_P, 6.0);
+
+/**
+ * Geometric Controller Attitude Proportional Gain (Pitch)
+ *
+ * @group Geometric Controller
+ */
+PARAM_DEFINE_FLOAT(GC_PITCH_P, 6.0);
+
+/**
  * Geometric Controller Attitude Proportional Gain (Yaw)
  *
  * @group Geometric Controller

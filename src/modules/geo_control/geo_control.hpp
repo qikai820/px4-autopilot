@@ -267,6 +267,8 @@ private:
 		(ParamFloat<px4::params::GC_Z_P>) _param_gc_z_p,
 		(ParamFloat<px4::params::GC_Z_VEL_P>) _param_gc_z_vel_p,
 		(ParamFloat<px4::params::GC_RP_P>) _param_gc_rp_p,
+		(ParamFloat<px4::params::GC_ROLL_P>) _param_gc_roll_p,
+		(ParamFloat<px4::params::GC_PITCH_P>) _param_gc_pitch_p,
 		(ParamFloat<px4::params::GC_YAW_P>) _param_gc_yaw_p,
 		(ParamFloat<px4::params::GC_RP_RATE_P>) _param_gc_rp_rate_p,
 		(ParamFloat<px4::params::GC_YAW_RATE_P>) _param_gc_yaw_rate_p,

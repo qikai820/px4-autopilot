@@ -252,7 +252,7 @@ matrix::Vector3f GeoControl::computeAttitudeTorque(const Dcmf &R, const Dcmf &R_
 	const Dcmf e_R_mat = (R_sp.transpose() * R - R.transpose() * R_sp) * 0.5f;
 	const Vector3f e_R(e_R_mat(2, 1), e_R_mat(0, 2), e_R_mat(1, 0));
 
-	Vector3f kR(_param_gc_rp_p.get(), _param_gc_rp_p.get(), _param_gc_yaw_p.get());
+	Vector3f kR(_param_gc_roll_p.get(), _param_gc_pitch_p.get(), _param_gc_yaw_p.get());
 	Vector3f kOmega(_param_gc_rp_rate_p.get(), _param_gc_rp_rate_p.get(), _param_gc_yaw_rate_p.get());
 	Matrix3f J = matrix::diag(Vector3f(_param_gc_inertia_xx.get(), _param_gc_inertia_yy.get(),
 					  _param_gc_inertia_zz.get()));
