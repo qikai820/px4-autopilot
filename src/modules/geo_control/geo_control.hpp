@@ -209,6 +209,7 @@ private:
 	void publish_setpoints(const matrix::Vector3f &f_des_world, const matrix::Vector3f &f_des_body,
 			       const matrix::Vector3f &tau_des, const matrix::Quatf &q_att_ref,
 			       const matrix::Vector3f &vel_sp_world, const matrix::Vector3f &accel_sp_world,
+			       const matrix::Vector3f &omega,
 			       const matrix::Vector3f &omega_sp,
 			       uint64_t timestamp_sample);
 
