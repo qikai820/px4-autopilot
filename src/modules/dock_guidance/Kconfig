@@ -1,0 +1,5 @@
+menuconfig MODULES_DOCK_GUIDANCE
+	bool "dock_guidance"
+	default n
+	---help---
+		Enable support for dock_guidance
