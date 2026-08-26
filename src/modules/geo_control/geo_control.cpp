@@ -1038,7 +1038,17 @@ void GeoControl::control_step(const vehicle_local_position_s &local_pos)
 		_landed = land_detected.landed;
 	}
 
+	const bool was_armed = _armed;
 	_armed = vehicle_status.arming_state == vehicle_status.ARMING_STATE_ARMED;
+
+	// Start each armed interval from the actual vehicle attitude.  Otherwise
+	// a vehicle powered up with a non-zero heading can receive a large yaw
+	// correction immediately after arming, even with all sticks centered.
+	if (_armed && !was_armed) {
+		_q_att_ref = Quatf(att.q[0], att.q[1], att.q[2], att.q[3]);
+		_q_att_ref.normalize();
+		resetIntegrators();
+	}
 	_nav_state_last = vehicle_status.nav_state;
 
 	// 未解锁时: 清零积分器并发布零力/力矩，使执行器处于中立初值
