@@ -342,6 +342,8 @@ void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &omega,
 		p_sp = math::deadzone(manual_sp.aux1,  dz) * rate_max;
 		q_sp = math::deadzone(manual_sp.aux2, dz) * rate_max;
 		r_sp = math::deadzone(manual_sp.yaw,   dz) * rate_max;
+		// Do not allow yaw-stick rotation while the vehicle is still landed.
+		if (_landed) { r_sp = 0.f; }
 
 
 		const float fmax = _param_gc_man_fmax.get();
@@ -438,6 +440,7 @@ void GeoControl::control_step_altitude(const Quatf &R_q, const Vector3f &vel,
 		p_sp = math::deadzone(manual_sp.aux1, dz) * rate_max;
 		q_sp = math::deadzone(manual_sp.aux2, dz) * rate_max;
 		r_sp = math::deadzone(manual_sp.yaw, dz) * rate_max;
+		if (_landed) { r_sp = 0.f; }
 		fx_body = math::deadzone(manual_sp.pitch, dz) * fmax;
 		fy_body = math::deadzone(manual_sp.roll, dz) * fmax;
 		// Match Position mode: positive throttle commands a climb.
@@ -553,6 +556,7 @@ void GeoControl::control_step_position(const Quatf &R_q, const Vector3f &pos,
 		// so invert the RC pitch sign here.
 		q_sp = -math::deadzone(manual_sp.pitch, dz) * rate_max;
 		r_sp = math::deadzone(manual_sp.yaw,   dz) * rate_max;
+		if (_landed) { r_sp = 0.f; }
 
 		// 摇杆 [-1,1] → 机体速度 [m/s] (aux1/aux2 水平, throttle 垂向)
 		vx_sp_b = math::deadzone(manual_sp.aux1, dz) * vx_max;
