@@ -127,6 +127,8 @@ PARAM_DEFINE_FLOAT(GC_YAW_P, 4.0);
  * @group Geometric Controller
  */
 PARAM_DEFINE_FLOAT(GC_RP_RATE_P, 0.8);
+PARAM_DEFINE_FLOAT(GC_ROLL_RATE_P, 0.8);
+PARAM_DEFINE_FLOAT(GC_PITCH_RATE_P, 0.8);
 
 /**
  * Geometric Controller Angular Rate Proportional Gain (Yaw)
@@ -312,6 +314,9 @@ PARAM_DEFINE_FLOAT(GC_MAN_FMAX, 20.0);
  * @group Geometric Controller
  */
 PARAM_DEFINE_FLOAT(GC_RATE_I, 0.10);
+PARAM_DEFINE_FLOAT(GC_ROLL_RATE_I, 0.10);
+PARAM_DEFINE_FLOAT(GC_PITCH_RATE_I, 0.10);
+PARAM_DEFINE_FLOAT(GC_YAW_RATE_I, 0.10);
 
 /**
  * Geometric Controller Attitude Error Integral Gain

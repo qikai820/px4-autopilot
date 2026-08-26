@@ -87,7 +87,8 @@ void GeoControl::resetIntegrators()
 
 void GeoControl::updateIntegrators(const Vector3f &e_omega, const Vector3f &e_v_world, float dt)
 {
-	const float rate_i_gain = _param_gc_rate_i.get();
+	const Vector3f rate_i_gain(_param_gc_roll_rate_i.get(), _param_gc_pitch_rate_i.get(),
+					   _param_gc_yaw_rate_i.get());
 	const float rate_int_lim = _param_gc_rate_int_lim.get();
 	const float vel_i_gain = _param_gc_vel_i.get();
 	const float vel_int_lim = _param_gc_vel_int_lim.get();
@@ -112,7 +113,7 @@ void GeoControl::updateIntegrators(const Vector3f &e_omega, const Vector3f &e_v_
 		// e_omega = omega - omega_sp, while the control law applies the
 		// integral torque directly. Therefore the integral must oppose the
 		// measured rate error, just like the proportional rate term.
-		float rate_i = _rate_int(i) - i_factor * rate_i_gain * rate_error * dt;
+		float rate_i = _rate_int(i) - i_factor * rate_i_gain(i) * rate_error * dt;
 
 		if (PX4_ISFINITE(rate_i)) {
 			_rate_int(i) = math::constrain(rate_i, -rate_int_lim, rate_int_lim);
@@ -253,7 +254,7 @@ matrix::Vector3f GeoControl::computeAttitudeTorque(const Dcmf &R, const Dcmf &R_
 	const Vector3f e_R(e_R_mat(2, 1), e_R_mat(0, 2), e_R_mat(1, 0));
 
 	Vector3f kR(_param_gc_roll_p.get(), _param_gc_pitch_p.get(), _param_gc_yaw_p.get());
-	Vector3f kOmega(_param_gc_rp_rate_p.get(), _param_gc_rp_rate_p.get(), _param_gc_yaw_rate_p.get());
+	Vector3f kOmega(_param_gc_roll_rate_p.get(), _param_gc_pitch_rate_p.get(), _param_gc_yaw_rate_p.get());
 	Matrix3f J = matrix::diag(Vector3f(_param_gc_inertia_xx.get(), _param_gc_inertia_yy.get(),
 					  _param_gc_inertia_zz.get()));
 

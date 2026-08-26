@@ -134,7 +134,27 @@ parameters:
 
       GC_RP_RATE_P:
         description:
-          short: Angular rate proportional gain (Roll/Pitch)
+          short: Legacy angular rate gain (Roll/Pitch)
+        type: float
+        min: 0
+        max: 100
+        increment: 0.1
+        decimal: 1
+        default: 0.8
+
+      GC_ROLL_RATE_P:
+        description:
+          short: Angular rate proportional gain (Roll)
+        type: float
+        min: 0
+        max: 100
+        increment: 0.1
+        decimal: 1
+        default: 0.8
+
+      GC_PITCH_RATE_P:
+        description:
+          short: Angular rate proportional gain (Pitch)
         type: float
         min: 0
         max: 100
@@ -332,7 +352,37 @@ parameters:
 
       GC_RATE_I:
         description:
-          short: Rate/angle integral gain (torque loop)
+          short: Legacy rate integral gain (torque loop)
+        type: float
+        min: 0
+        max: 10
+        increment: 0.01
+        decimal: 3
+        default: 0.1
+
+      GC_ROLL_RATE_I:
+        description:
+          short: Angular rate integral gain (Roll)
+        type: float
+        min: 0
+        max: 10
+        increment: 0.01
+        decimal: 3
+        default: 0.1
+
+      GC_PITCH_RATE_I:
+        description:
+          short: Angular rate integral gain (Pitch)
+        type: float
+        min: 0
+        max: 10
+        increment: 0.01
+        decimal: 3
+        default: 0.1
+
+      GC_YAW_RATE_I:
+        description:
+          short: Angular rate integral gain (Yaw)
         type: float
         min: 0
         max: 10
