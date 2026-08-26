@@ -318,6 +318,9 @@ PARAM_DEFINE_FLOAT(GC_ROLL_RATE_I, 0.10);
 PARAM_DEFINE_FLOAT(GC_PITCH_RATE_I, 0.10);
 PARAM_DEFINE_FLOAT(GC_YAW_RATE_I, 0.10);
 
+/** Time for a morphing servo to rotate 60 degrees, used for rate compensation. */
+PARAM_DEFINE_FLOAT(GC_SERVO_60_TIME, 0.20);
+
 /**
  * Geometric Controller Attitude Error Integral Gain
  *

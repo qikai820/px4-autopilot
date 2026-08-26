@@ -292,6 +292,7 @@ private:
 		(ParamFloat<px4::params::GC_ROLL_RATE_I>) _param_gc_roll_rate_i,
 		(ParamFloat<px4::params::GC_PITCH_RATE_I>) _param_gc_pitch_rate_i,
 		(ParamFloat<px4::params::GC_YAW_RATE_I>) _param_gc_yaw_rate_i,
+		(ParamFloat<px4::params::GC_SERVO_60_TIME>) _param_gc_servo_60_time,
 		(ParamFloat<px4::params::GC_ATT_I>) _param_gc_att_i,
 		(ParamFloat<px4::params::GC_RATE_INT_LIM>) _param_gc_rate_int_lim,
 		(ParamFloat<px4::params::GC_VEL_I>) _param_gc_vel_i,
