@@ -44,7 +44,8 @@ private:
 		(ParamFloat<px4::params::CA_MQ_TMAX>)  _param_ca_mq_tmax,   ///< max rotor-system thrust [N]
 		(ParamInt<px4::params::CA_MQ_TCURVE>)  _param_ca_mq_tcurve, ///< motor command/thrust mapping
 		(ParamFloat<px4::params::CA_MQ_MMAX>)  _param_ca_mq_mmax,   ///< global normalized motor throttle limit
-		(ParamFloat<px4::params::CA_MQ_SMAX>)  _param_ca_mq_smax    ///< global servo angle limit [deg]
+		(ParamFloat<px4::params::CA_MQ_SMAX>)  _param_ca_mq_smax,   ///< global servo angle limit [deg]
+		(ParamFloat<px4::params::CA_MQ_LOW_THR>) _param_ca_mq_low_thr ///< throttle below which servo travel is reduced
 	)
 
 	float _alpha_prev[NUM_ROTORS] {};

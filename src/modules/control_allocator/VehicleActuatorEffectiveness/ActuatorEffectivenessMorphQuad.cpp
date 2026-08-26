@@ -184,21 +184,30 @@ void ActuatorEffectivenessMorphQuad::updateSetpoint(
 							  actuator_min(motor_idx),
 							  math::min(actuator_max(motor_idx),
 									math::constrain(_param_ca_mq_mmax.get(), 0.f, 1.f)));
-		const float alpha_actual = math::constrain(alpha_cmd[i],
-							   actuator_min(alpha_idx), actuator_max(alpha_idx));
-		const float beta_actual = math::constrain(beta_cmd[i],
-							  actuator_min(beta_idx), actuator_max(beta_idx));
+		// Reduce morphing-servo travel at low collective throttle.  This avoids
+		// large horizontal-force disturbances during landing while preserving
+		// the neutral (zero-angle) command at idle.  The scale ramps linearly
+		// from zero at idle to one at CA_MQ_LOW_THR.
+		const float low_thr = math::constrain(_param_ca_mq_low_thr.get(), 0.f, 1.f);
+		const float throttle = math::constrain(omega_cmd[i], 0.f, 1.f);
+		const float servo_scale = (low_thr > 1e-3f) ? math::min(throttle / low_thr, 1.f) : 1.f;
+		const float alpha_limited = alpha_cmd[i] * servo_scale;
+		const float beta_limited = beta_cmd[i] * servo_scale;
+		const float alpha_low_actual = math::constrain(alpha_limited,
+							       actuator_min(alpha_idx), actuator_max(alpha_idx));
+		const float beta_low_actual = math::constrain(beta_limited,
+							      actuator_min(beta_idx), actuator_max(beta_idx));
 
 		_motor_saturated |= fabsf(motor_actual - omega_cmd[i]) > 1e-6f;
-		_servo_saturated |= fabsf(alpha_actual - alpha_cmd[i]) > 1e-6f;
-		_servo_saturated |= fabsf(beta_actual - beta_cmd[i]) > 1e-6f;
+		_servo_saturated |= fabsf(alpha_low_actual - alpha_cmd[i]) > 1e-6f;
+		_servo_saturated |= fabsf(beta_low_actual - beta_cmd[i]) > 1e-6f;
 
 		actuator_sp(motor_idx) = motor_actual;
-		actuator_sp(alpha_idx) = alpha_actual;
-		actuator_sp(beta_idx) = beta_actual;
+		actuator_sp(alpha_idx) = alpha_low_actual;
+		actuator_sp(beta_idx) = beta_low_actual;
 
-		_alpha_prev[i] = alpha_actual * kServoAngleRange;
-		_beta_prev[i] = beta_actual * kServoAngleRange;
+		_alpha_prev[i] = alpha_low_actual * kServoAngleRange;
+		_beta_prev[i] = beta_low_actual * kServoAngleRange;
 	}
 
 	computeUnallocatedWrench(f_req, tau_des, actuator_sp);

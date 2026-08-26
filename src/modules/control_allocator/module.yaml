@@ -784,6 +784,20 @@ parameters:
             max: 180.0
             default: 180.0
 
+        CA_MQ_LOW_THR:
+            description:
+                short: Low-throttle servo reduction threshold
+                long: |
+                  Below this normalized motor throttle, alpha/beta servo
+                  commands are linearly scaled toward zero. Set to 0 to
+                  disable the low-throttle reduction.
+            type: float
+            decimal: 2
+            increment: 0.01
+            min: 0.0
+            max: 1.0
+            default: 0.20
+
         CA_MQ_NS_GAIN:
             description:
                 short: Null-space descent gain
