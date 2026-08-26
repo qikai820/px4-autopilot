@@ -112,6 +112,9 @@ public:
 			field("q0", attitude_sp.q[0]); field("q1", attitude_sp.q[1]);
 			field("q2", attitude_sp.q[2]); field("q3", attitude_sp.q[3]);
 			field("roll", attitude_sp.roll); field("pitch", attitude_sp.pitch); field("yaw", attitude_sp.yaw); end();
+			begin("geo_control_rate_setpoint", attitude_sp.timestamp);
+			field("roll", attitude_sp.rates[0]); field("pitch", attitude_sp.rates[1]);
+			field("yaw", attitude_sp.rates[2]); end();
 		}
 
 		vehicle_angular_velocity_s rates{};

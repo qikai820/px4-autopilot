@@ -176,7 +176,7 @@ void GeoControl::publish_wrench(const Vector3f &f_des_body, const Vector3f &tau_
 void GeoControl::publish_setpoints(const Vector3f &f_des_world, const Vector3f &f_des_body,
 				   const Vector3f &tau_des, const Quatf &q_att_ref,
 				   const Vector3f &vel_sp_world, const Vector3f &accel_sp_world,
-				   const Vector3f &omega,
+				   const Vector3f &omega_sp,
 				   uint64_t timestamp_sample)
 {
 	const hrt_abstime now = hrt_absolute_time();
@@ -215,6 +215,9 @@ void GeoControl::publish_setpoints(const Vector3f &f_des_world, const Vector3f &
 	attitude_sp_debug.roll = euler_sp.phi();
 	attitude_sp_debug.pitch = euler_sp.theta();
 	attitude_sp_debug.yaw = euler_sp.psi();
+	attitude_sp_debug.rates[0] = omega_sp(0);
+	attitude_sp_debug.rates[1] = omega_sp(1);
+	attitude_sp_debug.rates[2] = omega_sp(2);
 	_attitude_sp_debug_pub.publish(attitude_sp_debug);
 
 	// vehicle_attitude_setpoint is an Offboard input topic. Do not republish
@@ -400,7 +403,7 @@ void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &omega,
 
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
 	publish_setpoints(f_des_world, f_des_body, tau_des, _q_att_ref, Vector3f(0.f, 0.f, 0.f),
-			  Vector3f(0.f, 0.f, 0.f), omega, timestamp_sample);
+			  Vector3f(0.f, 0.f, 0.f), omega_sp, timestamp_sample);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -499,7 +502,7 @@ void GeoControl::control_step_altitude(const Quatf &R_q, const Vector3f &vel,
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
 	publish_setpoints(f_des_world, f_des_body, tau_des, _q_att_ref,
 			  Vector3f(0.f, 0.f, vz_sp_limited), Vector3f(0.f, 0.f, accel_cmd_z),
-			  omega, timestamp_sample);
+			  omega_sp, timestamp_sample);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -672,7 +675,7 @@ void GeoControl::control_step_position(const Quatf &R_q, const Vector3f &pos,
 	Vector3f tau_des = computeAttitudeTorque(R, R_sp, omega, omega_sp, omega_d_in_B, dt);
 
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
-	publish_setpoints(f_des_world, f_des_body, tau_des, _q_att_ref, vel_sp_world, accel_cmd_world, omega,
+	publish_setpoints(f_des_world, f_des_body, tau_des, _q_att_ref, vel_sp_world, accel_cmd_world, omega_sp,
 			  timestamp_sample);
 }
 
@@ -753,7 +756,7 @@ void GeoControl::control_step_offboard(const Quatf &R_q, const Vector3f &pos,
 		Vector3f tau_des = computeAttitudeTorque(R, R_sp, omega, omega_sp, omega_d_in_B, dt);
 
 		publish_wrench(f_des_body, tau_des, timestamp_sample);
-		publish_setpoints(f_des_world, f_des_body, tau_des, Quatf(R_sp), vel_sp, acc_sp, omega, timestamp_sample);
+		publish_setpoints(f_des_world, f_des_body, tau_des, Quatf(R_sp), vel_sp, acc_sp, omega_sp, timestamp_sample);
 		return;
 	}
 
@@ -823,7 +826,7 @@ void GeoControl::control_step_offboard(const Quatf &R_q, const Vector3f &pos,
 	Vector3f tau_des = computeAttitudeTorque(R, R_sp, omega, omega_sp, omega_d_in_B, dt);
 
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
-	publish_setpoints(f_des_world, f_des_body, tau_des, Quatf(R_sp), vel, Vector3f(0.f, 0.f, 0.f), omega,
+	publish_setpoints(f_des_world, f_des_body, tau_des, Quatf(R_sp), vel, Vector3f(0.f, 0.f, 0.f), omega_sp,
 			  timestamp_sample);
 }
 
@@ -930,7 +933,7 @@ void GeoControl::control_step_auto(const Quatf &R_q, const Vector3f &pos,
 	Vector3f tau_des = computeAttitudeTorque(R, R_sp, omega, omega_sp, omega_d_in_B, dt);
 
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
-	publish_setpoints(f_des_world, f_des_body, tau_des, Quatf(R_sp), vel_sp, acc_sp, omega, timestamp_sample);
+	publish_setpoints(f_des_world, f_des_body, tau_des, Quatf(R_sp), vel_sp, acc_sp, omega_sp, timestamp_sample);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
