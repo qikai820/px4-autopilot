@@ -154,6 +154,7 @@ private:
 	void control_step(const vehicle_local_position_s &local_pos);
 	void update_manual_level_hold(const matrix::Quatf &R_q, bool enabled);
 	void limit_manual_attitude_reference();
+	void limit_manual_attitude_rates(const matrix::Quatf &R_q, float &roll_rate_sp, float &pitch_rate_sp);
 
 	void control_step_manual(const matrix::Quatf &R_q, const matrix::Vector3f &omega,
 				 uint64_t timestamp_sample);

@@ -320,6 +320,36 @@ void GeoControl::limit_manual_attitude_reference()
 	_q_att_ref.normalize();
 }
 
+void GeoControl::limit_manual_attitude_rates(const Quatf &R_q, float &roll_rate_sp, float &pitch_rate_sp)
+{
+	const Eulerf attitude_ref(_q_att_ref);
+	const Eulerf attitude_actual(R_q);
+	const float roll_limit = math::radians(math::constrain(_param_gc_roll_max.get(), 1.f, 85.f));
+	const float pitch_limit = math::radians(math::constrain(_param_gc_pitch_max.get(), 1.f, 85.f));
+	const float guard = math::radians(0.1f);
+
+	// Once either the commanded or measured attitude reaches a boundary,
+	// suppress only the body-rate command that would move farther outside it.
+	// The opposite command remains available so the pilot can return immediately.
+	if ((attitude_ref.phi() >= roll_limit - guard || attitude_actual.phi() >= roll_limit - guard)
+	    && roll_rate_sp > 0.f) {
+		roll_rate_sp = 0.f;
+
+	} else if ((attitude_ref.phi() <= -roll_limit + guard || attitude_actual.phi() <= -roll_limit + guard)
+		   && roll_rate_sp < 0.f) {
+		roll_rate_sp = 0.f;
+	}
+
+	if ((attitude_ref.theta() >= pitch_limit - guard || attitude_actual.theta() >= pitch_limit - guard)
+	    && pitch_rate_sp > 0.f) {
+		pitch_rate_sp = 0.f;
+
+	} else if ((attitude_ref.theta() <= -pitch_limit + guard || attitude_actual.theta() <= -pitch_limit + guard)
+		   && pitch_rate_sp < 0.f) {
+		pitch_rate_sp = 0.f;
+	}
+}
+
 void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &omega,
 				     uint64_t timestamp_sample)
 {
@@ -377,6 +407,7 @@ void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &omega,
 		update_manual_level_hold(R_q, false);
 	}
 
+	limit_manual_attitude_rates(R_q, p_sp, q_sp);
 	Vector3f omega_sp(p_sp, q_sp, r_sp);
 
 	// 角速率积分 → 姿态参考 (四元数积分)
@@ -468,6 +499,7 @@ void GeoControl::control_step_altitude(const Quatf &R_q, const Vector3f &vel,
 		update_manual_level_hold(R_q, false);
 	}
 
+	limit_manual_attitude_rates(R_q, p_sp, q_sp);
 	const Vector3f omega_sp(p_sp, q_sp, r_sp);
 	const float omega_norm = omega_sp.norm();
 
@@ -585,6 +617,7 @@ void GeoControl::control_step_position(const Quatf &R_q, const Vector3f &pos,
 		update_manual_level_hold(R_q, false);
 	}
 
+	limit_manual_attitude_rates(R_q, p_sp, q_sp);
 	Vector3f omega_sp(p_sp, q_sp, r_sp);
 	Vector3f vel_sp_body(vx_sp_b, vy_sp_b, -vz_sp_b);
 
