@@ -211,6 +211,16 @@ void GeoControl::publish_setpoints(const Vector3f &f_des_world, const Vector3f &
 	local_pos_sp.acceleration[0] = accel_sp_world(0);
 	local_pos_sp.acceleration[1] = accel_sp_world(1);
 	local_pos_sp.acceleration[2] = accel_sp_world(2);
+	// Position/Hold modes maintain an internal position target in _pos_sp.
+	// Publish that target instead of leaving x/y/z at the zero-initialized
+	// defaults. Other modes do not own a position target and keep these fields
+	// at zero as before.
+	if (_nav_state_last == vehicle_status_s::NAVIGATION_STATE_POSCTL
+	    || _nav_state_last == vehicle_status_s::NAVIGATION_STATE_AUTO_LOITER) {
+		local_pos_sp.x = _pos_sp(0);
+		local_pos_sp.y = _pos_sp(1);
+		local_pos_sp.z = _pos_sp(2);
+	}
 	local_pos_sp.thrust[0] = f_des_body(0) / thrust_max;
 	local_pos_sp.thrust[1] = f_des_body(1) / thrust_max;
 	local_pos_sp.thrust[2] = throttle_norm;
