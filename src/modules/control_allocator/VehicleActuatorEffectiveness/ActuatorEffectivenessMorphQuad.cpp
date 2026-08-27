@@ -518,8 +518,6 @@ bool ActuatorEffectivenessMorphQuad::recoverServoAngles(
 	const Vector3f achieved_dir = thrustUnitVector(best_alpha, best_beta);
 	angle_limited |= (target_dir - achieved_dir).norm() > 1e-3f;
 
-	_alpha_prev[idx] = best_alpha;
-	_beta_prev[idx] = best_beta;
 	alpha_out = best_alpha;
 	beta_out = best_beta;
 
