@@ -85,3 +85,10 @@ param set-default PWM_MAIN_FUNC9 205
 param set-default PWM_MAIN_FUNC10 206
 param set-default PWM_MAIN_FUNC11 207
 param set-default PWM_MAIN_FUNC12 208
+
+# Stream uORB/control telemetry to PlotJuggler only during HIL simulation.
+# Normal real-aircraft startup (SYS_HITL=0) does not start the UDP bridge.
+if param greater SYS_HITL 0
+then
+	uorb_udp_bridge start
+fi
