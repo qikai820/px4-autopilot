@@ -1,0 +1,5 @@
+menuconfig MODULES_GEO_ATT_CONTROL
+	bool "geo_att_control"
+	default n
+	---help---
+		MorphQuad geometric attitude and angular-rate controller.

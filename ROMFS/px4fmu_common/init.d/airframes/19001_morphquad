@@ -42,6 +42,27 @@ param set-default GC_AZ_MAX 1.0
 param set-default GC_ROLL_MAX 20.0
 param set-default GC_PITCH_MAX 20.0
 
+# --- Split geometric controller defaults ---
+param set-default GPC_RATE_HZ 50.0
+param set-default GPC_MASS 4.56
+param set-default GPC_HOV_THR 0.35
+param set-default GPC_THR_MAX 158.0
+param set-default GPC_Z_VP 2.0
+param set-default GPC_VX_MAX 2.0
+param set-default GPC_VY_MAX 2.0
+param set-default GPC_VZ_MAX 1.0
+param set-default GPC_AX_MAX 2.0
+param set-default GPC_AY_MAX 2.0
+param set-default GPC_AZ_MAX 1.0
+param set-default GPC_ROLL_MAX 20.0
+param set-default GPC_PITCH_MAX 20.0
+param set-default GAC_RATE_HZ 400.0
+param set-default GAC_ROLL_MAX 20.0
+param set-default GAC_PITCH_MAX 20.0
+param set-default GAC_IXX 0.1
+param set-default GAC_IYY 0.1
+param set-default GAC_IZZ 0.2
+
 # --- PWM output channel mapping ---
 # Motors: channels 1-4
 param set-default PWM_MAIN_FUNC1 101

@@ -12,9 +12,12 @@
 control_allocator start
 
 #
-# Start Geometric Controller (SE(3) tracking on body frame)
+# Start split geometric controllers. geo_control remains available for manual
+# fallback, but must not run at the same time because it publishes the same
+# thrust and torque topics.
 #
-geo_control start
+geo_pos_control start
+geo_att_control start
 
 #
 # Start flight mode manager (handles setpoint generation)

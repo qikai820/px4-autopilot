@@ -56,6 +56,29 @@ param set-default GC_AZ_MAX 1.0
 param set-default GC_ROLL_MAX 20.0
 param set-default GC_PITCH_MAX 20.0
 
+# --- Split geometric position/force controller ---
+param set-default GPC_RATE_HZ 50.0
+param set-default GPC_MASS 6.8
+param set-default GPC_HOV_THR 0.351
+param set-default GPC_THR_MAX 189.836
+param set-default GPC_Z_VP 2.0
+param set-default GPC_VX_MAX 2.0
+param set-default GPC_VY_MAX 2.0
+param set-default GPC_VZ_MAX 1.0
+param set-default GPC_AX_MAX 2.0
+param set-default GPC_AY_MAX 2.0
+param set-default GPC_AZ_MAX 1.0
+param set-default GPC_ROLL_MAX 20.0
+param set-default GPC_PITCH_MAX 20.0
+
+# --- Split geometric attitude/rate controller ---
+param set-default GAC_RATE_HZ 400.0
+param set-default GAC_ROLL_MAX 20.0
+param set-default GAC_PITCH_MAX 20.0
+param set-default GAC_IXX 0.182
+param set-default GAC_IYY 0.260
+param set-default GAC_IZZ 0.384
+
 # --- Enable geo_control module ---
 param set-default SYS_HAS_MC 1
 

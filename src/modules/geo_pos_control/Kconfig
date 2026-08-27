@@ -1,0 +1,5 @@
+menuconfig MODULES_GEO_POS_CONTROL
+	bool "geo_pos_control"
+	default n
+	---help---
+		MorphQuad geometric position, velocity and force controller.

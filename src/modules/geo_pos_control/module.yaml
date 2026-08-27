@@ -1,0 +1,25 @@
+module_name: Geometric Position Control
+parameters:
+  - group: Geometric Position Control
+    definitions:
+      GPC_RATE_HZ: {description: {short: Position and force loop rate}, type: float, unit: Hz, min: 10, max: 100, default: 50.0}
+      GPC_MASS: {description: {short: Vehicle mass}, type: float, unit: kg, min: 0.1, max: 50.0, default: 6.8}
+      GPC_HOV_THR: {description: {short: Normalized hover thrust}, type: float, min: 0.05, max: 0.95, default: 0.351}
+      GPC_THR_MAX: {description: {short: Maximum total physical thrust}, type: float, unit: N, min: 1.0, max: 1000.0, default: 189.836}
+      GPC_XY_P: {description: {short: Horizontal position proportional gain}, type: float, default: 1.0}
+      GPC_Z_P: {description: {short: Vertical position proportional gain}, type: float, default: 2.5}
+      GPC_XY_VP: {description: {short: Horizontal velocity proportional gain}, type: float, default: 1.0}
+      GPC_Z_VP: {description: {short: Vertical velocity proportional gain}, type: float, default: 2.0}
+      GPC_VEL_I: {description: {short: Velocity integral gain}, type: float, default: 0.02}
+      GPC_VEL_ILIM: {description: {short: Velocity integral limit}, type: float, default: 2.0}
+      GPC_VX_MAX: {description: {short: Maximum X velocity}, type: float, unit: m/s, default: 2.0}
+      GPC_VY_MAX: {description: {short: Maximum Y velocity}, type: float, unit: m/s, default: 2.0}
+      GPC_VZ_MAX: {description: {short: Maximum Z velocity}, type: float, unit: m/s, default: 1.0}
+      GPC_AX_MAX: {description: {short: Maximum X acceleration}, type: float, unit: m/s^2, default: 2.0}
+      GPC_AY_MAX: {description: {short: Maximum Y acceleration}, type: float, unit: m/s^2, default: 2.0}
+      GPC_AZ_MAX: {description: {short: Maximum Z acceleration}, type: float, unit: m/s^2, default: 1.0}
+      GPC_MAN_DZ: {description: {short: Manual stick deadzone}, type: float, min: 0.0, max: 0.5, default: 0.1}
+      GPC_MAN_FMAX: {description: {short: Maximum manual horizontal force}, type: float, unit: N, default: 40.0}
+      GPC_RATE_MAX: {description: {short: Maximum manual attitude rate}, type: float, unit: rad/s, default: 0.5}
+      GPC_ROLL_MAX: {description: {short: Maximum roll reference}, type: float, unit: deg, default: 20.0}
+      GPC_PITCH_MAX: {description: {short: Maximum pitch reference}, type: float, unit: deg, default: 20.0}
