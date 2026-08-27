@@ -87,6 +87,17 @@ void GeoControl::resetIntegrators()
 
 void GeoControl::updateIntegrators(const Vector3f &e_omega, const Vector3f &e_v_world, float dt)
 {
+	// Never accumulate control error while the vehicle is on the ground. This
+	// also protects modes whose callers may be running during land-detector
+	// transitions; all integrators are reset every landed control cycle.
+	if (_landed) {
+		_rate_int.zero();
+		_att_int.zero();
+		_vel_int.zero();
+		_vel_int_z_accel = 0.f;
+		return;
+	}
+
 	const Vector3f rate_i_gain(_param_gc_roll_rate_i.get(), _param_gc_pitch_rate_i.get(),
 					   _param_gc_yaw_rate_i.get());
 	const float rate_int_lim = _param_gc_rate_int_lim.get();
