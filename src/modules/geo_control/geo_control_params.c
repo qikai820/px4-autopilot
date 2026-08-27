@@ -319,16 +319,6 @@ PARAM_DEFINE_FLOAT(GC_PITCH_RATE_I, 0.10);
 PARAM_DEFINE_FLOAT(GC_YAW_RATE_I, 0.10);
 
 /**
- * Morphing servo 60 degree movement time
- *
- * @unit s
- * @min 0.01
- * @max 5.0
- * @group Geometric Controller
- */
-PARAM_DEFINE_FLOAT(GC_SERVO_60_TIME, 0.20);
-
-/**
  * Geometric Controller Attitude Error Integral Gain
  *
  * Integral gain for cancelling constant roll/pitch/yaw torque bias. This

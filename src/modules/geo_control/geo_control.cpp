@@ -285,13 +285,8 @@ matrix::Vector3f GeoControl::computeAttitudeTorque(const Dcmf &R, const Dcmf &R_
 	}
 
 	const Vector3f ff = -J * omega.cross(omega_d_in_B);
-	// Lead the desired body rate to compensate the finite morphing-servo
-	// response. GC_SERVO_60_TIME is the measured time for 60 degrees.
-	const float servo_time = math::max(_param_gc_servo_60_time.get(), 0.01f);
-	const float servo_rate = math::min(math::radians(60.f) / servo_time, math::radians(600.f));
-	const Vector3f omega_servo_lead = e_R * servo_rate;
 
-	return -kR.emult(e_R) - kOmega.emult(omega - omega_d_in_B - omega_servo_lead) + _rate_int + _att_int
+	return -kR.emult(e_R) - kOmega.emult(omega - omega_d_in_B) + _rate_int + _att_int
 	       + omega.cross(J * omega) + ff;
 }
 
