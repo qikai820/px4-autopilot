@@ -197,16 +197,20 @@ void ActuatorEffectivenessMorphQuad::updateSetpoint(
 							       actuator_min(alpha_idx), actuator_max(alpha_idx));
 		const float beta_low_actual = math::constrain(beta_limited,
 							      actuator_min(beta_idx), actuator_max(beta_idx));
+		const bool zero_thrust = T < 1e-5f;
 
 		// Limit the per-update servo change to avoid abrupt gimbal motion.
 		// Values are normalized actuator units; zero disables the limiter.
 		const float servo_step = math::constrain(_param_ca_mq_sstep.get(), 0.f, 2.f);
-		const float alpha_step_limited = (servo_step > 1e-6f) ?
+		// There is no meaningful gimbal direction at zero thrust.  Do not let
+		// the slew limiter replay a stale pre-arm angle; force neutral and reset
+		// the history immediately while disarmed/landed.
+		const float alpha_step_limited = zero_thrust ? 0.f : ((servo_step > 1e-6f) ?
 			math::constrain(alpha_low_actual, _alpha_prev[i] / kServoAngleRange - servo_step,
-					_alpha_prev[i] / kServoAngleRange + servo_step) : alpha_low_actual;
-		const float beta_step_limited = (servo_step > 1e-6f) ?
+					_alpha_prev[i] / kServoAngleRange + servo_step) : alpha_low_actual);
+		const float beta_step_limited = zero_thrust ? 0.f : ((servo_step > 1e-6f) ?
 			math::constrain(beta_low_actual, _beta_prev[i] / kServoAngleRange - servo_step,
-					_beta_prev[i] / kServoAngleRange + servo_step) : beta_low_actual;
+					_beta_prev[i] / kServoAngleRange + servo_step) : beta_low_actual);
 
 		_motor_saturated |= fabsf(motor_actual - omega_cmd[i]) > 1e-6f;
 		_servo_saturated |= fabsf(alpha_step_limited - alpha_cmd[i]) > 1e-6f;
