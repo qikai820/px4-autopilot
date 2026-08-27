@@ -145,7 +145,8 @@ private:
 		AUTO = 2,
 		POSITION = 3,
 		ACRO = 4,
-		ALTITUDE = 5
+		ALTITUDE = 5,
+		HOLD = 6
 	};
 
 	void Run() override;
@@ -161,7 +162,7 @@ private:
 
 	void control_step_position(const matrix::Quatf &R_q, const matrix::Vector3f &pos,
 				   const matrix::Vector3f &vel, const matrix::Vector3f &omega,
-				   uint64_t timestamp_sample);
+				   uint64_t timestamp_sample, bool hold_mode = false);
 
 	void control_step_offboard(const matrix::Quatf &R_q, const matrix::Vector3f &pos,
 				   const matrix::Vector3f &vel, const matrix::Vector3f &omega,
@@ -362,6 +363,7 @@ private:
 	bool _pos_sp_init{false};
 	matrix::Vector3f _vel_sp_limited{};
 	bool _vel_sp_limited_init{false};
+	bool _hold_active{false};
 
 	hrt_abstime _last_run{0};
 	perf_counter_t _loop_perf;

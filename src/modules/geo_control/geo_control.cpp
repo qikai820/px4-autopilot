@@ -527,7 +527,7 @@ void GeoControl::control_step_altitude(const Quatf &R_q, const Vector3f &vel,
 // ─────────────────────────────────────────────────────────────────────────────
 void GeoControl::control_step_position(const Quatf &R_q, const Vector3f &pos,
 				       const Vector3f &vel, const Vector3f &omega,
-				       uint64_t timestamp_sample)
+				       uint64_t timestamp_sample, bool hold_mode)
 {
 	// 与手动模式相同的无 RC 回退: 保持上次/零指令，
 	// 使位置环保持悬停，而非回退为零力/力矩
@@ -536,7 +536,7 @@ void GeoControl::control_step_position(const Quatf &R_q, const Vector3f &pos,
 	// update() 会在两帧遥控消息之间返回 false，使油门瞬间回到 0，
 	// 从而造成 vehicle_local_position_setpoint.vz 在油门值和零之间跳变。
 	// 始终读取最近一帧，并仅在超过 500 ms 未更新时判定为失联。
-	const bool has_manual = _sub_manual_control_sp.copy(&manual_sp) && manual_sp.valid
+	const bool has_manual = !hold_mode && _sub_manual_control_sp.copy(&manual_sp) && manual_sp.valid
 					&& (hrt_elapsed_time(&manual_sp.timestamp) < 500_ms);
 
 	const float dt = math::constrain(static_cast<float>((hrt_absolute_time() - _last_run) * 1e-6f),
@@ -581,7 +581,7 @@ void GeoControl::control_step_position(const Quatf &R_q, const Vector3f &pos,
 			q_sp = 0.f;
 		}
 
-	} else {
+	} else if (!hold_mode) {
 		update_manual_level_hold(R_q, false);
 	}
 
@@ -1072,6 +1072,7 @@ void GeoControl::control_step(const vehicle_local_position_s &local_pos)
 		resetIntegrators();
 		_pos_sp_init = false;   // 下次解锁时重新初始化位置保持指令
 		_vel_sp_limited_init = false;
+		_hold_active = false;
 		_offboard_external_alt_hold_active = false;
 		publish_wrench(matrix::Vector3f(0.f, 0.f, 0.f), matrix::Vector3f(0.f, 0.f, 0.f),
 			       local_pos.timestamp_sample);
@@ -1134,6 +1135,9 @@ void GeoControl::control_step(const vehicle_local_position_s &local_pos)
 	} else if (vehicle_status.nav_state == vehicle_status.NAVIGATION_STATE_POSCTL) {
 		mode = ControlMode::POSITION;
 
+	} else if (vehicle_status.nav_state == vehicle_status.NAVIGATION_STATE_AUTO_LOITER) {
+		mode = ControlMode::HOLD;
+
 	} else if (vehicle_status.nav_state == vehicle_status.NAVIGATION_STATE_ALTCTL) {
 		mode = ControlMode::ALTITUDE;
 
@@ -1146,9 +1150,27 @@ void GeoControl::control_step(const vehicle_local_position_s &local_pos)
 		_offboard_rate_sp_timestamp = 0;
 	}
 
-	if (mode != ControlMode::POSITION && mode != ControlMode::ALTITUDE) {
+	if (mode != ControlMode::POSITION && mode != ControlMode::ALTITUDE && mode != ControlMode::HOLD) {
 		_vel_sp_limited_init = false;
 	}
+
+	// Hold captures the current position and heading once on entry, then uses
+	// the Position controller with all stick commands suppressed.  Start the
+	// velocity limiter from the measured velocity for a bumpless transition.
+	if (mode == ControlMode::HOLD && !_hold_active) {
+		_pos_sp = pos;
+		_pos_sp_init = true;
+		_vel_sp_limited = vel;
+		_vel_sp_limited_init = true;
+		const float yaw = Eulerf(R_q).psi();
+		_q_att_ref = Quatf(Eulerf(0.f, 0.f, yaw));
+		_q_att_ref.normalize();
+		_manual_level_hold_active = false;
+		resetIntegrators();
+		mavlink_log_info(&_mavlink_log_pub, "Geo control: hold enabled");
+	}
+
+	_hold_active = mode == ControlMode::HOLD;
 
 	switch (mode) {
 	case ControlMode::MANUAL:
@@ -1157,6 +1179,10 @@ void GeoControl::control_step(const vehicle_local_position_s &local_pos)
 
 	case ControlMode::POSITION:
 		control_step_position(R_q, pos, vel, omega, local_pos.timestamp_sample);
+		break;
+
+	case ControlMode::HOLD:
+		control_step_position(R_q, pos, vel, omega, local_pos.timestamp_sample, true);
 		break;
 
 	case ControlMode::ALTITUDE:
@@ -2550,8 +2576,9 @@ int GeoControl::print_usage(const char *reason)
 MorphQuad 几何控制器，输出推力与力矩指令。
 
 ### 实现
-在 SE(3) 上实现几何跟踪控制器，支持三种输入模式:
+在 SE(3) 上实现几何跟踪控制器，支持四种输入模式:
 - **手动**: RC 摇杆 (roll/pitch/yaw → 角速率, aux1/2/3 → 机体速度)
+- **Hold**: 进入时锁定当前位置和航向，保持水平姿态并忽略摇杆
 - **Offboard**: 来自 companion computer 的 trajectory_setpoint (位置+姿态)
   或 SET_ATTITUDE_TARGET (仅姿态，回退到悬停推力+速度阻尼)
 - **Auto**: flight_mode_manager 指令 (posctl, loiter, mission, ...)
