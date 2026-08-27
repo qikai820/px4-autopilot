@@ -198,16 +198,26 @@ void ActuatorEffectivenessMorphQuad::updateSetpoint(
 		const float beta_low_actual = math::constrain(beta_limited,
 							      actuator_min(beta_idx), actuator_max(beta_idx));
 
+		// Limit the per-update servo change to avoid abrupt gimbal motion.
+		// Values are normalized actuator units; zero disables the limiter.
+		const float servo_step = math::constrain(_param_ca_mq_sstep.get(), 0.f, 2.f);
+		const float alpha_step_limited = (servo_step > 1e-6f) ?
+			math::constrain(alpha_low_actual, _alpha_prev[i] / kServoAngleRange - servo_step,
+					_alpha_prev[i] / kServoAngleRange + servo_step) : alpha_low_actual;
+		const float beta_step_limited = (servo_step > 1e-6f) ?
+			math::constrain(beta_low_actual, _beta_prev[i] / kServoAngleRange - servo_step,
+					_beta_prev[i] / kServoAngleRange + servo_step) : beta_low_actual;
+
 		_motor_saturated |= fabsf(motor_actual - omega_cmd[i]) > 1e-6f;
-		_servo_saturated |= fabsf(alpha_low_actual - alpha_cmd[i]) > 1e-6f;
-		_servo_saturated |= fabsf(beta_low_actual - beta_cmd[i]) > 1e-6f;
+		_servo_saturated |= fabsf(alpha_step_limited - alpha_cmd[i]) > 1e-6f;
+		_servo_saturated |= fabsf(beta_step_limited - beta_cmd[i]) > 1e-6f;
 
 		actuator_sp(motor_idx) = motor_actual;
-		actuator_sp(alpha_idx) = alpha_low_actual;
-		actuator_sp(beta_idx) = beta_low_actual;
+		actuator_sp(alpha_idx) = alpha_step_limited;
+		actuator_sp(beta_idx) = beta_step_limited;
 
-		_alpha_prev[i] = alpha_low_actual * kServoAngleRange;
-		_beta_prev[i] = beta_low_actual * kServoAngleRange;
+		_alpha_prev[i] = alpha_step_limited * kServoAngleRange;
+		_beta_prev[i] = beta_step_limited * kServoAngleRange;
 	}
 
 	computeUnallocatedWrench(f_req, tau_des, actuator_sp);
@@ -419,8 +429,11 @@ bool ActuatorEffectivenessMorphQuad::recoverServoAngles(
 	const float norm = sqrtf(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]);
 
 	if (norm < 1e-5f) {
-		alpha_out = _alpha_prev[idx];
-		beta_out = _beta_prev[idx];
+		// A zero thrust vector has no valid inverse-kinematics direction.
+		// Holding the previous angle here leaks stale servo commands into the
+		// disarmed/landed state, so always return to the neutral pose instead.
+		alpha_out = 0.f;
+		beta_out = 0.f;
 		return false;
 	}
 
