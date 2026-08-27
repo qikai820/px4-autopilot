@@ -213,7 +213,7 @@ private:
 			       const matrix::Vector3f &vel_sp_world, const matrix::Vector3f &accel_sp_world,
 			       const matrix::Vector3f &omega,
 			       const matrix::Vector3f &omega_sp,
-			       uint64_t timestamp_sample);
+			       uint64_t timestamp_sample, bool publish_standard_attitude_rate);
 
 	/**
 	 * 更新积分器，含执行器饱和反馈抗饱和。
@@ -231,12 +231,10 @@ private:
 	void resetIntegrators();
 
 	// uORB 订阅
-	// Use attitude setpoint publication as the control-loop wake-up source.
-	uORB::SubscriptionCallbackWorkItem _sub_vehicle_attitude_setpoint_event{this, ORB_ID(vehicle_attitude_setpoint)};
-	// vehicle_attitude is published at the IMU/control rate in configurations
-	// that do not publish a separate attitude setpoint topic.
+	// Drive the controller from measured attitude in every mode. Offboard
+	// setpoints remain regular subscriptions and are sampled only in Offboard.
 	uORB::SubscriptionCallbackWorkItem _sub_vehicle_attitude_event{this, ORB_ID(vehicle_attitude)};
-	// Fallback for modes/configurations that do not publish vehicle_attitude_setpoint.
+	// Fallback during estimator attitude publication transitions.
 	uORB::SubscriptionCallbackWorkItem _sub_vehicle_local_position_event{this, ORB_ID(vehicle_local_position)};
 	// Position remains a regular subscription and is copied at each control tick.
 	uORB::Subscription _sub_vehicle_local_position{ORB_ID(vehicle_local_position)};
@@ -258,6 +256,8 @@ private:
 	uORB::Publication<vehicle_local_position_setpoint_s> _local_pos_sp_pub{ORB_ID(vehicle_local_position_setpoint)};
 	uORB::Publication<vehicle_angular_acceleration_setpoint_s> _ang_accel_sp_pub{ORB_ID(vehicle_angular_acceleration_setpoint)};
 	uORB::Publication<geo_control_attitude_setpoint_s> _attitude_sp_debug_pub{ORB_ID(geo_control_attitude_setpoint)};
+	uORB::Publication<vehicle_attitude_setpoint_s> _attitude_sp_pub{ORB_ID(vehicle_attitude_setpoint)};
+	uORB::Publication<vehicle_rates_setpoint_s> _rates_sp_pub{ORB_ID(vehicle_rates_setpoint)};
 
 	// 参数 (GC_ 前缀)
 	DEFINE_PARAMETERS(

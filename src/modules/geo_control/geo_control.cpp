@@ -58,8 +58,7 @@ GeoControl::GeoControl() :
 
 bool GeoControl::init()
 {
-	if (!_sub_vehicle_attitude_setpoint_event.registerCallback() ||
-	    !_sub_vehicle_attitude_event.registerCallback() ||
+	if (!_sub_vehicle_attitude_event.registerCallback() ||
 	    !_sub_vehicle_local_position_event.registerCallback()) {
 		PX4_ERR("callback registration failed");
 		return false;
@@ -190,7 +189,8 @@ void GeoControl::publish_setpoints(const Vector3f &f_des_world, const Vector3f &
 				   const Vector3f &vel_sp_world, const Vector3f &accel_sp_world,
 				   const Vector3f &omega,
 				   const Vector3f &omega_sp,
-				   uint64_t timestamp_sample)
+				   uint64_t timestamp_sample,
+				   bool publish_standard_attitude_rate)
 {
 	const hrt_abstime now = hrt_absolute_time();
 	const float thrust_max = math::max(_param_gc_thrust_max.get(), 1.f);
@@ -233,10 +233,34 @@ void GeoControl::publish_setpoints(const Vector3f &f_des_world, const Vector3f &
 	attitude_sp_debug.rates[2] = omega_sp(2);
 	_attitude_sp_debug_pub.publish(attitude_sp_debug);
 
-	// vehicle_attitude_setpoint is an Offboard input topic. Do not republish
-	// debug data on it: otherwise the next Offboard cycle can consume our own
-	// positive-magnitude debug thrust as an external MAVLink thrust command
-	// (where negative Z means upward thrust), flipping the vertical force.
+	// Mirror internal setpoints to standard PX4 topics only in modes that do not
+	// consume those topics as inputs. Offboard and Auto pass false to prevent
+	// the controller from reading back its own publication.
+	if (publish_standard_attitude_rate) {
+		vehicle_attitude_setpoint_s attitude_sp{};
+		attitude_sp.timestamp = now;
+		attitude_sp.yaw_sp_move_rate = omega_sp(2);
+
+		for (int i = 0; i < 4; ++i) {
+			attitude_sp.q_d[i] = q_att_ref(i);
+		}
+
+		vehicle_rates_setpoint_s rates_sp{};
+		rates_sp.timestamp = now;
+		rates_sp.roll = omega_sp(0);
+		rates_sp.pitch = omega_sp(1);
+		rates_sp.yaw = omega_sp(2);
+		rates_sp.reset_integral = false;
+
+		for (int i = 0; i < 3; ++i) {
+			const float normalized_thrust = math::constrain(f_des_body(i) / thrust_max, -1.f, 1.f);
+			attitude_sp.thrust_body[i] = normalized_thrust;
+			rates_sp.thrust_body[i] = normalized_thrust;
+		}
+
+		_attitude_sp_pub.publish(attitude_sp);
+		_rates_sp_pub.publish(rates_sp);
+	}
 
 	// ── vehicle_angular_acceleration_setpoint ──
 	// 期望角加速度: τ = J·α + ω×Jω  →  α = J⁻¹(τ − ω×Jω)
@@ -449,7 +473,7 @@ void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &omega,
 
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
 	publish_setpoints(f_des_world, f_des_body, tau_des, _q_att_ref, Vector3f(0.f, 0.f, 0.f),
-			  Vector3f(0.f, 0.f, 0.f), omega, omega_sp, timestamp_sample);
+			  Vector3f(0.f, 0.f, 0.f), omega, omega_sp, timestamp_sample, true);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -550,7 +574,7 @@ void GeoControl::control_step_altitude(const Quatf &R_q, const Vector3f &vel,
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
 	publish_setpoints(f_des_world, f_des_body, tau_des, _q_att_ref,
 			  Vector3f(0.f, 0.f, vz_sp_limited), Vector3f(0.f, 0.f, accel_cmd_z),
-			  omega, omega_sp, timestamp_sample);
+			  omega, omega_sp, timestamp_sample, true);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -619,10 +643,18 @@ void GeoControl::control_step_position(const Quatf &R_q, const Vector3f &pos,
 
 	limit_manual_attitude_rates(R_q, p_sp, q_sp);
 	Vector3f omega_sp(p_sp, q_sp, r_sp);
-	Vector3f vel_sp_body(vx_sp_b, vy_sp_b, -vz_sp_b);
 
 	const Dcmf R(R_q);
-	Vector3f vel_sp_world_stick = R * vel_sp_body;
+	// Horizontal stick commands follow heading only, while the throttle command
+	// always acts on the world NED Z axis. Using the full attitude matrix here
+	// rotated vertical climb/descent velocity into X/Y whenever roll or pitch was
+	// non-zero, causing large horizontal motion with AUX1/AUX2 centered.
+	const float yaw = Eulerf(R_q).psi();
+	const float cos_yaw = cosf(yaw);
+	const float sin_yaw = sinf(yaw);
+	Vector3f vel_sp_world_stick(cos_yaw * vx_sp_b - sin_yaw * vy_sp_b,
+				    sin_yaw * vx_sp_b + cos_yaw * vy_sp_b,
+				    -vz_sp_b);
 
 	// 位置外环: 维护位置指令。摇杆推时跟随速度移动，回中时保持当前位置
 	if (!_pos_sp_init) {
@@ -726,7 +758,7 @@ void GeoControl::control_step_position(const Quatf &R_q, const Vector3f &pos,
 
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
 	publish_setpoints(f_des_world, f_des_body, tau_des, _q_att_ref, vel_sp_world, accel_cmd_world, omega, omega_sp,
-			  timestamp_sample);
+			  timestamp_sample, true);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -806,7 +838,8 @@ void GeoControl::control_step_offboard(const Quatf &R_q, const Vector3f &pos,
 		Vector3f tau_des = computeAttitudeTorque(R, R_sp, omega, omega_sp, omega_d_in_B, dt);
 
 		publish_wrench(f_des_body, tau_des, timestamp_sample);
-		publish_setpoints(f_des_world, f_des_body, tau_des, Quatf(R_sp), vel_sp, acc_sp, omega, omega_sp, timestamp_sample);
+		publish_setpoints(f_des_world, f_des_body, tau_des, Quatf(R_sp), vel_sp, acc_sp, omega, omega_sp,
+				  timestamp_sample, false);
 		return;
 	}
 
@@ -877,7 +910,7 @@ void GeoControl::control_step_offboard(const Quatf &R_q, const Vector3f &pos,
 
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
 	publish_setpoints(f_des_world, f_des_body, tau_des, Quatf(R_sp), vel, Vector3f(0.f, 0.f, 0.f), omega, omega_sp,
-			  timestamp_sample);
+			  timestamp_sample, false);
 }
 
 void GeoControl::control_step_offboard_rates(const Quatf &R_q, const Vector3f &pos,
@@ -931,7 +964,7 @@ void GeoControl::control_step_offboard_rates(const Quatf &R_q, const Vector3f &p
 	const Vector3f tau_des = computeAttitudeTorque(R, R_sp, omega, omega_sp, omega_d_in_B, dt);
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
 	publish_setpoints(f_des_world, f_des_body, tau_des, R_q, Vector3f(0.f, 0.f, 0.f),
-			  Vector3f(0.f, 0.f, 0.f), omega, omega_sp, timestamp_sample);
+			  Vector3f(0.f, 0.f, 0.f), omega, omega_sp, timestamp_sample, false);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -983,7 +1016,8 @@ void GeoControl::control_step_auto(const Quatf &R_q, const Vector3f &pos,
 	Vector3f tau_des = computeAttitudeTorque(R, R_sp, omega, omega_sp, omega_d_in_B, dt);
 
 	publish_wrench(f_des_body, tau_des, timestamp_sample);
-	publish_setpoints(f_des_world, f_des_body, tau_des, Quatf(R_sp), vel_sp, acc_sp, omega, omega_sp, timestamp_sample);
+	publish_setpoints(f_des_world, f_des_body, tau_des, Quatf(R_sp), vel_sp, acc_sp, omega, omega_sp,
+			  timestamp_sample, false);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1113,7 +1147,12 @@ void GeoControl::control_step(const vehicle_local_position_s &local_pos)
 				  matrix::Vector3f(0.f, 0.f, 0.f), matrix::Quatf(1.f, 0.f, 0.f, 0.f),
 				  matrix::Vector3f(0.f, 0.f, 0.f), matrix::Vector3f(0.f, 0.f, 0.f),
 				  matrix::Vector3f(0.f, 0.f, 0.f), matrix::Vector3f(0.f, 0.f, 0.f),
-				  local_pos.timestamp_sample);
+				  local_pos.timestamp_sample,
+				  vehicle_status.nav_state == vehicle_status.NAVIGATION_STATE_ACRO
+				  || vehicle_status.nav_state == vehicle_status.NAVIGATION_STATE_MANUAL
+				  || vehicle_status.nav_state == vehicle_status.NAVIGATION_STATE_POSCTL
+				  || vehicle_status.nav_state == vehicle_status.NAVIGATION_STATE_AUTO_LOITER
+				  || vehicle_status.nav_state == vehicle_status.NAVIGATION_STATE_ALTCTL);
 		return;
 	}
 
@@ -1239,7 +1278,6 @@ void GeoControl::control_step(const vehicle_local_position_s &local_pos)
 void GeoControl::Run()
 {
 	if (should_exit()) {
-		_sub_vehicle_attitude_setpoint_event.unregisterCallback();
 		_sub_vehicle_attitude_event.unregisterCallback();
 		_sub_vehicle_local_position_event.unregisterCallback();
 		exit_and_cleanup();
@@ -1250,19 +1288,18 @@ void GeoControl::Run()
 
 	parameters_update();
 
-	vehicle_attitude_setpoint_s att_sp_event{};
 	vehicle_attitude_s attitude_event_data{};
 	vehicle_local_position_s local_event{};
 	vehicle_local_position_s local_pos{};
 
-	const bool attitude_event = _sub_vehicle_attitude_setpoint_event.update(&att_sp_event);
 	const bool attitude_state_event = _sub_vehicle_attitude_event.update(&attitude_event_data);
 	const bool position_event = _sub_vehicle_local_position_event.update(&local_event);
 
-	// Prefer vehicle_attitude_setpoint as the timing source. If it is not
-	// published in the current flight-mode configuration, use local position
-	// as a fallback so the controller cannot stop producing actuator commands.
-	if ((attitude_event || attitude_state_event || position_event) &&
+	// Drive every mode from measured attitude. External attitude and rate
+	// setpoints are sampled only inside control_step_offboard(), so they cannot
+	// affect the timing of Manual/Altitude/Position/Hold control.
+	// Local position remains a fallback during estimator publication changes.
+	if ((attitude_state_event || position_event) &&
 	    _sub_vehicle_local_position.copy(&local_pos)) {
 		const hrt_abstime now = hrt_absolute_time();
 
@@ -1270,11 +1307,9 @@ void GeoControl::Run()
 			_last_run = now;
 		}
 
-		// vehicle_attitude_setpoint is the wake-up source. The parameter limits
-		// execution to a lower rate when required; the actual rate cannot exceed
-		// the attitude-setpoint publication rate.
-		// The timestamp is deliberately checked after fetching the newest sample
-		// so the next callback always starts from fresh state data.
+		// Measured attitude is the primary wake-up source. The parameter can limit
+		// execution to a lower rate; the actual rate cannot exceed the estimator's
+		// vehicle_attitude publication rate.
 		const float rate_hz = math::constrain(_param_gc_rate_hz.get(), 10.f, 400.f);
 		const hrt_abstime period_us = static_cast<hrt_abstime>(1e6f / rate_hz);
 
