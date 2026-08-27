@@ -318,7 +318,14 @@ PARAM_DEFINE_FLOAT(GC_ROLL_RATE_I, 0.10);
 PARAM_DEFINE_FLOAT(GC_PITCH_RATE_I, 0.10);
 PARAM_DEFINE_FLOAT(GC_YAW_RATE_I, 0.10);
 
-/** Time for a morphing servo to rotate 60 degrees, used for rate compensation. */
+/**
+ * Morphing servo 60 degree movement time
+ *
+ * @unit s
+ * @min 0.01
+ * @max 5.0
+ * @group Geometric Controller
+ */
 PARAM_DEFINE_FLOAT(GC_SERVO_60_TIME, 0.20);
 
 /**
