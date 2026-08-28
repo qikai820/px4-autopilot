@@ -46,16 +46,6 @@
 PARAM_DEFINE_FLOAT(GC_MASS, 4.56);
 
 /**
- * Calibrated normalized collective thrust required to hover
- *
- * @unit norm
- * @min 0.05
- * @max 0.95
- * @group Geometric Controller
- */
-PARAM_DEFINE_FLOAT(GC_HOVER_THR, 0.35);
-
-/**
  * Geometric Controller maximum execution rate
  *
  * @unit Hz

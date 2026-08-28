@@ -135,6 +135,32 @@ void GeoAttControl::Run()
 	const Quatf q(attitude.q);
 	const Dcmf R(q);
 	const Vector3f omega(angular_velocity.xyz[0], angular_velocity.xyz[1], angular_velocity.xyz[2]);
+
+	// 使用控制分配后的四个电机实际归一化输出判断当前油门水平。
+	// actuator_motors.control[0..3] 范围通常为 0~1；消息失效时按零油门处理，
+	// 防止通信或启动阶段误开启航向控制。
+	actuator_motors_s actuator_motors{};
+	float average_motor_throttle = 0.f;
+	int valid_motor_count = 0;
+	if (_actuator_motors_sub.copy(&actuator_motors)
+	    && hrt_elapsed_time(&actuator_motors.timestamp) < 200_ms) {
+		for (int i = 0; i < 4; ++i) {
+			if (PX4_ISFINITE(actuator_motors.control[i])) {
+				average_motor_throttle += math::constrain(actuator_motors.control[i], 0.f, 1.f);
+				++valid_motor_count;
+			}
+		}
+	}
+	if (valid_motor_count > 0) {
+		average_motor_throttle /= valid_motor_count;
+	}
+	const float yaw_throttle_threshold = math::constrain(_p_yaw_throttle_min.get(), 0.f, 1.f);
+	const bool yaw_control_enabled = !_landed && average_motor_throttle >= yaw_throttle_threshold;
+	if (!yaw_control_enabled) {
+		// 禁止航向控制期间持续清除 yaw 积分，避免超过阈值恢复控制时出现力矩突跳。
+		_rate_integral(2) = 0.f;
+		_attitude_integral(2) = 0.f;
+	}
 	Vector3f rates_reference{};
 	if (rates_valid) { rates_reference = Vector3f(rates_sp.roll, rates_sp.pitch, rates_sp.yaw); }
 
@@ -171,9 +197,23 @@ void GeoAttControl::Run()
 		torque = computeTorque(R, R_sp, omega, omega_sp_body, dt);
 	}
 
-	// 飞机未离地时不控制航向，避免解锁、起飞建立阶段的残留或外部
-	// yaw 期望产生航向力矩，导致机体在地面旋转。
-	if (_landed) {
+	// 对实际姿态再做一次单向力矩保护。仅限制把飞机继续推向边界外的
+	// 力矩，向内的力矩仍保留用于刹车和回中；这样即使存在角速度惯性，
+	// 控制器也不会在已经达到 pitch/roll 限制后继续施加外向力矩。
+	if (!rate_only) {
+		if ((current_euler.phi() >= roll_limit && torque(0) > 0.f)
+		    || (current_euler.phi() <= -roll_limit && torque(0) < 0.f)) {
+			torque(0) = 0.f;
+		}
+		if ((current_euler.theta() >= pitch_limit && torque(1) > 0.f)
+		    || (current_euler.theta() <= -pitch_limit && torque(1) < 0.f)) {
+			torque(1) = 0.f;
+		}
+	}
+
+	// 飞机未离地或平均电机油门低于 GAC_YAW_THR_MIN 时不控制航向，
+	// 避免地面阶段舵机因 yaw 误差和陀螺噪声来回动作。
+	if (!yaw_control_enabled) {
 		torque(2) = 0.f;
 	}
 

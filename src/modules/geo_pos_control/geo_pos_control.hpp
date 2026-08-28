@@ -77,13 +77,19 @@ private:
 	bool _reference_initialized{false};
 	bool _landed{true};
 	bool _armed{false};
+	bool _level_hold_active{false};
+	bool _hold_active{false};
 	uint8_t _last_nav_state{vehicle_status_s::NAVIGATION_STATE_MAX};
 	hrt_abstime _last_run{0};
 
 	DEFINE_PARAMETERS(
 		(ParamFloat<px4::params::GPC_RATE_HZ>) _p_rate_hz,
 		(ParamFloat<px4::params::GPC_MASS>) _p_mass,
-		(ParamFloat<px4::params::GPC_HOV_THR>) _p_hover_thrust,
+		// 与 PX4 多旋翼位置控制和着陆检测共用同一个悬停油门参数。
+		(ParamFloat<px4::params::MPC_THR_HOVER>) _p_hover_thrust,
+		// 直接复用 PX4 原生多旋翼的推力输出上下限。
+		(ParamFloat<px4::params::MPC_THR_MIN>) _p_mpc_thr_min,
+		(ParamFloat<px4::params::MPC_THR_MAX>) _p_mpc_thr_max,
 		(ParamFloat<px4::params::GPC_THR_MAX>) _p_thrust_max,
 		(ParamFloat<px4::params::GPC_XY_P>) _p_xy_p,
 		(ParamFloat<px4::params::GPC_Z_P>) _p_z_p,

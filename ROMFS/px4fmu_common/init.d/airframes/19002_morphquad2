@@ -39,8 +39,9 @@ param set-default CA_MQ_MMAX 1.0
 param set-default CA_MQ_SMAX 180.0
 
 # --- Vehicle mass and measured body-axis inertia ---
+# 几何控制器与 PX4 原生多旋翼着陆检测共用悬停油门。
+param set-default MPC_THR_HOVER 0.351
 param set-default GC_MASS 6.8
-param set-default GC_HOVER_THR 0.351
 param set-default GC_Z_VEL_P 2.0
 param set-default GC_INERTIA_XX 0.182
 param set-default GC_INERTIA_YY 0.260
@@ -59,7 +60,6 @@ param set-default GC_PITCH_MAX 20.0
 # --- Split geometric position/force controller ---
 param set-default GPC_RATE_HZ 50.0
 param set-default GPC_MASS 6.8
-param set-default GPC_HOV_THR 0.351
 param set-default GPC_THR_MAX 189.836
 param set-default GPC_Z_VP 2.0
 param set-default GPC_VX_MAX 2.0
@@ -75,6 +75,7 @@ param set-default GPC_PITCH_MAX 20.0
 param set-default GAC_RATE_HZ 400.0
 param set-default GAC_ROLL_MAX 20.0
 param set-default GAC_PITCH_MAX 20.0
+param set-default GAC_YAW_THR_MIN 0.15
 param set-default GAC_IXX 0.182
 param set-default GAC_IYY 0.260
 param set-default GAC_IZZ 0.384

@@ -37,7 +37,7 @@ param set-default CA_MQ_MMAX 1.0
 param set-default CA_MQ_SMAX 180.0
 param set-default GC_THRUST_MAX 189.836
 param set-default GC_MASS 6.8
-param set-default GC_HOVER_THR 0.351
+param set-default MPC_THR_HOVER 0.351
 param set-default GC_Z_VEL_P 2.0
 param set-default GC_INERTIA_XX 0.182
 param set-default GC_INERTIA_YY 0.260

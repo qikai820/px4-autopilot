@@ -7,6 +7,7 @@
 #include <uORB/Subscription.hpp>
 #include <uORB/SubscriptionCallback.hpp>
 #include <uORB/topics/control_allocator_status.h>
+#include <uORB/topics/actuator_motors.h>
 #include <uORB/topics/geo_control_attitude_setpoint.h>
 #include <uORB/topics/offboard_control_mode.h>
 #include <uORB/topics/parameter_update.h>
@@ -55,6 +56,7 @@ private:
 	uORB::Subscription _status_sub{ORB_ID(vehicle_status)};
 	uORB::Subscription _land_sub{ORB_ID(vehicle_land_detected)};
 	uORB::Subscription _allocator_status_sub{ORB_ID(control_allocator_status)};
+	uORB::Subscription _actuator_motors_sub{ORB_ID(actuator_motors)};
 	uORB::SubscriptionInterval _parameter_update_sub{ORB_ID(parameter_update), 1_s};
 
 	uORB::Publication<vehicle_torque_setpoint_s> _torque_pub{ORB_ID(vehicle_torque_setpoint)};
@@ -88,6 +90,7 @@ private:
 		(ParamFloat<px4::params::GAC_INT_LIM>) _p_integral_limit,
 		(ParamFloat<px4::params::GAC_ROLL_MAX>) _p_roll_max,
 		(ParamFloat<px4::params::GAC_PITCH_MAX>) _p_pitch_max,
+		(ParamFloat<px4::params::GAC_YAW_THR_MIN>) _p_yaw_throttle_min,
 		(ParamFloat<px4::params::GAC_IXX>) _p_ixx,
 		(ParamFloat<px4::params::GAC_IYY>) _p_iyy,
 		(ParamFloat<px4::params::GAC_IZZ>) _p_izz

@@ -231,10 +231,11 @@ private:
 	void resetIntegrators();
 
 	// uORB 订阅
-	// Drive the controller from measured attitude in every mode. Offboard
-	// setpoints remain regular subscriptions and are sampled only in Offboard.
-	uORB::SubscriptionCallbackWorkItem _sub_vehicle_attitude_event{this, ORB_ID(vehicle_attitude)};
-	// Fallback during estimator attitude publication transitions.
+	// Drive the controller from measured angular velocity. This is the highest
+	// rate state signal available to the controller; attitude and position are
+	// copied as the latest values at each tick.
+	uORB::SubscriptionCallbackWorkItem _sub_vehicle_angular_velocity_event{this, ORB_ID(vehicle_angular_velocity)};
+	// Fallback during estimator publication transitions.
 	uORB::SubscriptionCallbackWorkItem _sub_vehicle_local_position_event{this, ORB_ID(vehicle_local_position)};
 	// Position remains a regular subscription and is copied at each control tick.
 	uORB::Subscription _sub_vehicle_local_position{ORB_ID(vehicle_local_position)};
@@ -262,7 +263,10 @@ private:
 	// 参数 (GC_ 前缀)
 	DEFINE_PARAMETERS(
 		(ParamFloat<px4::params::GC_MASS>) _param_gc_mass,
-		(ParamFloat<px4::params::GC_HOVER_THR>) _param_gc_hover_thr,
+		// 与 PX4 原生多旋翼控制器和着陆检测共用悬停油门。
+		(ParamFloat<px4::params::MPC_THR_HOVER>) _param_gc_hover_thr,
+		(ParamFloat<px4::params::MPC_THR_MIN>) _param_mpc_thr_min,
+		(ParamFloat<px4::params::MPC_THR_MAX>) _param_mpc_thr_max,
 		(ParamFloat<px4::params::GC_RATE_HZ>) _param_gc_rate_hz,
 		(ParamFloat<px4::params::GC_XY_P>) _param_gc_xy_p,
 		(ParamFloat<px4::params::GC_XY_VEL_P>) _param_gc_xy_vel_p,

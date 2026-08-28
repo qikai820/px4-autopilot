@@ -58,7 +58,7 @@ GeoControl::GeoControl() :
 
 bool GeoControl::init()
 {
-	if (!_sub_vehicle_attitude_event.registerCallback() ||
+	if (!_sub_vehicle_angular_velocity_event.registerCallback() ||
 	    !_sub_vehicle_local_position_event.registerCallback()) {
 		PX4_ERR("callback registration failed");
 		return false;
@@ -165,9 +165,13 @@ void GeoControl::publish_wrench(const Vector3f &f_des_body, const Vector3f &tau_
 	vehicle_thrust_setpoint_s thrust_msg{};
 	thrust_msg.timestamp = now;
 	thrust_msg.timestamp_sample = timestamp_sample;
-	thrust_msg.xyz[0] = f_des_body(0);
-	thrust_msg.xyz[1] = f_des_body(1);
-	thrust_msg.xyz[2] = f_des_body(2);
+	// PX4 标准 vehicle_thrust_setpoint 使用归一化推力。旧几何控制器内部仍
+	// 使用 N，MorphQuad 控制分配器收到消息后会恢复为物理力。
+	const float thrust_max = math::max(_param_gc_thrust_max.get(), 1.f);
+	const float max_collective = math::constrain(_param_mpc_thr_max.get(), 0.f, 1.f);
+	thrust_msg.xyz[0] = math::constrain(f_des_body(0) / thrust_max, -max_collective, max_collective);
+	thrust_msg.xyz[1] = math::constrain(f_des_body(1) / thrust_max, -max_collective, max_collective);
+	thrust_msg.xyz[2] = math::constrain(f_des_body(2) / thrust_max, -max_collective, max_collective);
 	_thrust_pub.publish(thrust_msg);
 
 	vehicle_torque_setpoint_s torque_msg{};
@@ -425,8 +429,10 @@ void GeoControl::control_step_manual(const Quatf &R_q, const Vector3f &omega,
 		fx_body = math::deadzone(manual_sp.pitch, dz) * fmax;
 		fy_body = math::deadzone(manual_sp.roll, dz) * fmax;
 		const float throttle = math::constrain((manual_sp.throttle + 1.f) * 0.5f, 0.f, 1.f);
+		const float min_collective = math::constrain(_param_mpc_thr_min.get(), 0.f, 1.f);
+		const float max_collective = math::constrain(_param_mpc_thr_max.get(), min_collective, 1.f);
 		const float thrust_max = math::max(_param_gc_thrust_max.get(), 0.f);
-		fz_body = -thrust_max * throttle * throttle;
+		fz_body = -thrust_max * (min_collective + (max_collective - min_collective) * throttle * throttle);
 
 		if (level_hold) {
 			// Ignore attitude and horizontal-force sticks while level hold is
@@ -1288,7 +1294,7 @@ void GeoControl::control_step(const vehicle_local_position_s &local_pos)
 void GeoControl::Run()
 {
 	if (should_exit()) {
-		_sub_vehicle_attitude_event.unregisterCallback();
+		_sub_vehicle_angular_velocity_event.unregisterCallback();
 		_sub_vehicle_local_position_event.unregisterCallback();
 		exit_and_cleanup();
 		return;
@@ -1298,18 +1304,19 @@ void GeoControl::Run()
 
 	parameters_update();
 
-	vehicle_attitude_s attitude_event_data{};
+	vehicle_angular_velocity_s angular_velocity_event_data{};
 	vehicle_local_position_s local_event{};
 	vehicle_local_position_s local_pos{};
 
-	const bool attitude_state_event = _sub_vehicle_attitude_event.update(&attitude_event_data);
+	const bool angular_velocity_state_event =
+		_sub_vehicle_angular_velocity_event.update(&angular_velocity_event_data);
 	const bool position_event = _sub_vehicle_local_position_event.update(&local_event);
 
-	// Drive every mode from measured attitude. External attitude and rate
+	// Drive every mode from measured angular velocity. External attitude and rate
 	// setpoints are sampled only inside control_step_offboard(), so they cannot
 	// affect the timing of Manual/Altitude/Position/Hold control.
 	// Local position remains a fallback during estimator publication changes.
-	if ((attitude_state_event || position_event) &&
+	if ((angular_velocity_state_event || position_event) &&
 	    _sub_vehicle_local_position.copy(&local_pos)) {
 		const hrt_abstime now = hrt_absolute_time();
 
@@ -1317,9 +1324,9 @@ void GeoControl::Run()
 			_last_run = now;
 		}
 
-		// Measured attitude is the primary wake-up source. The parameter can limit
-		// execution to a lower rate; the actual rate cannot exceed the estimator's
-		// vehicle_attitude publication rate.
+		// Measured angular velocity is the primary wake-up source. The parameter
+		// can limit execution to a lower rate; the actual rate cannot exceed the
+		// vehicle_angular_velocity publication rate.
 		const float rate_hz = math::constrain(_param_gc_rate_hz.get(), 10.f, 400.f);
 		const hrt_abstime period_us = static_cast<hrt_abstime>(1e6f / rate_hz);
 

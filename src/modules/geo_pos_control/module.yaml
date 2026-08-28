@@ -4,7 +4,6 @@ parameters:
     definitions:
       GPC_RATE_HZ: {description: {short: Position and force loop rate}, type: float, unit: Hz, min: 10, max: 100, default: 50.0}
       GPC_MASS: {description: {short: Vehicle mass}, type: float, unit: kg, min: 0.1, max: 50.0, default: 6.8}
-      GPC_HOV_THR: {description: {short: Normalized hover thrust}, type: float, min: 0.05, max: 0.95, default: 0.351}
       GPC_THR_MAX: {description: {short: Maximum total physical thrust}, type: float, unit: N, min: 1.0, max: 1000.0, default: 189.836}
       GPC_XY_P: {description: {short: Horizontal position proportional gain}, type: float, default: 1.0}
       GPC_Z_P: {description: {short: Vertical position proportional gain}, type: float, default: 2.5}

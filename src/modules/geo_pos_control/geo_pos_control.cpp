@@ -89,7 +89,9 @@ Vector3f GeoPosControl::positionForce(const Vector3f &pos, const Vector3f &vel,
 	// 这样即使质量参数存在小误差，也不会直接改变垂向速度环的增益。
 	const float mass = math::max(_p_mass.get(), 0.1f);
 	const float thrust_max = math::max(_p_thrust_max.get(), 1.f);
-	const float hover_force = math::constrain(_p_hover_thrust.get(), 0.05f, 0.95f) * thrust_max;
+	const float min_thrust = math::constrain(_p_mpc_thr_min.get(), 0.f, 1.f);
+	const float max_thrust = math::constrain(_p_mpc_thr_max.get(), min_thrust, 1.f);
+	const float hover_force = math::constrain(_p_hover_thrust.get(), min_thrust, max_thrust) * thrust_max;
 	Vector3f force_world(mass * acceleration_sp(0), mass * acceleration_sp(1),
 			     hover_force * (acceleration_sp(2) / 9.81f - 1.f));
 	return force_world;
@@ -103,7 +105,22 @@ void GeoPosControl::publishSetpoints(const Vector3f &force_body, const Vector3f 
 	vehicle_thrust_setpoint_s thrust{};
 	thrust.timestamp = now;
 	thrust.timestamp_sample = timestamp_sample;
-	for (int i = 0; i < 3; ++i) { thrust.xyz[i] = force_body(i); }
+
+	// vehicle_thrust_setpoint 是 PX4 系统级的归一化推力接口，着陆检测会直接
+	// 用 -xyz[2] 与 MPC_THR_HOVER/MPC_THR_MIN 比较。几何控制器内部仍以 N
+	// 计算，发布前除以总最大推力；MorphQuad 分配器入口再恢复为物理力。
+	const float thrust_max = math::max(_p_thrust_max.get(), 1.f);
+	const float min_collective = math::constrain(_p_mpc_thr_min.get(), 0.f, 1.f);
+	const float max_collective = math::constrain(_p_mpc_thr_max.get(), min_collective, 1.f);
+	for (int i = 0; i < 3; ++i) {
+		thrust.xyz[i] = math::constrain(force_body(i) / thrust_max, -max_collective, max_collective);
+	}
+
+	// 原生多旋翼位置控制在已解锁时总会保持 MPC_THR_MIN 以上的向上
+	// 集体推力。采用同一规则，才能使起飞和着陆检测使用同一个尺度。
+	if (_armed) {
+		thrust.xyz[2] = -math::constrain(-thrust.xyz[2], min_collective, max_collective);
+	}
 	_thrust_pub.publish(thrust);
 
 	if (publish_attitude_rates) {
@@ -186,7 +203,8 @@ void GeoPosControl::Run()
 
 	_last_nav_state = status.nav_state;
 	manual_control_setpoint_s manual{};
-	const bool manual_valid = _manual_sub.copy(&manual) && manual.valid
+	const bool hold_mode = status.nav_state == vehicle_status_s::NAVIGATION_STATE_AUTO_LOITER;
+	const bool manual_valid = !hold_mode && _manual_sub.copy(&manual) && manual.valid
 				  && hrt_elapsed_time(&manual.timestamp) < 500_ms;
 	const float dz = math::constrain(_p_manual_deadzone.get(), 0.f, 0.5f);
 	Vector3f rates_sp{};
@@ -194,15 +212,30 @@ void GeoPosControl::Run()
 	Vector3f acceleration_sp{};
 	Vector3f force_body{};
 	bool publish_attitude_rates = status.nav_state != vehicle_status_s::NAVIGATION_STATE_OFFBOARD;
+	const bool level_hold_requested = manual_valid && manual.aux3 > 0.5f;
+
+	// AUX3 触发水平保持：只在开关沿触发时重置滚转/俯仰，航向保持当前值。
+	// 这样不会因为每个控制周期重复构造四元数而产生跳变。
+	if (level_hold_requested != _level_hold_active) {
+		if (level_hold_requested) {
+			_attitude_reference = Quatf(Eulerf(0.f, 0.f, Eulerf(q).psi()));
+			_attitude_reference.normalize();
+		}
+		_level_hold_active = level_hold_requested;
+	}
+
+	// AUTO_LOITER 是无摇杆的定点保持模式。进入时 resetState() 已将位置参考
+	// 置为当前位置，因此这里必须屏蔽全部摇杆输入，不能沿用 POSCTL 逻辑。
+	if (hold_mode && !_hold_active) {
+		_attitude_reference = Quatf(Eulerf(0.f, 0.f, Eulerf(q).psi()));
+		_attitude_reference.normalize();
+		_level_hold_active = false;
+	}
+	_hold_active = hold_mode;
 
 	if (!_armed) {
 		publishSetpoints(force_body, velocity_sp, acceleration_sp, rates_sp, local.timestamp_sample, true);
 		return;
-	}
-
-	if (manual_valid) {
-		rates_sp = Vector3f(math::deadzone(manual.roll, dz), -math::deadzone(manual.pitch, dz),
-				    _landed ? 0.f : math::deadzone(manual.yaw, dz)) * _p_manual_rate_max.get();
 	}
 
 	const bool rate_only = status.nav_state == vehicle_status_s::NAVIGATION_STATE_ACRO;
@@ -210,19 +243,55 @@ void GeoPosControl::Run()
 				   || status.nav_state == vehicle_status_s::NAVIGATION_STATE_AUTO_LOITER;
 	const bool altitude_mode = status.nav_state == vehicle_status_s::NAVIGATION_STATE_ALTCTL;
 
-	if (!rate_only) {
-		const float rate_norm = rates_sp.norm();
-		if (rate_norm > 1e-6f) {
-			const float angle = rate_norm * dt;
-			const Vector3f axis = rates_sp / rate_norm;
-			const float half_angle = angle * 0.5f;
-			const float sine = sinf(half_angle);
-			_attitude_reference = _attitude_reference
-					      * Quatf(cosf(half_angle), axis(0) * sine, axis(1) * sine, axis(2) * sine);
-			_attitude_reference.normalize();
+	// 保持重构前的遥控器映射：
+	//   Position：roll/pitch 控制姿态，AUX1/AUX2 控制水平速度；
+	//   Manual/Altitude/Acro：AUX1/AUX2 控制姿态角速度，roll/pitch 控制水平力。
+	// yaw 和 throttle 在所有模式中仍使用原来的通道。
+	if (manual_valid) {
+		if (position_mode) {
+			rates_sp = Vector3f(math::deadzone(manual.roll, dz),
+					    -math::deadzone(manual.pitch, dz),
+					    _landed ? 0.f : math::deadzone(manual.yaw, dz)) * _p_manual_rate_max.get();
+
+		} else {
+			rates_sp = Vector3f(math::deadzone(manual.aux1, dz),
+					    math::deadzone(manual.aux2, dz),
+					    _landed ? 0.f : math::deadzone(manual.yaw, dz)) * _p_manual_rate_max.get();
 		}
 
-		limitAttitudeReference();
+		if (level_hold_requested) {
+			// 水平保持时忽略姿态摇杆，油门和水平速度/力仍按模式处理。
+			rates_sp(0) = 0.f;
+			rates_sp(1) = 0.f;
+		}
+	}
+
+	if (!rate_only) {
+		// 手动姿态参考采用独立的 Euler 轴积分。用一个合成旋转轴更新
+		// 四元数时，已有的 pitch 会把 pitch 角速度投影到 roll，导致两个
+		// 摇杆相互影响；独立积分可以保证每个轴严格受自己的角度限制。
+		Eulerf euler_ref(_attitude_reference);
+		const float roll_limit = math::radians(math::constrain(_p_roll_max.get(), 1.f, 85.f));
+		const float pitch_limit = math::radians(math::constrain(_p_pitch_max.get(), 1.f, 85.f));
+		float roll_rate = rates_sp(0);
+		float pitch_rate = rates_sp(1);
+
+		// 到达边界后只阻止继续向外运动，允许反向摇杆立即脱离边界。
+		if ((euler_ref.phi() >= roll_limit && roll_rate > 0.f)
+		    || (euler_ref.phi() <= -roll_limit && roll_rate < 0.f)) {
+			roll_rate = 0.f;
+		}
+		if ((euler_ref.theta() >= pitch_limit && pitch_rate > 0.f)
+		    || (euler_ref.theta() <= -pitch_limit && pitch_rate < 0.f)) {
+			pitch_rate = 0.f;
+		}
+
+		const float roll = math::constrain(euler_ref.phi() + roll_rate * dt,
+						   -roll_limit, roll_limit);
+		const float pitch = math::constrain(euler_ref.theta() + pitch_rate * dt,
+						    -pitch_limit, pitch_limit);
+		_attitude_reference = Quatf(Eulerf(roll, pitch, euler_ref.psi() + rates_sp(2) * dt));
+		_attitude_reference.normalize();
 	}
 
 	if (position_mode) {
@@ -245,7 +314,7 @@ void GeoPosControl::Run()
 		_position_reference(1) = pos(1);
 		const Vector3f force_world = positionForce(pos, vel, velocity_sp, dt);
 		force_body = R.transpose() * Vector3f(0.f, 0.f, force_world(2));
-		if (manual_valid) {
+		if (manual_valid && !level_hold_requested) {
 			force_body(0) += math::deadzone(manual.pitch, dz) * _p_manual_force_max.get();
 			force_body(1) += math::deadzone(manual.roll, dz) * _p_manual_force_max.get();
 		}
@@ -274,10 +343,14 @@ void GeoPosControl::Run()
 
 	} else {
 		const float throttle = manual_valid ? math::constrain((manual.throttle + 1.f) * 0.5f, 0.f, 1.f) : 0.f;
-		const float fz = -_p_thrust_max.get() * throttle * throttle;
+		const float min_collective = math::constrain(_p_mpc_thr_min.get(), 0.f, 1.f);
+		const float max_collective = math::constrain(_p_mpc_thr_max.get(), min_collective, 1.f);
+		// 保留原来的平方油门曲线，但其最低/最高值与 PX4 多旋翼共用。
+		const float collective = min_collective + (max_collective - min_collective) * throttle * throttle;
+		const float fz = -_p_thrust_max.get() * collective;
 		force_body = R.transpose() * Vector3f(0.f, 0.f, fz);
 
-		if (manual_valid && !rate_only) {
+		if (manual_valid && !rate_only && !level_hold_requested) {
 			force_body(0) += math::deadzone(manual.pitch, dz) * _p_manual_force_max.get();
 			force_body(1) += math::deadzone(manual.roll, dz) * _p_manual_force_max.get();
 		}

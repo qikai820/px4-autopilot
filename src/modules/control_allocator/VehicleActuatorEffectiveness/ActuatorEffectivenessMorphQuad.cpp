@@ -138,9 +138,13 @@ void ActuatorEffectivenessMorphQuad::updateSetpoint(
 			      control_sp(ControlAxis::PITCH),
 			      control_sp(ControlAxis::YAW));
 
-	const Vector3f f_req(control_sp(ControlAxis::THRUST_X),
-			     control_sp(ControlAxis::THRUST_Y),
-			     control_sp(ControlAxis::THRUST_Z));
+	// vehicle_thrust_setpoint 遵循 PX4 标准，三个推力分量均以整机最大推力
+	// 归一化。MorphQuad 的非线性分配在物理单位中工作，因此在这里恢复 N。
+	const float tmax = math::max(_param_ca_mq_tmax.get(), 0.001f);
+	const float total_thrust_max = NUM_ROTORS * tmax;
+	const Vector3f f_req(control_sp(ControlAxis::THRUST_X) * total_thrust_max,
+			     control_sp(ControlAxis::THRUST_Y) * total_thrust_max,
+			     control_sp(ControlAxis::THRUST_Z) * total_thrust_max);
 
 	_motor_saturated = false;
 	_servo_saturated = false;
@@ -148,8 +152,6 @@ void ActuatorEffectivenessMorphQuad::updateSetpoint(
 
 	float t[NUM_ROTORS][3] {};
 	_allocation_saturated |= computeThrustVectors(f_req, tau_des, t);
-
-	const float tmax = math::max(_param_ca_mq_tmax.get(), 0.001f);
 
 	float omega_cmd[NUM_ROTORS] {};
 	float alpha_cmd[NUM_ROTORS] {};

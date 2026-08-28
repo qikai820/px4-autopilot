@@ -16,6 +16,7 @@ parameters:
       GAC_INT_LIM: {description: {short: Controller integral limit}, type: float, default: 0.3}
       GAC_ROLL_MAX: {description: {short: Hard roll angle limit}, type: float, unit: deg, min: 1, max: 85, default: 35.0}
       GAC_PITCH_MAX: {description: {short: Hard pitch angle limit}, type: float, unit: deg, min: 1, max: 85, default: 35.0}
+      GAC_YAW_THR_MIN: {description: {short: Minimum average motor throttle for yaw control}, type: float, min: 0.0, max: 1.0, default: 0.15}
       GAC_IXX: {description: {short: Roll moment of inertia}, type: float, unit: kg m^2, default: 0.182}
       GAC_IYY: {description: {short: Pitch moment of inertia}, type: float, unit: kg m^2, default: 0.260}
       GAC_IZZ: {description: {short: Yaw moment of inertia}, type: float, unit: kg m^2, default: 0.384}
