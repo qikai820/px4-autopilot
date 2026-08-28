@@ -20,6 +20,9 @@
 #
 
 . ${R}etc/init.d/rc.vector_defaults
+# MorphQuad uses the vector-thrust startup path: geometric controllers,
+# MorphQuad allocator, and multicopter land detector only.
+set VEHICLE_TYPE vector
 
 # --- Airframe type: MorphQuad (CA_AIRFRAME = 16) ---
 param set-default CA_AIRFRAME 16
@@ -41,22 +44,6 @@ param set-default CA_MQ_SMAX 180.0
 # --- Vehicle mass and measured body-axis inertia ---
 # 几何控制器与 PX4 原生多旋翼着陆检测共用悬停油门。
 param set-default MPC_THR_HOVER 0.351
-param set-default GC_MASS 6.8
-param set-default GC_Z_VEL_P 2.0
-param set-default GC_INERTIA_XX 0.182
-param set-default GC_INERTIA_YY 0.260
-param set-default GC_INERTIA_ZZ 0.384
-param set-default GC_THRUST_MAX 189.836
-param set-default GC_RATE_HZ 400.0
-param set-default GC_VX_MAX 2.0
-param set-default GC_VY_MAX 2.0
-param set-default GC_VZ_MAX 1.0
-param set-default GC_AX_MAX 2.0
-param set-default GC_AY_MAX 2.0
-param set-default GC_AZ_MAX 1.0
-param set-default GC_ROLL_MAX 20.0
-param set-default GC_PITCH_MAX 20.0
-
 # --- Split geometric position/force controller ---
 param set-default GPC_RATE_HZ 50.0
 param set-default GPC_MASS 6.8

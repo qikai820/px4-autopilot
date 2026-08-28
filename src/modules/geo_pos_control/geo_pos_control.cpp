@@ -41,7 +41,8 @@ void GeoPosControl::limitAttitudeReference()
 }
 
 Vector3f GeoPosControl::positionForce(const Vector3f &pos, const Vector3f &vel,
-				      const Vector3f &vel_stick, float dt)
+				      const Vector3f &vel_stick, float dt,
+				      Vector3f &acceleration_sp)
 {
 	// 位置环结构：位置误差经过 P 环生成速度期望，速度期望经过加速度
 	// 限幅后进入速度 P/I 环。积分器在地面清零，避免起飞时带着地面误差积分。
@@ -66,32 +67,50 @@ Vector3f GeoPosControl::positionForce(const Vector3f &pos, const Vector3f &vel,
 		_velocity_limited(i) += delta;
 	}
 
-	const Vector3f velocity_error = vel - _velocity_limited;
-	const float integral_limit = math::max(_p_vel_ilim.get(), 0.f);
-
-	if (!_landed) {
-		for (int i = 0; i < 3; ++i) {
-			_velocity_integral(i) = math::constrain(_velocity_integral(i)
-							 + _p_vel_i.get() * velocity_error(i) * dt,
-							 -integral_limit, integral_limit);
-		}
-	}
-
-	Vector3f acceleration_sp(-_p_xy_vel_p.get() * velocity_error(0) - _velocity_integral(0),
-				 -_p_xy_vel_p.get() * velocity_error(1) - _velocity_integral(1),
-				 -_p_z_vel_p.get() * velocity_error(2) - _velocity_integral(2));
-
-	for (int i = 0; i < 3; ++i) {
-		acceleration_sp(i) = math::constrain(acceleration_sp(i), -acceleration_limit(i), acceleration_limit(i));
-	}
-
 	// 水平力使用质量乘以期望加速度；垂向力使用标定悬停推力换算，
 	// 这样即使质量参数存在小误差，也不会直接改变垂向速度环的增益。
 	const float mass = math::max(_p_mass.get(), 0.1f);
 	const float thrust_max = math::max(_p_thrust_max.get(), 1.f);
 	const float min_thrust = math::constrain(_p_mpc_thr_min.get(), 0.f, 1.f);
 	const float max_thrust = math::constrain(_p_mpc_thr_max.get(), min_thrust, 1.f);
-	const float hover_force = math::constrain(_p_hover_thrust.get(), min_thrust, max_thrust) * thrust_max;
+	const float hover_ratio = math::constrain(_p_hover_thrust.get(), math::max(min_thrust, 0.01f), max_thrust);
+	const float hover_force = hover_ratio * thrust_max;
+
+	const Vector3f velocity_error = vel - _velocity_limited;
+	const float integral_limit = math::max(_p_vel_ilim.get(), 0.f);
+	const Vector3f velocity_gain(_p_xy_vel_p.get(), _p_xy_vel_p.get(), _p_z_vel_p.get());
+
+	// 垂向加速度除了受 GPC_AZ_MAX 限制，还受实际可用集体推力限制：
+	// collective = hover_ratio * (1 - az/g)。把该关系反解为 az 的
+	// 上下界后用于抗积分饱和，防止油门已经到顶/到底时积分仍继续累积。
+	Vector3f acceleration_min = -acceleration_limit;
+	Vector3f acceleration_max = acceleration_limit;
+	acceleration_min(2) = math::max(acceleration_min(2), 9.81f * (1.f - max_thrust / hover_ratio));
+	acceleration_max(2) = math::min(acceleration_max(2), 9.81f * (1.f - min_thrust / hover_ratio));
+
+	if (!_landed) {
+		for (int i = 0; i < 3; ++i) {
+			const float integral_delta = _p_vel_i.get() * velocity_error(i) * dt;
+			const float candidate_integral = math::constrain(_velocity_integral(i) + integral_delta,
+									-integral_limit, integral_limit);
+			const float candidate_acceleration = -velocity_gain(i) * velocity_error(i) - candidate_integral;
+
+			// 只禁止把输出进一步推向饱和方向；允许反向积分立即卸载已有积分。
+			const bool drives_high_saturation = candidate_acceleration > acceleration_max(i) && integral_delta < 0.f;
+			const bool drives_low_saturation = candidate_acceleration < acceleration_min(i) && integral_delta > 0.f;
+
+			if (!drives_high_saturation && !drives_low_saturation) {
+				_velocity_integral(i) = candidate_integral;
+			}
+		}
+	}
+
+	acceleration_sp = -velocity_gain.emult(velocity_error) - _velocity_integral;
+
+	for (int i = 0; i < 3; ++i) {
+		acceleration_sp(i) = math::constrain(acceleration_sp(i), acceleration_min(i), acceleration_max(i));
+	}
+
 	Vector3f force_world(mass * acceleration_sp(0), mass * acceleration_sp(1),
 			     hover_force * (acceleration_sp(2) / 9.81f - 1.f));
 	return force_world;
@@ -201,6 +220,15 @@ void GeoPosControl::Run()
 		resetState(q, pos, vel);
 	}
 
+	// 飞机仍在地面时不能保留速度积分和旧的位置参考，否则在已解锁等待、
+	// 降落检测抖动或再次起飞时会把地面阶段累积的状态突然带入控制。
+	// 每周期跟随当前位置，也能保证离地瞬间从当前状态平滑接管。
+	if (_landed) {
+		_position_reference = pos;
+		_velocity_limited = vel;
+		_velocity_integral.zero();
+	}
+
 	_last_nav_state = status.nav_state;
 	manual_control_setpoint_s manual{};
 	const bool hold_mode = status.nav_state == vehicle_status_s::NAVIGATION_STATE_AUTO_LOITER;
@@ -303,7 +331,7 @@ void GeoPosControl::Run()
 		const float vz = manual_valid ? -math::deadzone(manual.throttle, dz) * _p_vz_max.get() : 0.f;
 		velocity_sp = Vector3f(cosf(yaw) * vx_body - sinf(yaw) * vy_body,
 				       sinf(yaw) * vx_body + cosf(yaw) * vy_body, vz);
-		const Vector3f force_world = positionForce(pos, vel, velocity_sp, dt);
+		const Vector3f force_world = positionForce(pos, vel, velocity_sp, dt, acceleration_sp);
 		force_body = R.transpose() * force_world;
 
 	} else if (altitude_mode) {
@@ -312,7 +340,7 @@ void GeoPosControl::Run()
 		velocity_sp(2) = manual_valid ? -math::deadzone(manual.throttle, dz) * _p_vz_max.get() : 0.f;
 		_position_reference(0) = pos(0);
 		_position_reference(1) = pos(1);
-		const Vector3f force_world = positionForce(pos, vel, velocity_sp, dt);
+		const Vector3f force_world = positionForce(pos, vel, velocity_sp, dt, acceleration_sp);
 		force_body = R.transpose() * Vector3f(0.f, 0.f, force_world(2));
 		if (manual_valid && !level_hold_requested) {
 			force_body(0) += math::deadzone(manual.pitch, dz) * _p_manual_force_max.get();
@@ -339,7 +367,7 @@ void GeoPosControl::Run()
 			_attitude_reference.normalize();
 			rates_sp(2) = PX4_ISFINITE(trajectory.yawspeed) ? trajectory.yawspeed : 0.f;
 		}
-		force_body = R.transpose() * positionForce(pos, vel, velocity_sp, dt);
+		force_body = R.transpose() * positionForce(pos, vel, velocity_sp, dt, acceleration_sp);
 
 	} else {
 		const float throttle = manual_valid ? math::constrain((manual.throttle + 1.f) * 0.5f, 0.f, 1.f) : 0.f;

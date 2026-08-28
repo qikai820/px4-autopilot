@@ -51,7 +51,8 @@ private:
 			      uint64_t timestamp_sample, bool publish_attitude_rates);
 	// 根据位置/速度误差计算世界 NED 坐标系期望力，单位为 N。
 	matrix::Vector3f positionForce(const matrix::Vector3f &pos, const matrix::Vector3f &vel,
-				       const matrix::Vector3f &vel_stick, float dt);
+				       const matrix::Vector3f &vel_stick, float dt,
+				       matrix::Vector3f &acceleration_sp);
 	void limitAttitudeReference();
 
 	uORB::SubscriptionCallbackWorkItem _local_position_event{this, ORB_ID(vehicle_local_position)};

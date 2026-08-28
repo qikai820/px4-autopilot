@@ -111,7 +111,9 @@ if(CONFIG_MODULES_VTOL_ATT_CONTROL)
 	)
 endif()
 
-if(CONFIG_MODULES_GEO_CONTROL)
+# The vector-thrust startup scripts are also required by the split geometric
+# controllers. Keep them in ROMFS when the legacy geo_control is disabled.
+if(CONFIG_MODULES_GEO_CONTROL OR (CONFIG_MODULES_GEO_POS_CONTROL AND CONFIG_MODULES_GEO_ATT_CONTROL))
 	px4_add_romfs_files(
 		rc.vector_apps
 		rc.vector_defaults

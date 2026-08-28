@@ -20,6 +20,9 @@
 #
 
 . ${R}etc/init.d/rc.vector_defaults
+# MorphQuad uses the vector-thrust startup path: geometric controllers,
+# MorphQuad allocator, and multicopter land detector only.
+set VEHICLE_TYPE vector
 
 # --- Airframe type: MorphQuad (CA_AIRFRAME = 16) ---
 param set-default CA_AIRFRAME 16
@@ -27,21 +30,8 @@ param set-default CA_AIRFRAME 16
 # --- Control allocation method: Pseudo-inverse ---
 param set-default CA_METHOD 0
 
-# --- Enable geo_control module ---
-param set-default SYS_HAS_MC 1
-# 几何控制器与 PX4 原生多旋翼着陆检测共用悬停油门。
+# --- Shared hover-thrust parameter for the multicopter land detector ---
 param set-default MPC_THR_HOVER 0.35
-param set-default GC_Z_VEL_P 2.0
-
-# --- GeoControl manual Position-mode limits ---
-param set-default GC_VX_MAX 2.0
-param set-default GC_VY_MAX 2.0
-param set-default GC_VZ_MAX 1.0
-param set-default GC_AX_MAX 2.0
-param set-default GC_AY_MAX 2.0
-param set-default GC_AZ_MAX 1.0
-param set-default GC_ROLL_MAX 20.0
-param set-default GC_PITCH_MAX 20.0
 
 # --- Split geometric controller defaults ---
 param set-default GPC_RATE_HZ 50.0
