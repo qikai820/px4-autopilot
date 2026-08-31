@@ -245,6 +245,10 @@ void GeoControl::publish_setpoints(const Vector3f &f_des_world, const Vector3f &
 	attitude_sp_debug.rates[0] = omega_sp(0);
 	attitude_sp_debug.rates[1] = omega_sp(1);
 	attitude_sp_debug.rates[2] = omega_sp(2);
+	for (int i = 0; i < 3; ++i) {
+		attitude_sp_debug.attitude_integral[i] = _att_int(i);
+		attitude_sp_debug.rate_integral[i] = _rate_int(i);
+	}
 	_attitude_sp_debug_pub.publish(attitude_sp_debug);
 
 	// Mirror internal setpoints to standard PX4 topics only in modes that do not

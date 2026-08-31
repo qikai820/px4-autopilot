@@ -100,6 +100,7 @@ set(msg_files
 	GeofenceResult.msg
 	GeofenceStatus.msg
 	GeoControlAttitudeSetpoint.msg
+	GeoControlPositionAdaptive.msg
 	GimbalControls.msg
 	GimbalDeviceAttitudeStatus.msg
 	GimbalDeviceInformation.msg

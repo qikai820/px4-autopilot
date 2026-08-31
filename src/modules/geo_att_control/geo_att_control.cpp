@@ -27,6 +27,13 @@ void GeoAttControl::resetIntegrators()
 	_attitude_integral.zero();
 }
 
+void GeoAttControl::resetDisturbanceObserver()
+{
+	_torque_disturbance_estimate.zero();
+	_previous_torque_command.zero();
+	_previous_torque_valid = false;
+}
+
 Vector3f GeoAttControl::computeTorque(const Dcmf &R, const Dcmf &R_sp,
 				     const Vector3f &omega, const Vector3f &omega_sp_body, float dt)
 {
@@ -40,7 +47,9 @@ Vector3f GeoAttControl::computeTorque(const Dcmf &R, const Dcmf &R_sp,
 	const Vector3f rate_integral_gain(_p_roll_rate_i.get(), _p_pitch_rate_i.get(), _p_yaw_rate_i.get());
 	const float integral_limit = math::max(_p_integral_limit.get(), 0.f);
 
-	if (_armed && !_landed && dt > 0.f && dt <= 0.05f) {
+	// 闭环扰动补偿与传统积分器都用于消除稳态误差。二者同时工作会争抢
+	// 同一个慢变量，因此 GAC_DOB_MODE=2 时冻结并清除原有积分器。
+	if (_armed && !_landed && _p_dob_mode.get() != 2 && dt > 0.f && dt <= 0.05f) {
 		for (int i = 0; i < 3; ++i) {
 			const float rate_delta = -rate_integral_gain(i) * rate_error(i) * dt;
 			const bool blocked = (rate_delta > 0.f && _saturation_positive(i))
@@ -119,6 +128,23 @@ void GeoAttControl::Run()
 		resetIntegrators();
 	}
 
+	if (!_armed || _landed) {
+		resetDisturbanceObserver();
+
+	} else if (mode_changed || (rates_valid && rates_sp.reset_integral)) {
+		// 物理扰动不会因空中切换控制模式而消失，因此保留估计值；只丢弃
+		// 上一拍控制量，避免用模式切换前的指令解释切换后的角加速度。
+		_previous_torque_valid = false;
+	}
+
+	if (_p_dob_mode.get() == 2) {
+		resetIntegrators();
+	}
+
+	if (_p_dob_mode.get() == 0) {
+		resetDisturbanceObserver();
+	}
+
 	_last_nav_state = status.nav_state;
 	control_allocator_status_s allocator_status{};
 	if (_allocator_status_sub.update(&allocator_status)) {
@@ -192,9 +218,56 @@ void GeoAttControl::Run()
 		if (current_euler.theta() <= -pitch_limit && omega_sp_body(1) < 0.f) { omega_sp_body(1) = 0.f; }
 	}
 	Vector3f torque{};
+	Vector3f adaptive_torque{};
+	const Matrix3f inertia = matrix::diag(Vector3f(math::max(_p_ixx.get(), 0.001f),
+							 math::max(_p_iyy.get(), 0.001f),
+							 math::max(_p_izz.get(), 0.001f)));
 
 	if (_armed && rates_valid) {
 		torque = computeTorque(R, R_sp, omega, omega_sp_body, dt);
+
+		// 刚体转动动力学：J*omega_dot = tau_cmd + d_tau - omega×J*omega。
+		// 使用上一周期实际发布的力矩反解外部等效扰动力矩 d_tau，再经过
+		// 一阶低通滤波。只在稳定飞行且控制分配未饱和时学习，避免把机动、
+		// 执行器饱和和起飞瞬态误认为恒定扰动。
+		const Dcmf attitude_error_matrix = (R_sp.transpose() * R - R.transpose() * R_sp) * 0.5f;
+		const Vector3f attitude_error(attitude_error_matrix(2, 1), attitude_error_matrix(0, 2),
+					      attitude_error_matrix(1, 0));
+		const Vector3f measured_angular_acceleration(angular_velocity.xyz_derivative[0],
+							 angular_velocity.xyz_derivative[1],
+							 angular_velocity.xyz_derivative[2]);
+		const bool allocator_saturated = _saturation_positive(0) || _saturation_positive(1)
+						 || _saturation_positive(2) || _saturation_negative(0)
+						 || _saturation_negative(1) || _saturation_negative(2);
+		const float attitude_error_max = math::radians(math::constrain(_p_dob_attitude_max.get(), 0.5f, 20.f));
+		const float rate_max = math::constrain(_p_dob_rate_max.get(), 0.05f, 2.f);
+		const bool acceleration_valid = measured_angular_acceleration.isAllFinite();
+		const bool stable_for_learning = _p_dob_mode.get() > 0 && !_landed
+						 && average_motor_throttle >= yaw_throttle_threshold
+						 && !allocator_saturated && attitude_error.norm() < attitude_error_max
+						 && omega.norm() < rate_max && omega_sp_body.norm() < rate_max
+						 && acceleration_valid && dt > 0.f && dt <= 0.05f;
+
+		if (stable_for_learning && _previous_torque_valid) {
+			Vector3f disturbance_observation = inertia * measured_angular_acceleration
+							    + omega.cross(inertia * omega) - _previous_torque_command;
+			const float disturbance_limit = math::max(_p_dob_limit.get(), 0.f);
+
+			for (int i = 0; i < 3; ++i) {
+				disturbance_observation(i) = math::constrain(disturbance_observation(i),
+									     -disturbance_limit, disturbance_limit);
+			}
+
+			const float cutoff = math::constrain(_p_dob_cutoff.get(), 0.05f, 20.f);
+			const float alpha = 1.f - expf(-cutoff * dt);
+			_torque_disturbance_estimate += alpha
+							 * (disturbance_observation - _torque_disturbance_estimate);
+		}
+
+		if (_p_dob_mode.get() == 2) {
+			adaptive_torque = -_torque_disturbance_estimate;
+			torque += adaptive_torque;
+		}
 	}
 
 	// 对实际姿态再做一次单向力矩保护。仅限制把飞机继续推向边界外的
@@ -215,6 +288,7 @@ void GeoAttControl::Run()
 	// 避免地面阶段舵机因 yaw 误差和陀螺噪声来回动作。
 	if (!yaw_control_enabled) {
 		torque(2) = 0.f;
+		adaptive_torque(2) = 0.f;
 	}
 
 	vehicle_torque_setpoint_s torque_sp{};
@@ -222,10 +296,9 @@ void GeoAttControl::Run()
 	torque_sp.timestamp_sample = angular_velocity.timestamp_sample;
 	for (int i = 0; i < 3; ++i) { torque_sp.xyz[i] = torque(i); }
 	_torque_pub.publish(torque_sp);
+	_previous_torque_command = torque;
+	_previous_torque_valid = _armed && rates_valid;
 
-	const Matrix3f inertia = matrix::diag(Vector3f(math::max(_p_ixx.get(), 0.001f),
-							 math::max(_p_iyy.get(), 0.001f),
-							 math::max(_p_izz.get(), 0.001f)));
 	const Vector3f angular_acceleration = inertia.I() * (torque - omega.cross(inertia * omega));
 	vehicle_angular_acceleration_setpoint_s angular_acceleration_sp{};
 	angular_acceleration_sp.timestamp = now;
@@ -241,7 +314,13 @@ void GeoAttControl::Run()
 	debug.roll = euler.phi();
 	debug.pitch = euler.theta();
 	debug.yaw = euler.psi();
-	for (int i = 0; i < 3; ++i) { debug.rates[i] = rates_reference(i); }
+	for (int i = 0; i < 3; ++i) {
+		debug.rates[i] = rates_reference(i);
+		debug.attitude_integral[i] = _attitude_integral(i);
+		debug.rate_integral[i] = _rate_integral(i);
+		debug.disturbance_torque[i] = _torque_disturbance_estimate(i);
+		debug.adaptive_torque[i] = adaptive_torque(i);
+	}
 	_debug_pub.publish(debug);
 }
 

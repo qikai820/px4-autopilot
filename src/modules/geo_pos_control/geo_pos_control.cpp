@@ -27,7 +27,19 @@ void GeoPosControl::resetState(const Quatf &q, const Vector3f &pos, const Vector
 	_position_reference = pos;
 	_velocity_limited = vel;
 	_velocity_integral.zero();
+	_position_adaptive_velocity.zero();
+	_velocity_disturbance_acceleration.zero();
+	_previous_acceleration_command.zero();
+	_acceleration_observation.zero();
+	_velocity_adaptation_filter.reset(Vector3f{});
 	_reference_initialized = true;
+	_adaptive_previous_valid = false;
+	_adaptive_valid = false;
+	_previous_collective_valid = false;
+	_hover_thrust_learning = false;
+	_vertical_capture_active = false;
+	_vertical_capture_velocity = 0.f;
+	_vertical_capture_direction = 0.f;
 }
 
 void GeoPosControl::limitAttitudeReference()
@@ -40,8 +52,59 @@ void GeoPosControl::limitAttitudeReference()
 	_attitude_reference.normalize();
 }
 
+void GeoPosControl::updateVerticalCapture(bool mode_changed, bool vertical_control_enabled,
+					  const Vector3f &pos, const Vector3f &vel,
+					  float dt, float &vertical_velocity_command)
+{
+	const float command_deadzone = 0.05f;
+	const float stop_threshold = math::constrain(_p_vertical_capture_velocity_threshold.get(), 0.02f, 1.f);
+	const bool command_quiet = fabsf(vertical_velocity_command) < command_deadzone;
+
+	if (!vertical_control_enabled || !command_quiet || !_armed || _landed) {
+		_vertical_capture_active = false;
+		_vertical_capture_velocity = 0.f;
+		_vertical_capture_direction = 0.f;
+		return;
+	}
+
+	if (mode_changed && fabsf(vel(2)) > stop_threshold) {
+		_vertical_capture_active = true;
+		_vertical_capture_velocity = vel(2);
+		_vertical_capture_direction = vel(2) > 0.f ? 1.f : -1.f;
+	}
+
+	if (!_vertical_capture_active) {
+		return;
+	}
+
+	const float brake_acceleration = math::constrain(_p_vertical_capture_acceleration.get(), 0.1f, 10.f);
+	const float velocity_delta = math::constrain(-_vertical_capture_velocity,
+						     -brake_acceleration * dt, brake_acceleration * dt);
+	_vertical_capture_velocity += velocity_delta;
+	vertical_velocity_command = _vertical_capture_velocity;
+
+	// Latch the altitude where the vehicle actually stops.  Waiting for both
+	// the reference and measured velocity to become small avoids returning to
+	// the altitude captured at mode entry.  A velocity sign change means the
+	// brake has already crossed zero, so latch immediately before a descent can
+	// develop.
+	const bool velocity_crossed_zero = _vertical_capture_direction * vel(2) <= 0.f;
+	const bool stopped = fabsf(_vertical_capture_velocity) <= stop_threshold
+			     && fabsf(vel(2)) <= stop_threshold;
+
+	if (velocity_crossed_zero || stopped) {
+		_vertical_capture_active = false;
+		_vertical_capture_velocity = 0.f;
+		_vertical_capture_direction = 0.f;
+		vertical_velocity_command = 0.f;
+		_position_reference(2) = pos(2);
+		_velocity_limited(2) = 0.f;
+	}
+}
+
 Vector3f GeoPosControl::positionForce(const Vector3f &pos, const Vector3f &vel,
-				      const Vector3f &vel_stick, float dt,
+				      const Vector3f &vel_stick, const Vector3f &acceleration_measured,
+				      const Dcmf &attitude, float dt,
 				      Vector3f &acceleration_sp)
 {
 	// 位置环结构：位置误差经过 P 环生成速度期望，速度期望经过加速度
@@ -49,16 +112,43 @@ Vector3f GeoPosControl::positionForce(const Vector3f &pos, const Vector3f &vel,
 	const Vector3f velocity_limit(math::max(_p_vx_max.get(), 0.1f),
 				      math::max(_p_vy_max.get(), 0.1f),
 				      math::max(_p_vz_max.get(), 0.1f));
+	const float vertical_acceleration_limit = _vertical_capture_active
+						? math::max(_p_az_max.get(), _p_vertical_capture_acceleration.get())
+						: _p_az_max.get();
 	const Vector3f acceleration_limit(math::max(_p_ax_max.get(), 0.1f),
-					  math::max(_p_ay_max.get(), 0.1f),
-					  math::max(_p_az_max.get(), 0.1f));
+				      math::max(_p_ay_max.get(), 0.1f),
+				      math::max(vertical_acceleration_limit, 0.1f));
 
 	if (vel_stick.norm() > 0.05f) {
 		_position_reference += vel_stick * dt;
 	}
 
+	const Vector3f position_error = _position_reference - pos;
 	Vector3f velocity_sp = vel_stick + Vector3f(_p_xy_p.get(), _p_xy_p.get(), _p_z_p.get())
-				       .emult(_position_reference - pos);
+				       .emult(position_error);
+
+	const int32_t adaptive_mode = math::constrain(_p_adaptive_mode.get(), int32_t{0}, int32_t{2});
+	const float adaptive_position_limit = math::max(_p_adaptive_position_limit.get(), 0.f);
+	const float adaptive_position_i = math::max(_p_adaptive_position_i.get(), 0.f);
+	// Only learn while the requested velocity is quiet. During forward/backward
+	// acceleration the position error is intentional and must not be learned as
+	// a persistent disturbance.
+	const bool quiet_command = vel_stick.norm() < 0.05f && velocity_sp.norm() < 0.5f;
+	const bool adaptation_window = adaptive_mode > 0 && !_landed && _armed
+				       && quiet_command && dt > 0.f && dt <= 0.1f
+				       && position_error.isAllFinite();
+
+	if (adaptation_window) {
+		for (int i = 0; i < 3; ++i) {
+			_position_adaptive_velocity(i) = math::constrain(
+				_position_adaptive_velocity(i) + adaptive_position_i * position_error(i) * dt,
+				-adaptive_position_limit, adaptive_position_limit);
+		}
+	}
+
+	if (adaptive_mode == 2) {
+		velocity_sp += _position_adaptive_velocity;
+	}
 
 	for (int i = 0; i < 3; ++i) {
 		velocity_sp(i) = math::constrain(velocity_sp(i), -velocity_limit(i), velocity_limit(i));
@@ -73,7 +163,7 @@ Vector3f GeoPosControl::positionForce(const Vector3f &pos, const Vector3f &vel,
 	const float thrust_max = math::max(_p_thrust_max.get(), 1.f);
 	const float min_thrust = math::constrain(_p_mpc_thr_min.get(), 0.f, 1.f);
 	const float max_thrust = math::constrain(_p_mpc_thr_max.get(), min_thrust, 1.f);
-	const float hover_ratio = math::constrain(_p_hover_thrust.get(), math::max(min_thrust, 0.01f), max_thrust);
+	const float hover_ratio = math::constrain(_hover_thrust_estimate, math::max(min_thrust, 0.01f), max_thrust);
 	const float hover_force = hover_ratio * thrust_max;
 
 	const Vector3f velocity_error = vel - _velocity_limited;
@@ -107,13 +197,107 @@ Vector3f GeoPosControl::positionForce(const Vector3f &pos, const Vector3f &vel,
 
 	acceleration_sp = -velocity_gain.emult(velocity_error) - _velocity_integral;
 
+	// Estimate an acceleration disturbance from the measured NED acceleration
+	// and the previous raw acceleration command. This is a velocity-loop
+	// disturbance observer; filtering prevents sensor noise from becoming a
+	// high-frequency force command.
+	const float acceleration_limit_adaptive = math::max(_p_adaptive_acceleration_limit.get(), 0.f);
+	_adaptive_valid = false;
+	if (adaptation_window && _adaptive_previous_valid && acceleration_measured.isAllFinite()
+	    && acceleration_measured.norm() < 50.f) {
+		_acceleration_observation = acceleration_measured - _previous_acceleration_command;
+
+		for (int i = 0; i < 3; ++i) {
+			_acceleration_observation(i) = math::constrain(_acceleration_observation(i),
+									 -acceleration_limit_adaptive, acceleration_limit_adaptive);
+		}
+
+		const float cutoff = math::constrain(_p_adaptive_cutoff.get(), 0.05f, 20.f);
+		_velocity_adaptation_filter.setParameters(dt, 1.f / cutoff);
+		_velocity_disturbance_acceleration = _velocity_adaptation_filter.update(_acceleration_observation);
+		_adaptive_valid = true;
+	}
+
+	if (adaptive_mode == 2) {
+		acceleration_sp -= _velocity_disturbance_acceleration;
+	}
+
 	for (int i = 0; i < 3; ++i) {
 		acceleration_sp(i) = math::constrain(acceleration_sp(i), acceleration_min(i), acceleration_max(i));
 	}
 
+	// Estimate the collective required for zero vertical acceleration separately
+	// from the generic disturbance observer.  For a near-level vehicle in NED:
+	//   a_z = g * (1 - collective / hover_thrust)
+	// hence hover_thrust = collective / (1 - a_z/g).  The previous collective
+	// is paired with the current measured acceleration to respect the one-cycle
+	// sensor/control delay.  Learning is deliberately gated to quiet commands,
+	// near-level attitude and available actuator authority.
+	const float collective_command = math::constrain(
+		hover_ratio * (1.f - acceleration_sp(2) / 9.81f), min_thrust, max_thrust);
+	const float collective_margin = 0.01f;
+	const bool collective_unsaturated = collective_command > min_thrust + collective_margin
+					    && collective_command < max_thrust - collective_margin;
+	const float tilt_limit = math::radians(math::constrain(_p_hover_estimator_tilt.get(), 1.f, 45.f));
+	const bool attitude_level = attitude(2, 2) > cosf(tilt_limit);
+	const bool hover_quiet_command = vel_stick.norm() < 0.05f;
+	const bool acceleration_valid = PX4_ISFINITE(acceleration_measured(2))
+					&& fabsf(acceleration_measured(2)) < 5.f;
+	_hover_thrust_learning = _p_hover_estimator_enable.get() != 0 && _armed && !_landed
+				 && hover_quiet_command && attitude_level && collective_unsaturated
+				 && _previous_collective_valid && acceleration_valid
+				 && dt > 0.f && dt <= 0.1f;
+
+	if (_hover_thrust_learning) {
+		const float denominator = 1.f - acceleration_measured(2) / 9.81f;
+
+		if (denominator > 0.25f && denominator < 1.75f) {
+			const float estimate_min = math::constrain(_p_hover_estimator_min.get(),
+								   math::max(min_thrust, 0.05f), max_thrust);
+			const float estimate_max = math::constrain(_p_hover_estimator_max.get(), estimate_min, max_thrust);
+			_hover_thrust_observation = math::constrain(_previous_collective_command / denominator,
+								   estimate_min, estimate_max);
+			const float gain = math::constrain(_p_hover_estimator_gain.get(), 0.f, 5.f);
+			const float alpha = math::constrain(gain * dt, 0.f, 1.f);
+			_hover_thrust_estimate = math::constrain(
+				_hover_thrust_estimate + alpha * (_hover_thrust_observation - _hover_thrust_estimate),
+				estimate_min, estimate_max);
+		}
+	}
+
+	_previous_collective_command = collective_command;
+	_previous_collective_valid = collective_unsaturated;
+
+	// Store the acceleration command that is actually sent after limiting. If
+	// the command becomes non-quiet (for example, a forward stick input), the
+	// next sample must not compare against an old maneuver command.
+	_previous_acceleration_command = acceleration_sp;
+	_adaptive_previous_valid = adaptation_window && acceleration_measured.isAllFinite();
+
 	Vector3f force_world(mass * acceleration_sp(0), mass * acceleration_sp(1),
 			     hover_force * (acceleration_sp(2) / 9.81f - 1.f));
 	return force_world;
+}
+
+void GeoPosControl::publishAdaptive(uint64_t timestamp_sample)
+{
+	geo_control_position_adaptive_s adaptive{};
+	adaptive.timestamp = hrt_absolute_time();
+	adaptive.timestamp_sample = timestamp_sample;
+	for (int i = 0; i < 3; ++i) {
+		adaptive.position_bias_velocity[i] = _position_adaptive_velocity(i);
+		adaptive.velocity_disturbance_acceleration[i] = _velocity_disturbance_acceleration(i);
+		adaptive.acceleration_observation[i] = _acceleration_observation(i);
+		adaptive.velocity_integral[i] = _velocity_integral(i);
+	}
+	adaptive.hover_thrust_estimate = _hover_thrust_estimate;
+	adaptive.hover_thrust_observation = _hover_thrust_observation;
+	adaptive.hover_thrust_learning = _hover_thrust_learning;
+	adaptive.vertical_capture_active = _vertical_capture_active;
+	adaptive.vertical_capture_velocity = _vertical_capture_velocity;
+	adaptive.valid = _adaptive_valid;
+	adaptive.mode = (uint8_t)math::constrain(_p_adaptive_mode.get(), int32_t{0}, int32_t{2});
+	_adaptive_pub.publish(adaptive);
 }
 
 void GeoPosControl::publishSetpoints(const Vector3f &force_body, const Vector3f &vel_sp,
@@ -170,6 +354,7 @@ void GeoPosControl::publishSetpoints(const Vector3f &force_body, const Vector3f 
 	local_sp.yaw = Eulerf(_attitude_reference).psi();
 	local_sp.yawspeed = rates_sp(2);
 	_local_position_sp_pub.publish(local_sp);
+	publishAdaptive(timestamp_sample);
 }
 
 void GeoPosControl::Run()
@@ -214,6 +399,21 @@ void GeoPosControl::Run()
 	const Dcmf R(q);
 	const Vector3f pos(local.x, local.y, local.z);
 	const Vector3f vel(local.vx, local.vy, local.vz);
+	const Vector3f acceleration_measured(local.ax, local.ay, local.az);
+	const float output_min_collective = math::constrain(_p_mpc_thr_min.get(), 0.f, 1.f);
+	const float output_max_collective = math::constrain(_p_mpc_thr_max.get(), output_min_collective, 1.f);
+	const float configured_hover = math::constrain(_p_hover_thrust.get(), math::max(output_min_collective, 0.01f),
+						       output_max_collective);
+	// A live MPC_THR_HOVER change starts a fresh estimate from the requested
+	// baseline.  Disarming also discards the previous flight's learned state.
+	if (!PX4_ISFINITE(_hover_thrust_parameter_last)
+	    || fabsf(configured_hover - _hover_thrust_parameter_last) > 1e-4f || !_armed) {
+		_hover_thrust_estimate = configured_hover;
+		_hover_thrust_observation = configured_hover;
+		_hover_thrust_parameter_last = configured_hover;
+		_previous_collective_valid = false;
+		_hover_thrust_learning = false;
+	}
 	const bool mode_changed = status.nav_state != _last_nav_state;
 
 	if (!_reference_initialized || !_armed || mode_changed) {
@@ -331,16 +531,18 @@ void GeoPosControl::Run()
 		const float vz = manual_valid ? -math::deadzone(manual.throttle, dz) * _p_vz_max.get() : 0.f;
 		velocity_sp = Vector3f(cosf(yaw) * vx_body - sinf(yaw) * vy_body,
 				       sinf(yaw) * vx_body + cosf(yaw) * vy_body, vz);
-		const Vector3f force_world = positionForce(pos, vel, velocity_sp, dt, acceleration_sp);
+		updateVerticalCapture(mode_changed, true, pos, vel, dt, velocity_sp(2));
+		const Vector3f force_world = positionForce(pos, vel, velocity_sp, acceleration_measured, R, dt, acceleration_sp);
 		force_body = R.transpose() * force_world;
 
 	} else if (altitude_mode) {
 		// 定高模式只闭合垂向速度，水平位置冻结在当前点；roll/pitch 摇杆
 		// 直接产生手动水平力，故该模式不是水平位置闭环。
 		velocity_sp(2) = manual_valid ? -math::deadzone(manual.throttle, dz) * _p_vz_max.get() : 0.f;
+		updateVerticalCapture(mode_changed, true, pos, vel, dt, velocity_sp(2));
 		_position_reference(0) = pos(0);
 		_position_reference(1) = pos(1);
-		const Vector3f force_world = positionForce(pos, vel, velocity_sp, dt, acceleration_sp);
+		const Vector3f force_world = positionForce(pos, vel, velocity_sp, acceleration_measured, R, dt, acceleration_sp);
 		force_body = R.transpose() * Vector3f(0.f, 0.f, force_world(2));
 		if (manual_valid && !level_hold_requested) {
 			force_body(0) += math::deadzone(manual.pitch, dz) * _p_manual_force_max.get();
@@ -367,7 +569,7 @@ void GeoPosControl::Run()
 			_attitude_reference.normalize();
 			rates_sp(2) = PX4_ISFINITE(trajectory.yawspeed) ? trajectory.yawspeed : 0.f;
 		}
-		force_body = R.transpose() * positionForce(pos, vel, velocity_sp, dt, acceleration_sp);
+		force_body = R.transpose() * positionForce(pos, vel, velocity_sp, acceleration_measured, R, dt, acceleration_sp);
 
 	} else {
 		const float throttle = manual_valid ? math::constrain((manual.throttle + 1.f) * 0.5f, 0.f, 1.f) : 0.f;

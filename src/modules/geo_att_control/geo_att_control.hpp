@@ -43,6 +43,7 @@ public:
 private:
 	void Run() override;
 	void resetIntegrators();
+	void resetDisturbanceObserver();
 	matrix::Vector3f computeTorque(const matrix::Dcmf &R, const matrix::Dcmf &R_sp,
 				       const matrix::Vector3f &omega,
 				       const matrix::Vector3f &omega_sp_body, float dt);
@@ -68,6 +69,10 @@ private:
 	// reset_integral 时清零，避免旧模式误差带入新模式。
 	matrix::Vector3f _rate_integral{};
 	matrix::Vector3f _attitude_integral{};
+	// 估计的外部等效力矩 d_tau 与用于抵消它的补偿力矩 -d_tau，单位 N·m。
+	matrix::Vector3f _torque_disturbance_estimate{};
+	matrix::Vector3f _previous_torque_command{};
+	bool _previous_torque_valid{false};
 	matrix::Vector3<bool> _saturation_positive{false, false, false};
 	matrix::Vector3<bool> _saturation_negative{false, false, false};
 	bool _landed{true};
@@ -91,6 +96,11 @@ private:
 		(ParamFloat<px4::params::GAC_ROLL_MAX>) _p_roll_max,
 		(ParamFloat<px4::params::GAC_PITCH_MAX>) _p_pitch_max,
 		(ParamFloat<px4::params::GAC_YAW_THR_MIN>) _p_yaw_throttle_min,
+		(ParamInt<px4::params::GAC_DOB_MODE>) _p_dob_mode,
+		(ParamFloat<px4::params::GAC_DOB_CUTOFF>) _p_dob_cutoff,
+		(ParamFloat<px4::params::GAC_DOB_LIM>) _p_dob_limit,
+		(ParamFloat<px4::params::GAC_DOB_AMAX>) _p_dob_attitude_max,
+		(ParamFloat<px4::params::GAC_DOB_RMAX>) _p_dob_rate_max,
 		(ParamFloat<px4::params::GAC_IXX>) _p_ixx,
 		(ParamFloat<px4::params::GAC_IYY>) _p_iyy,
 		(ParamFloat<px4::params::GAC_IZZ>) _p_izz

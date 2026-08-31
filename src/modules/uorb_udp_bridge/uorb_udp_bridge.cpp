@@ -13,6 +13,7 @@
 #include <uORB/topics/vehicle_thrust_setpoint.h>
 #include <uORB/topics/vehicle_torque_setpoint.h>
 #include <uORB/topics/geo_control_attitude_setpoint.h>
+#include <uORB/topics/geo_control_position_adaptive.h>
 #include <matrix/matrix/math.hpp>
 
 #include <arpa/inet.h>
@@ -111,7 +112,19 @@ public:
 			begin("geo_control_attitude_setpoint", attitude_sp.timestamp);
 			field("q0", attitude_sp.q[0]); field("q1", attitude_sp.q[1]);
 			field("q2", attitude_sp.q[2]); field("q3", attitude_sp.q[3]);
-			field("roll", attitude_sp.roll); field("pitch", attitude_sp.pitch); field("yaw", attitude_sp.yaw); end();
+			field("roll", attitude_sp.roll); field("pitch", attitude_sp.pitch); field("yaw", attitude_sp.yaw);
+			field("attitude_integral_x", attitude_sp.attitude_integral[0]);
+			field("attitude_integral_y", attitude_sp.attitude_integral[1]);
+			field("attitude_integral_z", attitude_sp.attitude_integral[2]);
+			field("rate_integral_x", attitude_sp.rate_integral[0]);
+			field("rate_integral_y", attitude_sp.rate_integral[1]);
+			field("rate_integral_z", attitude_sp.rate_integral[2]);
+			field("disturbance_torque_x", attitude_sp.disturbance_torque[0]);
+			field("disturbance_torque_y", attitude_sp.disturbance_torque[1]);
+			field("disturbance_torque_z", attitude_sp.disturbance_torque[2]);
+			field("adaptive_torque_x", attitude_sp.adaptive_torque[0]);
+			field("adaptive_torque_y", attitude_sp.adaptive_torque[1]);
+			field("adaptive_torque_z", attitude_sp.adaptive_torque[2]); end();
 			begin("geo_control_rate_setpoint", attitude_sp.timestamp);
 			field("roll", attitude_sp.rates[0]); field("pitch", attitude_sp.rates[1]);
 			field("yaw", attitude_sp.rates[2]); end();
@@ -121,6 +134,31 @@ public:
 		if (_rates_sub.update(&rates)) {
 			begin("vehicle_angular_velocity", rates.timestamp);
 			field("x", rates.xyz[0]); field("y", rates.xyz[1]); field("z", rates.xyz[2]); end();
+		}
+
+		geo_control_position_adaptive_s adaptive{};
+		if (_adaptive_sub.update(&adaptive)) {
+			begin("geo_control_position_adaptive", adaptive.timestamp);
+			field_index("position_bias_velocity", 0, adaptive.position_bias_velocity[0]);
+			field_index("position_bias_velocity", 1, adaptive.position_bias_velocity[1]);
+			field_index("position_bias_velocity", 2, adaptive.position_bias_velocity[2]);
+			field_index("velocity_disturbance_acceleration", 0, adaptive.velocity_disturbance_acceleration[0]);
+			field_index("velocity_disturbance_acceleration", 1, adaptive.velocity_disturbance_acceleration[1]);
+			field_index("velocity_disturbance_acceleration", 2, adaptive.velocity_disturbance_acceleration[2]);
+			field_index("acceleration_observation", 0, adaptive.acceleration_observation[0]);
+			field_index("acceleration_observation", 1, adaptive.acceleration_observation[1]);
+			field_index("acceleration_observation", 2, adaptive.acceleration_observation[2]);
+			field_index("velocity_integral", 0, adaptive.velocity_integral[0]);
+			field_index("velocity_integral", 1, adaptive.velocity_integral[1]);
+			field_index("velocity_integral", 2, adaptive.velocity_integral[2]);
+			field("hover_thrust_estimate", adaptive.hover_thrust_estimate);
+			field("hover_thrust_observation", adaptive.hover_thrust_observation);
+			field("hover_thrust_learning", adaptive.hover_thrust_learning ? 1.f : 0.f);
+			field("vertical_capture_active", adaptive.vertical_capture_active ? 1.f : 0.f);
+			field("vertical_capture_velocity", adaptive.vertical_capture_velocity);
+			field("valid", adaptive.valid ? 1.f : 0.f);
+			field("mode", (float)adaptive.mode);
+			end();
 		}
 
 		vehicle_local_position_s position{};
@@ -230,31 +268,67 @@ private:
 	void begin(const char *topic, uint64_t timestamp)
 	{
 		strncpy(_topic, topic, sizeof(_topic) - 1);
-		_length = (size_t)snprintf(_buffer, sizeof(_buffer), "{\"time\":%.6f",
+		_topic[sizeof(_topic) - 1] = '\0';
+		_message_valid = true;
+		const int length = snprintf(_buffer, sizeof(_buffer), "{\"time\":%.6f",
 					(double)timestamp * 1e-6);
+
+		if (length < 0 || (size_t)length >= sizeof(_buffer)) {
+			_length = 0;
+			_message_valid = false;
+
+		} else {
+			_length = (size_t)length;
+		}
 	}
 	void field(const char *name, float value)
 	{
-		char text[64];
-		if (std::isfinite(value)) { snprintf(text, sizeof(text), ",\"%s/%s\":%.8g", _topic, name, (double)value); }
-		else { snprintf(text, sizeof(text), ",\"%s/%s\":null", _topic, name); }
-		append(text);
+		char text[192];
+		const bool valid = std::isfinite(value) && fabsf(value) <= VALUE_LIMIT;
+		const int length = valid
+				  ? snprintf(text, sizeof(text), ",\"%s/%s\":%.8g", _topic, name, (double)value)
+				  : snprintf(text, sizeof(text), ",\"%s/%s\":null", _topic, name);
+
+		if (length < 0 || (size_t)length >= sizeof(text)) {
+			_message_valid = false;
+
+		} else {
+			append(text, (size_t)length);
+		}
 	}
 	void field_index(const char *name, unsigned index, float value)
 	{
-		char text[72];
-		if (std::isfinite(value)) { snprintf(text, sizeof(text), ",\"%s/%s%u\":%.8g", _topic, name, index, (double)value); }
-		else { snprintf(text, sizeof(text), ",\"%s/%s%u\":null", _topic, name, index); }
-		append(text);
+		char text[192];
+		const bool valid = std::isfinite(value) && fabsf(value) <= VALUE_LIMIT;
+		const int length = valid
+				  ? snprintf(text, sizeof(text), ",\"%s/%s%u\":%.8g", _topic, name, index, (double)value)
+				  : snprintf(text, sizeof(text), ",\"%s/%s%u\":null", _topic, name, index);
+
+		if (length < 0 || (size_t)length >= sizeof(text)) {
+			_message_valid = false;
+
+		} else {
+			append(text, (size_t)length);
+		}
 	}
-	void append(const char *text)
+	void append(const char *text, size_t length)
 	{
-		const size_t n = strlen(text);
-		if (_length + n + 2 < sizeof(_buffer)) { memcpy(_buffer + _length, text, n); _length += n; }
+		if (!_message_valid || _length > sizeof(_buffer) - 2 || length > sizeof(_buffer) - _length - 2) {
+			// Never transmit a partially written JSON object. The next topic
+			// starts a fresh message and can recover from this overflow.
+			_message_valid = false;
+			return;
+		}
+
+		memcpy(_buffer + _length, text, length);
+		_length += length;
 	}
 	void end()
 	{
-		if (_length + 1 >= sizeof(_buffer)) { return; }
+		if (!_message_valid || _length + 1 >= sizeof(_buffer)) {
+			_length = 0;
+			return;
+		}
 		_buffer[_length++] = '}';
 
 		if (_socket >= 0) {
@@ -285,9 +359,11 @@ private:
 	int _socket{-1}; sockaddr_in _dest{}; char _address[INET_ADDRSTRLEN] {"192.168.3.100"};
 	uint16_t _port{9870}; float _rate_hz{50.f}; uint32_t _sent{0}; uint32_t _bytes_sent{0};
 	uint32_t _send_errors{0}; int _last_errno{0}; hrt_abstime _last_error_report{0};
-	char _buffer[1400]{}; char _topic[64]{}; size_t _length{0};
+	static constexpr float VALUE_LIMIT{1.e6f};
+	char _buffer[4096]{}; char _topic[64]{}; size_t _length{0}; bool _message_valid{true};
 	uORB::Subscription _attitude_sub{ORB_ID(vehicle_attitude)};
 	uORB::Subscription _geo_attitude_sp_sub{ORB_ID(geo_control_attitude_setpoint)};
+	uORB::Subscription _adaptive_sub{ORB_ID(geo_control_position_adaptive)};
 	uORB::Subscription _rates_sub{ORB_ID(vehicle_angular_velocity)};
 	uORB::Subscription _position_sub{ORB_ID(vehicle_local_position)};
 	uORB::Subscription _position_sp_sub{ORB_ID(vehicle_local_position_setpoint)};

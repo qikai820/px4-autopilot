@@ -17,6 +17,8 @@
 #include <uORB/topics/vehicle_rates_setpoint.h>
 #include <uORB/topics/vehicle_status.h>
 #include <uORB/topics/vehicle_thrust_setpoint.h>
+#include <uORB/topics/geo_control_position_adaptive.h>
+#include <lib/mathlib/math/filter/AlphaFilter.hpp>
 #include <matrix/matrix/math.hpp>
 
 using namespace time_literals;
@@ -51,9 +53,15 @@ private:
 			      uint64_t timestamp_sample, bool publish_attitude_rates);
 	// 根据位置/速度误差计算世界 NED 坐标系期望力，单位为 N。
 	matrix::Vector3f positionForce(const matrix::Vector3f &pos, const matrix::Vector3f &vel,
-				       const matrix::Vector3f &vel_stick, float dt,
+				       const matrix::Vector3f &vel_stick,
+				       const matrix::Vector3f &acceleration_measured,
+				       const matrix::Dcmf &attitude, float dt,
 				       matrix::Vector3f &acceleration_sp);
+	void publishAdaptive(uint64_t timestamp_sample);
 	void limitAttitudeReference();
+	void updateVerticalCapture(bool mode_changed, bool vertical_control_enabled,
+				   const matrix::Vector3f &pos, const matrix::Vector3f &vel,
+				   float dt, float &vertical_velocity_command);
 
 	uORB::SubscriptionCallbackWorkItem _local_position_event{this, ORB_ID(vehicle_local_position)};
 	uORB::Subscription _local_position_sub{ORB_ID(vehicle_local_position)};
@@ -68,6 +76,7 @@ private:
 	uORB::Publication<vehicle_attitude_setpoint_s> _attitude_sp_pub{ORB_ID(vehicle_attitude_setpoint)};
 	uORB::Publication<vehicle_rates_setpoint_s> _rates_sp_pub{ORB_ID(vehicle_rates_setpoint)};
 	uORB::Publication<vehicle_local_position_setpoint_s> _local_position_sp_pub{ORB_ID(vehicle_local_position_setpoint)};
+	uORB::Publication<geo_control_position_adaptive_s> _adaptive_pub{ORB_ID(geo_control_position_adaptive)};
 
 	// 位置外环维护的姿态期望。manual/position 模式下由摇杆速率积分得到，
 	// 并由 limitAttitudeReference() 限制滚转和俯仰范围；航向由 yaw 摇杆控制。
@@ -75,7 +84,23 @@ private:
 	matrix::Vector3f _position_reference{};
 	matrix::Vector3f _velocity_limited{};
 	matrix::Vector3f _velocity_integral{};
+	matrix::Vector3f _position_adaptive_velocity{};
+	matrix::Vector3f _velocity_disturbance_acceleration{};
+	matrix::Vector3f _previous_acceleration_command{};
+	matrix::Vector3f _acceleration_observation{};
+	AlphaFilter<matrix::Vector3f> _velocity_adaptation_filter{1.f};
+	float _hover_thrust_estimate{NAN};
+	float _hover_thrust_observation{NAN};
+	float _hover_thrust_parameter_last{NAN};
+	float _previous_collective_command{NAN};
+	float _vertical_capture_velocity{0.f};
+	float _vertical_capture_direction{0.f};
 	bool _reference_initialized{false};
+	bool _adaptive_previous_valid{false};
+	bool _adaptive_valid{false};
+	bool _hover_thrust_learning{false};
+	bool _previous_collective_valid{false};
+	bool _vertical_capture_active{false};
 	bool _landed{true};
 	bool _armed{false};
 	bool _level_hold_active{false};
@@ -108,6 +133,18 @@ private:
 		(ParamFloat<px4::params::GPC_MAN_FMAX>) _p_manual_force_max,
 		(ParamFloat<px4::params::GPC_RATE_MAX>) _p_manual_rate_max,
 		(ParamFloat<px4::params::GPC_ROLL_MAX>) _p_roll_max,
-		(ParamFloat<px4::params::GPC_PITCH_MAX>) _p_pitch_max
+		(ParamFloat<px4::params::GPC_PITCH_MAX>) _p_pitch_max,
+		(ParamInt<px4::params::GPC_ADP_MODE>) _p_adaptive_mode,
+		(ParamFloat<px4::params::GPC_ADP_CUTOFF>) _p_adaptive_cutoff,
+		(ParamFloat<px4::params::GPC_ADP_POS_I>) _p_adaptive_position_i,
+		(ParamFloat<px4::params::GPC_ADP_POS_LIM>) _p_adaptive_position_limit,
+		(ParamFloat<px4::params::GPC_ADP_ACC_LIM>) _p_adaptive_acceleration_limit,
+		(ParamBool<px4::params::GPC_HTE_EN>) _p_hover_estimator_enable,
+		(ParamFloat<px4::params::GPC_HTE_GAIN>) _p_hover_estimator_gain,
+		(ParamFloat<px4::params::GPC_HTE_MIN>) _p_hover_estimator_min,
+		(ParamFloat<px4::params::GPC_HTE_MAX>) _p_hover_estimator_max,
+		(ParamFloat<px4::params::GPC_HTE_TILT>) _p_hover_estimator_tilt,
+		(ParamFloat<px4::params::GPC_VCAP_ACC>) _p_vertical_capture_acceleration,
+		(ParamFloat<px4::params::GPC_VCAP_VEL>) _p_vertical_capture_velocity_threshold
 	)
 };
