@@ -123,7 +123,8 @@ DockGuidance::Run()
 	viztra_observation_s obs;
 
 	if (!_viztra_sub.update(&obs)) {
-		const uint64_t timeout_us = static_cast<uint64_t>(math::constrain(_param_dock_obs_tout.get(), 20, 5000)) * 1000ULL;
+		const uint64_t timeout_us = static_cast<uint64_t>(math::constrain(_param_dock_obs_tout.get(), int32_t{20},
+					    int32_t{5000})) * 1000ULL;
 
 		if (_setpoint_valid && (now_us > _last_observation_us) && ((now_us - _last_observation_us) > timeout_us)) {
 			invalidate_setpoint(now_us, "vision timeout");
@@ -141,7 +142,8 @@ DockGuidance::Run()
 		return;
 	}
 
-	const uint64_t timeout_us = static_cast<uint64_t>(math::constrain(_param_dock_obs_tout.get(), 20, 5000)) * 1000ULL;
+	const uint64_t timeout_us = static_cast<uint64_t>(math::constrain(_param_dock_obs_tout.get(), int32_t{20},
+				    int32_t{5000})) * 1000ULL;
 
 	if ((now_us > sample_us) && ((now_us - sample_us) > timeout_us)) {
 		invalidate_setpoint(now_us, "stale observation");
@@ -255,7 +257,8 @@ DockGuidance::get_delayed_state(hrt_abstime timestamp_sample, Vector3f &att_deg,
 		return false;
 	}
 
-	const uint64_t delay_us = static_cast<uint64_t>(math::constrain(_param_dock_cam_dly.get(), 0, 5000)) * 1000ULL;
+	const uint64_t delay_us = static_cast<uint64_t>(math::constrain(_param_dock_cam_dly.get(), int32_t{0},
+				  int32_t{5000})) * 1000ULL;
 	const hrt_abstime target_us = (timestamp_sample > delay_us) ? timestamp_sample - delay_us : 0;
 	const int oldest = (_delay_idx - _delay_count + DELAY_BUF_SIZE) % DELAY_BUF_SIZE;
 	const int newest = (_delay_idx - 1 + DELAY_BUF_SIZE) % DELAY_BUF_SIZE;
