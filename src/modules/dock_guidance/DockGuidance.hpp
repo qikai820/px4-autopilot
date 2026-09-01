@@ -34,7 +34,7 @@
 
 #include <px4_platform_common/module.h>
 #include <px4_platform_common/module_params.h>
-#include <px4_platform_common/px4_work_queue/WorkItem.hpp>
+#include <px4_platform_common/px4_work_queue/ScheduledWorkItem.hpp>
 #include <uORB/Publication.hpp>
 #include <uORB/Subscription.hpp>
 #include <uORB/SubscriptionCallback.hpp>
@@ -49,7 +49,7 @@
 
 using namespace time_literals;
 
-class DockGuidance : public ModuleBase<DockGuidance>, public ModuleParams, public px4::WorkItem
+class DockGuidance : public ModuleBase<DockGuidance>, public ModuleParams, public px4::ScheduledWorkItem
 {
 public:
 	DockGuidance();
@@ -66,6 +66,7 @@ private:
 	static constexpr int DELAY_BUF_SIZE = 601;
 	static constexpr int DERIV_SIZE = 7;
 	static constexpr float LOOP_DT = 0.01f;
+	static constexpr uint32_t WATCHDOG_INTERVAL_US = 10_ms;
 
 	enum class Stage : uint8_t {
 		NONE = 0,
@@ -78,18 +79,21 @@ private:
 	void update_parameters();
 
 	// 保存并读取与相机画面时间对齐的飞行器状态。
-	void push_delay_history();
-	bool get_delayed_state(matrix::Vector3f &att_deg, matrix::Vector3f &gyro_dps) const;
+	void push_delay_history(hrt_abstime timestamp);
+	bool get_delayed_state(hrt_abstime timestamp_sample, matrix::Vector3f &att_deg,
+			       matrix::Vector3f &gyro_dps) const;
+	void invalidate_setpoint(hrt_abstime timestamp, const char *reason);
+	void reset_tracking_state();
 
 	void process_observation(float los_yaw_deg, float los_pitch_deg,
 				 const matrix::Vector3f &att_deg,
 				 const matrix::Vector3f &gyro_dps,
-				 float dt_s);
+				 float dt_s, hrt_abstime timestamp_sample);
 	void compute_control(const matrix::Vector3f &att_deg, float obs_dt_s);
 	void apply_visibility_limit();
 
 	float low_pass_filter(float &state, float input, float cutoff_hz, float dt);
-	float derivative_filter(float *buf, int size, float dt_ms);
+	float derivative_filter(const float *buf) const;
 
 	// 视觉观测为本模块的执行触发源；其余话题在每次视觉帧到达时读取最新值。
 	uORB::SubscriptionCallbackWorkItem _viztra_sub{this, ORB_ID(viztra_observation)};
@@ -126,8 +130,9 @@ private:
 	float _los_x_deriv_buf[DERIV_SIZE] {};
 	float _los_y_deriv_buf[DERIV_SIZE] {};
 	float _los_z_deriv_buf[DERIV_SIZE] {};
-	float _los_deriv_time_buf[DERIV_SIZE] {};
+	hrt_abstime _los_deriv_time_buf[DERIV_SIZE] {};
 	int _deriv_count{0};
+	int _deriv_idx{0};
 
 	float _los_yaw_rate_pid_I{0.0f};
 	float _los_pitch_rate_pid_I{0.0f};
@@ -137,12 +142,15 @@ private:
 	Stage _stage{Stage::NONE};
 	bool _have_last_target{false};
 	uint64_t _last_observation_us{0};
-	uint64_t _last_run_us{0};
+	uint64_t _last_sample_us{0};
+	bool _setpoint_valid{false};
 
 	// 环形历史缓冲：以度保存姿态和机体系角速度，用于相机延时补偿。
 	matrix::Vector3f _att_delay_buf[DELAY_BUF_SIZE] {};
 	matrix::Vector3f _gyro_delay_buf[DELAY_BUF_SIZE] {};
+	hrt_abstime _delay_time_buf[DELAY_BUF_SIZE] {};
 	int _delay_idx{0};
+	int _delay_count{0};
 
 	float _velocity_speed_ms{0.0f};
 	bool _velocity_valid{false};
@@ -150,6 +158,7 @@ private:
 
 	DEFINE_PARAMETERS(
 		(ParamInt<px4::params::DOCK_CAM_DLY>)   _param_dock_cam_dly,
+		(ParamInt<px4::params::DOCK_OBS_TOUT>)  _param_dock_obs_tout,
 		(ParamFloat<px4::params::DOCK_FILT_HZ>) _param_dock_filt_hz,
 		(ParamFloat<px4::params::DOCK_RES_X>)   _param_dock_res_x,
 		(ParamFloat<px4::params::DOCK_RES_Y>)   _param_dock_res_y,
@@ -158,6 +167,7 @@ private:
 		(ParamFloat<px4::params::DOCK_YAW_P>)   _param_dock_yaw_p,
 		(ParamFloat<px4::params::DOCK_PIT_P>)   _param_dock_pit_p,
 		(ParamFloat<px4::params::DOCK_RATE_MAX>) _param_dock_rate_max,
+		(ParamFloat<px4::params::DOCK_RATE_SLEW>) _param_dock_rate_slew,
 		(ParamFloat<px4::params::DOCK_VIS_LIM>) _param_dock_vis_lim,
 		(ParamFloat<px4::params::DOCK_NAV_Y_P>) _param_dock_nav_y_p,
 		(ParamFloat<px4::params::DOCK_NAV_P_P>) _param_dock_nav_p_p,

@@ -41,7 +41,7 @@ using namespace matrix;
 
 DockGuidance::DockGuidance() :
 	ModuleParams(nullptr),
-	WorkItem(MODULE_NAME, px4::wq_configurations::nav_and_controllers)
+	ScheduledWorkItem(MODULE_NAME, px4::wq_configurations::nav_and_controllers)
 {
 	// 相机坐标系约定：X 向前、Y 向右、Z 向下。
 	// 机体系遵循 PX4 FRD：X 向前、Y 向右、Z 向下。
@@ -61,12 +61,15 @@ DockGuidance::~DockGuidance()
 bool
 DockGuidance::init()
 {
-	// 模块由视觉观测话题触发，而非固定周期定时器。
-	// 每收到一帧 viztra_observation，Run() 执行一次。
+	// 新视觉观测会立即触发运行；固定周期同时负责状态历史采样和断流看门狗。
 	if (!_viztra_sub.registerCallback()) {
 		PX4_ERR("viztra callback registration failed");
 		return false;
 	}
+
+	// 100 Hz 周期同时维护状态历史并充当视觉断流看门狗。
+	// 视觉回调仍会立即唤醒本模块，所以可接收最高 120 Hz 的输入而不增加固定等待。
+	ScheduleOnInterval(WATCHDOG_INTERVAL_US);
 
 	return true;
 }
@@ -76,6 +79,7 @@ DockGuidance::Run()
 {
 	if (should_exit()) {
 		_viztra_sub.unregisterCallback();
+		ScheduleClear();
 		exit_and_cleanup();
 		return;
 	}
@@ -86,69 +90,61 @@ DockGuidance::Run()
 		update_parameters();
 	}
 
+	const uint64_t now_us = hrt_absolute_time();
+	push_delay_history(now_us);
+
 	viztra_observation_s obs;
 
 	if (!_viztra_sub.update(&obs)) {
+		const uint64_t timeout_us = static_cast<uint64_t>(math::constrain(_param_dock_obs_tout.get(), 20, 5000)) * 1000ULL;
+
+		if (_setpoint_valid && (now_us > _last_observation_us) && ((now_us - _last_observation_us) > timeout_us)) {
+			invalidate_setpoint(now_us, "vision timeout");
+		}
+
 		return;
 	}
 
-	// 使用两帧视觉观测之间的时间间隔作为滤波和控制计算的 dt。
-	// 这里限幅可避免首帧、丢帧或突发帧导致数值不稳定。
-	const uint64_t now_us = hrt_absolute_time();
-	const float run_dt_s = (_last_run_us == 0) ? LOOP_DT :
-			       math::constrain((now_us - _last_run_us) * 1e-6f, 0.002f, 0.05f);
-	_last_run_us = now_us;
+	// timestamp_sample 是完整视觉帧接收时刻。旧驱动未填写时退化为当前时刻；
+	// 明显位于未来的时间戳视为非法，避免无符号减法和延迟补偿越界。
+	const uint64_t sample_us = (obs.timestamp_sample != 0) ? obs.timestamp_sample : now_us;
 
-	// 保存当前姿态与角速度历史，供相机延时补偿读取。
-	push_delay_history();
+	if (sample_us > now_us + 5000ULL) {
+		invalidate_setpoint(now_us, "future timestamp");
+		return;
+	}
+
+	const uint64_t timeout_us = static_cast<uint64_t>(math::constrain(_param_dock_obs_tout.get(), 20, 5000)) * 1000ULL;
+
+	if ((now_us > sample_us) && ((now_us - sample_us) > timeout_us)) {
+		invalidate_setpoint(now_us, "stale observation");
+		return;
+	}
+
+	// 丢弃重复或乱序帧；保留上一条有效输出，随后由看门狗统一执行超时退出。
+	if ((_last_sample_us != 0) && (sample_us <= _last_sample_us)) {
+		return;
+	}
+
+	const float run_dt_s = (_last_sample_us == 0) ? LOOP_DT :
+			       math::constrain((sample_us - _last_sample_us) * 1e-6f, 0.002f, 0.1f);
+	_last_sample_us = sample_us;
+	_last_observation_us = sample_us;
 
 	// 无目标或输入非法时，清空内部状态并明确发布 invalid，
 	// 使下游控制器可以立即放弃视觉引导。
 	if (!obs.valid || !std::isfinite(obs.offset_x) || !std::isfinite(obs.offset_y)) {
-		if (_stage != Stage::NONE) {
-			PX4_INFO("dock: no target");
-		}
-
-		_los_c_deg.zero();
-		_los_e_deg.zero();
-		_los_e_unit.zero();
-		_los_e_dot.zero();
-		_los_e_rate_dps.zero();
-		_camera_e_deg.zero();
-		_gyro_c_dps.zero();
-		_los_c_rate_dps.zero();
-		_target_rate_c_dps.zero();
-		_target_rate_b_dps.zero();
-		_stage = Stage::NONE;
-		_have_last_target = false;
-		_los_rate_control_active = false;
-		_last_observation_us = 0;
-		_los_yaw_rate_pid_I = 0.0f;
-		_los_pitch_rate_pid_I = 0.0f;
-		_filt_initialized = false;
-
-		dock_guidance_setpoint_s sp{};
-		sp.timestamp = now_us;
-		sp.valid = false;
-		sp.stage = 0;
-		_setpoint_pub.publish(sp);
+		invalidate_setpoint(now_us, "invalid observation");
 		return;
 	}
-
-	// 读取飞行器当前状态。延时补偿实际使用的是下方缓冲区中的历史状态。
-	vehicle_attitude_s att;
-	_att_sub.copy(&att);
-	const Quatf q(att.q);
-	const Dcmf R_ned_body(q);
-
-	vehicle_angular_velocity_s av;
-	_gyro_sub.copy(&av);
-	const Vector3f gyro_b_rads(av.xyz[0], av.xyz[1], av.xyz[2]);
 
 	// 取与相机画面时间对应的姿态/角速度，减小图像传输和识别延迟带来的误差。
 	Vector3f att_deg;
 	Vector3f gyro_dps;
-	get_delayed_state(att_deg, gyro_dps);
+	if (!get_delayed_state(sample_us, att_deg, gyro_dps)) {
+		invalidate_setpoint(now_us, "state history unavailable");
+		return;
+	}
 
 	// 将视觉板给出的目标偏移转换为相机视线角（LOS）。
 	// 若视觉板已经输出角度则直接使用；否则根据图像分辨率和 FOV 将像素偏移换算为角度。
@@ -180,18 +176,33 @@ DockGuidance::Run()
 		los_pitch_deg = -math::degrees(atanf(los_cam(2) / Vector2f(los_cam(0), los_cam(1)).norm()));
 	}
 
-	process_observation(los_yaw_deg, los_pitch_deg, att_deg, gyro_dps, run_dt_s);
+	if (!std::isfinite(los_yaw_deg) || !std::isfinite(los_pitch_deg)) {
+		invalidate_setpoint(now_us, "invalid LOS");
+		return;
+	}
+
+	process_observation(los_yaw_deg, los_pitch_deg, att_deg, gyro_dps, run_dt_s, sample_us);
 }
 
 // ---------- 姿态/角速度延时缓冲 ----------
 
 void
-DockGuidance::push_delay_history()
+DockGuidance::push_delay_history(hrt_abstime timestamp)
 {
 	// 将 PX4 四元数姿态转换为欧拉角，统一以度保存，便于后续与视觉角度相加。
-	vehicle_attitude_s att;
-	_att_sub.copy(&att);
+	vehicle_attitude_s att{};
+	vehicle_angular_velocity_s av{};
+
+	if (!_att_sub.copy(&att) || !_gyro_sub.copy(&av)) {
+		return;
+	}
+
 	const Quatf q(att.q);
+
+	if (!q.isAllFinite() || !Vector3f(av.xyz).isAllFinite()) {
+		return;
+	}
+
 	const Dcmf R(q);
 	Vector3f euler_deg;
 	Eulerf euler(R);
@@ -199,34 +210,107 @@ DockGuidance::push_delay_history()
 	euler_deg(1) = math::degrees(euler.theta());
 	euler_deg(2) = math::degrees(euler.psi());
 
-	vehicle_angular_velocity_s av;
-	_gyro_sub.copy(&av);
 	Vector3f gyro_dps(math::degrees(av.xyz[0]),
 			  math::degrees(av.xyz[1]),
 			  math::degrees(av.xyz[2]));
 
 	_att_delay_buf[_delay_idx] = euler_deg;
 	_gyro_delay_buf[_delay_idx] = gyro_dps;
+	_delay_time_buf[_delay_idx] = timestamp;
 	_delay_idx = (_delay_idx + 1) % DELAY_BUF_SIZE;
+	_delay_count = math::min(_delay_count + 1, DELAY_BUF_SIZE);
 }
 
 bool
-DockGuidance::get_delayed_state(Vector3f &att_deg, Vector3f &gyro_dps) const
+DockGuidance::get_delayed_state(hrt_abstime timestamp_sample, Vector3f &att_deg, Vector3f &gyro_dps) const
 {
-	// 根据相机延时参数从环形缓冲区回溯。
-	// 注意：当前实现假设历史样本约为 100 Hz，且仅在视觉帧到达时写入历史。
-	const int delay_steps = math::constrain(
-		(int)(_param_dock_cam_dly.get() * 100), 0, DELAY_BUF_SIZE - 1);
-
-	int idx = _delay_idx - 1 - delay_steps;
-
-	if (idx < 0) {
-		idx += DELAY_BUF_SIZE;
+	if (_delay_count <= 0) {
+		return false;
 	}
 
-	att_deg = _att_delay_buf[idx];
-	gyro_dps = _gyro_delay_buf[idx];
-	return true;
+	const uint64_t delay_us = static_cast<uint64_t>(math::constrain(_param_dock_cam_dly.get(), 0, 5000)) * 1000ULL;
+	const hrt_abstime target_us = (timestamp_sample > delay_us) ? timestamp_sample - delay_us : 0;
+	const int oldest = (_delay_idx - _delay_count + DELAY_BUF_SIZE) % DELAY_BUF_SIZE;
+	const int newest = (_delay_idx - 1 + DELAY_BUF_SIZE) % DELAY_BUF_SIZE;
+
+	if (target_us <= _delay_time_buf[oldest]) {
+		// 历史尚未覆盖相机采样时刻时不使用错误姿态；等缓冲区积累足够数据后再输出有效指令。
+		if (target_us == _delay_time_buf[oldest]) {
+			att_deg = _att_delay_buf[oldest];
+			gyro_dps = _gyro_delay_buf[oldest];
+			return true;
+		}
+
+		return false;
+	}
+
+	if (target_us >= _delay_time_buf[newest]) {
+		att_deg = _att_delay_buf[newest];
+		gyro_dps = _gyro_delay_buf[newest];
+		return true;
+	}
+
+	for (int n = 1; n < _delay_count; ++n) {
+		const int previous = (oldest + n - 1) % DELAY_BUF_SIZE;
+		const int next = (oldest + n) % DELAY_BUF_SIZE;
+
+		if (target_us <= _delay_time_buf[next]) {
+			const uint64_t span_us = _delay_time_buf[next] - _delay_time_buf[previous];
+			const float alpha = (span_us > 0) ?
+					    static_cast<float>(target_us - _delay_time_buf[previous]) / static_cast<float>(span_us) : 0.0f;
+
+			for (int axis = 0; axis < 3; ++axis) {
+				const float angle_delta = remainderf(_att_delay_buf[next](axis) - _att_delay_buf[previous](axis), 360.0f);
+				att_deg(axis) = _att_delay_buf[previous](axis) + alpha * angle_delta;
+				gyro_dps(axis) = _gyro_delay_buf[previous](axis) + alpha *
+						 (_gyro_delay_buf[next](axis) - _gyro_delay_buf[previous](axis));
+			}
+
+			return att_deg.isAllFinite() && gyro_dps.isAllFinite();
+		}
+	}
+
+	return false;
+}
+
+void
+DockGuidance::reset_tracking_state()
+{
+	_los_c_deg.zero();
+	_los_e_deg.zero();
+	_los_e_unit.zero();
+	_los_e_dot.zero();
+	_los_e_rate_dps.zero();
+	_camera_e_deg.zero();
+	_gyro_c_dps.zero();
+	_los_c_rate_dps.zero();
+	_target_rate_c_dps.zero();
+	_target_rate_b_dps.zero();
+	_stage = Stage::NONE;
+	_have_last_target = false;
+	_los_rate_control_active = false;
+	_los_yaw_rate_pid_I = 0.0f;
+	_los_pitch_rate_pid_I = 0.0f;
+	_filt_initialized = false;
+	_deriv_count = 0;
+	_deriv_idx = 0;
+}
+
+void
+DockGuidance::invalidate_setpoint(hrt_abstime timestamp, const char *reason)
+{
+	if (_setpoint_valid) {
+		PX4_WARN("dock: %s", reason);
+	}
+
+	reset_tracking_state();
+	_setpoint_valid = false;
+
+	dock_guidance_setpoint_s sp{};
+	sp.timestamp = timestamp;
+	sp.valid = false;
+	sp.stage = static_cast<uint8_t>(Stage::NONE);
+	_setpoint_pub.publish(sp);
 }
 
 // ---------- 视觉观测处理 ----------
@@ -235,7 +319,7 @@ void
 DockGuidance::process_observation(float los_yaw_deg, float los_pitch_deg,
 				  const Vector3f &att_deg,
 				  const Vector3f &gyro_dps,
-				  float dt_s)
+				  float dt_s, hrt_abstime timestamp_sample)
 {
 	// los_c：相机坐标系中的目标方位角，分别为水平偏差（yaw）与垂直偏差（pitch）。
 	_los_c_deg(0) = los_yaw_deg;
@@ -273,39 +357,31 @@ DockGuidance::process_observation(float los_yaw_deg, float los_pitch_deg,
 		_los_z_filt = low_pass_filter(_los_z_filt, _los_e_unit(2), filt_hz, dt_s);
 	}
 
-	// 保存最近 7 个滤波后的视线向量，用首尾差分估计 LOS 变化率。
-	if (_deriv_count < DERIV_SIZE) {
-		_los_x_deriv_buf[_deriv_count] = _los_x_filt;
-		_los_y_deriv_buf[_deriv_count] = _los_y_filt;
-		_los_z_deriv_buf[_deriv_count] = _los_z_filt;
-		_los_deriv_time_buf[_deriv_count] = (float)hrt_absolute_time();
-		_deriv_count++;
+	Vector3f los_e_filtered(_los_x_filt, _los_y_filt, _los_z_filt);
 
-	} else {
-		for (int i = 0; i < DERIV_SIZE - 1; i++) {
-			_los_x_deriv_buf[i] = _los_x_deriv_buf[i + 1];
-			_los_y_deriv_buf[i] = _los_y_deriv_buf[i + 1];
-			_los_z_deriv_buf[i] = _los_z_deriv_buf[i + 1];
-			_los_deriv_time_buf[i] = _los_deriv_time_buf[i + 1];
-		}
-
-		_los_x_deriv_buf[DERIV_SIZE - 1] = _los_x_filt;
-		_los_y_deriv_buf[DERIV_SIZE - 1] = _los_y_filt;
-		_los_z_deriv_buf[DERIV_SIZE - 1] = _los_z_filt;
-		_los_deriv_time_buf[DERIV_SIZE - 1] = (float)hrt_absolute_time();
+	if (!los_e_filtered.isAllFinite() || (los_e_filtered.norm() < 0.5f)) {
+		invalidate_setpoint(hrt_absolute_time(), "filter failure");
+		return;
 	}
 
+	los_e_filtered.normalize();
+	_los_e_unit = los_e_filtered;
+	_los_x_filt = _los_e_unit(0);
+	_los_y_filt = _los_e_unit(1);
+	_los_z_filt = _los_e_unit(2);
+
+	// 带 uint64 时间戳的环形窗口，避免微秒时间存入 float 后随运行时间丢失精度。
+	_los_x_deriv_buf[_deriv_idx] = _los_x_filt;
+	_los_y_deriv_buf[_deriv_idx] = _los_y_filt;
+	_los_z_deriv_buf[_deriv_idx] = _los_z_filt;
+	_los_deriv_time_buf[_deriv_idx] = timestamp_sample;
+	_deriv_idx = (_deriv_idx + 1) % DERIV_SIZE;
+	_deriv_count = math::min(_deriv_count + 1, DERIV_SIZE);
+
 	if (_deriv_count >= DERIV_SIZE) {
-		const float total_dt = (_los_deriv_time_buf[DERIV_SIZE - 1] - _los_deriv_time_buf[0]) * 1e-6f;
-
-		if (total_dt > 0.001f) {
-			const float slope_x = derivative_filter(_los_x_deriv_buf, DERIV_SIZE, total_dt);
-			const float slope_y = derivative_filter(_los_y_deriv_buf, DERIV_SIZE, total_dt);
-			const float slope_z = derivative_filter(_los_z_deriv_buf, DERIV_SIZE, total_dt);
-
-			_los_e_dot = Vector3f(slope_x, slope_y, slope_z);
-			_los_e_dot -= _los_e_unit * (_los_e_unit * _los_e_dot);
-		}
+		_los_e_dot = Vector3f(derivative_filter(_los_x_deriv_buf), derivative_filter(_los_y_deriv_buf),
+					 derivative_filter(_los_z_deriv_buf));
+		_los_e_dot -= _los_e_unit * (_los_e_unit * _los_e_dot);
 	}
 
 	// 单位向量 l 的角速度满足 omega = l × l_dot；先在地理系求得，再转换到相机系。
@@ -337,8 +413,6 @@ DockGuidance::process_observation(float los_yaw_deg, float los_pitch_deg,
 		_velocity_e_deg.zero();
 	}
 
-	_last_observation_us = hrt_absolute_time();
-
 	compute_control(att_deg, dt_s);
 }
 
@@ -360,7 +434,7 @@ DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s)
 
 	const float pitch_err_abs = fabsf(_los_c_deg(1));
 	const float yaw_err_abs = fabsf(_los_c_deg(0));
-	const float rate_limit = math::max(_param_dock_rate_max.get(), 30.0f);
+	const float rate_limit = math::constrain(_param_dock_rate_max.get(), 1.0f, 360.0f);
 	const float vis_limit = math::max(_param_dock_vis_lim.get(), 0.0f);
 
 	const float yaw_p_rate = _param_dock_yaw_p.get() * _los_c_deg(0);
@@ -438,7 +512,20 @@ DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s)
 
 	apply_visibility_limit();
 	// 控制律先在相机系生成；转换到机体系后，下游可直接作为飞行器角速度指令使用。
-	_target_rate_b_dps = _rot_cam_to_body * _target_rate_c_dps;
+	const Vector3f requested_rate_b_dps = _rot_cam_to_body * _target_rate_c_dps;
+	const float max_delta = math::constrain(_param_dock_rate_slew.get(), 1.0f, 2000.0f) *
+				math::constrain(obs_dt_s, 0.002f, 0.1f);
+
+	for (int axis = 0; axis < 3; ++axis) {
+		_target_rate_b_dps(axis) += math::constrain(requested_rate_b_dps(axis) - _target_rate_b_dps(axis),
+						     -max_delta, max_delta);
+		_target_rate_b_dps(axis) = math::constrain(_target_rate_b_dps(axis), -rate_limit, rate_limit);
+	}
+
+	if (!_target_rate_b_dps.isAllFinite()) {
+		invalidate_setpoint(hrt_absolute_time(), "non-finite output");
+		return;
+	}
 
 	// 发布独立的 Dock 引导设定值。当前模块不直接接管 PX4 的 vehicle_rates_setpoint。
 	dock_guidance_setpoint_s sp{};
@@ -446,13 +533,14 @@ DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s)
 	sp.roll_rate_rad_s = math::radians(_target_rate_b_dps(0));
 	sp.pitch_rate_rad_s = math::radians(_target_rate_b_dps(1));
 	sp.yaw_rate_rad_s = math::radians(_target_rate_b_dps(2));
-	sp.throttle = _param_dock_thr.get();
-	sp.throttle_rate = _param_dock_thr_rate.get();
+	sp.throttle = math::constrain(_param_dock_thr.get(), 0.0f, 1.0f);
+	sp.throttle_rate = math::max(_param_dock_thr_rate.get(), 0.0f);
 	sp.camera_yaw_deg = _los_c_deg(0);
 	sp.camera_pitch_deg = _los_c_deg(1);
 	sp.stage = static_cast<uint8_t>(_stage);
 	sp.valid = true;
 	_setpoint_pub.publish(sp);
+	_setpoint_valid = true;
 }
 
 void
@@ -492,14 +580,32 @@ DockGuidance::low_pass_filter(float &state, float input, float cutoff_hz, float 
 }
 
 float
-DockGuidance::derivative_filter(float *buf, int size, float dt_s)
+DockGuidance::derivative_filter(const float *buf) const
 {
-	// 使用窗口首尾样本做差分，避免直接差分单帧视觉数据带来的高频噪声。
-	if (size < 2 || dt_s <= 0.0f) {
+	if (_deriv_count < 2) {
 		return 0.0f;
 	}
 
-	return (buf[size - 1] - buf[0]) / (dt_s * (size - 1));
+	// 按真实采样时刻做最小二乘直线拟合，在帧周期抖动和少量丢帧时仍可稳定估计导数。
+	const int oldest = (_deriv_idx - _deriv_count + DERIV_SIZE) % DERIV_SIZE;
+	const hrt_abstime time_origin = _los_deriv_time_buf[oldest];
+	float sum_t = 0.0f;
+	float sum_y = 0.0f;
+	float sum_tt = 0.0f;
+	float sum_ty = 0.0f;
+
+	for (int n = 0; n < _deriv_count; ++n) {
+		const int idx = (oldest + n) % DERIV_SIZE;
+		const float t = static_cast<float>(_los_deriv_time_buf[idx] - time_origin) * 1e-6f;
+		const float y = buf[idx];
+		sum_t += t;
+		sum_y += y;
+		sum_tt += t * t;
+		sum_ty += t * y;
+	}
+
+	const float denominator = _deriv_count * sum_tt - sum_t * sum_t;
+	return (denominator > 1e-9f) ? (_deriv_count * sum_ty - sum_t * sum_y) / denominator : 0.0f;
 }
 
 void

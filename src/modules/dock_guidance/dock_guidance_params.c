@@ -6,6 +6,18 @@
 PARAM_DEFINE_INT32(DOCK_CAM_DLY, 0);
 
 /**
+ * Visual observation timeout [ms]
+ *
+ * The guidance setpoint becomes invalid when no fresh visual frame is received
+ * within this interval.
+ *
+ * @min 20
+ * @max 5000
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_INT32(DOCK_OBS_TOUT, 150);
+
+/**
  * LOS vector filter cutoff frequency [Hz]
  *
  * @group Dock Guidance
@@ -60,6 +72,15 @@ PARAM_DEFINE_FLOAT(DOCK_PIT_P, 1.0f);
  * @group Dock Guidance
  */
 PARAM_DEFINE_FLOAT(DOCK_RATE_MAX, 60.0f);
+
+/**
+ * Maximum angular-rate command slew [deg/s^2]
+ *
+ * @min 1
+ * @max 2000
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_RATE_SLEW, 300.0f);
 
 /**
  * Visibility limit angle [deg]
