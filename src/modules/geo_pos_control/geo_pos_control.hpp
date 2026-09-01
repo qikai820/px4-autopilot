@@ -134,6 +134,7 @@ private:
 		(ParamFloat<px4::params::GPC_RATE_MAX>) _p_manual_rate_max,
 		(ParamFloat<px4::params::GPC_ROLL_MAX>) _p_roll_max,
 		(ParamFloat<px4::params::GPC_PITCH_MAX>) _p_pitch_max,
+		(ParamBool<px4::params::GAC_Q_REF_EN>) _p_quaternion_reference_enable,
 		(ParamInt<px4::params::GPC_ADP_MODE>) _p_adaptive_mode,
 		(ParamFloat<px4::params::GPC_ADP_CUTOFF>) _p_adaptive_cutoff,
 		(ParamFloat<px4::params::GPC_ADP_POS_I>) _p_adaptive_position_i,

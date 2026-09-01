@@ -44,7 +44,9 @@ private:
 	void Run() override;
 	void resetIntegrators();
 	void resetDisturbanceObserver();
-	matrix::Vector3f computeTorque(const matrix::Dcmf &R, const matrix::Dcmf &R_sp,
+	matrix::Vector3f quaternionAttitudeError(const matrix::Quatf &q,
+						 const matrix::Quatf &q_sp) const;
+	matrix::Vector3f computeTorque(const matrix::Quatf &q, const matrix::Quatf &q_sp,
 				       const matrix::Vector3f &omega,
 				       const matrix::Vector3f &omega_sp_body, float dt);
 
@@ -95,6 +97,7 @@ private:
 		(ParamFloat<px4::params::GAC_INT_LIM>) _p_integral_limit,
 		(ParamFloat<px4::params::GAC_ROLL_MAX>) _p_roll_max,
 		(ParamFloat<px4::params::GAC_PITCH_MAX>) _p_pitch_max,
+		(ParamBool<px4::params::GAC_Q_REF_EN>) _p_quaternion_reference_enable,
 		(ParamFloat<px4::params::GAC_YAW_THR_MIN>) _p_yaw_throttle_min,
 		(ParamInt<px4::params::GAC_DOB_MODE>) _p_dob_mode,
 		(ParamFloat<px4::params::GAC_DOB_CUTOFF>) _p_dob_cutoff,

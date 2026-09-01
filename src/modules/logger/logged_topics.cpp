@@ -134,9 +134,11 @@ void LoggedTopics::add_default_topics()
 	add_topic("vehicle_air_data", 200);
 	add_topic("vehicle_angular_velocity", 20);
 	add_topic("vehicle_attitude", 50);
-	// Internally generated Geo controller attitude and body-rate setpoints.
-	// This stays separate from the external Offboard input topics below.
-	add_optional_topic("geo_control_attitude_setpoint", 20);
+	// Geo controller internal references, integrators and adaptive states.
+	// Keep these as regular topics so every MorphQuad flight log contains the
+	// controller state required for closed-loop analysis.
+	add_topic("geo_control_attitude_setpoint", 200);
+	add_topic("geo_control_position_adaptive", 20);
 	add_topic("vehicle_attitude_setpoint", 50);
 	add_topic("vehicle_command");
 	add_topic("vehicle_command_ack");

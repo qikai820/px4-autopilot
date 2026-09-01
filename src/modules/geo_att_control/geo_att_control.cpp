@@ -34,13 +34,23 @@ void GeoAttControl::resetDisturbanceObserver()
 	_previous_torque_valid = false;
 }
 
-Vector3f GeoAttControl::computeTorque(const Dcmf &R, const Dcmf &R_sp,
+Vector3f GeoAttControl::quaternionAttitudeError(const Quatf &q, const Quatf &q_sp) const
+{
+	// q_error represents the shortest rotation from the current attitude to the
+	// reference in the current body frame.  Negating its vector part preserves
+	// the sign convention of the former SO(3) error (current minus desired).
+	// Unlike vee(Rd'R-R'Rd)/2, this error does not collapse to zero at 180 deg.
+	const Quatf q_error = (q.inversed() * q_sp).canonical();
+	return -2.f * q_error.imag();
+}
+
+Vector3f GeoAttControl::computeTorque(const Quatf &q, const Quatf &q_sp,
 				     const Vector3f &omega, const Vector3f &omega_sp_body, float dt)
 {
-	// R 和 R_sp 均为机体到世界的方向余弦矩阵。反对称误差矩阵提取
-	// 得到姿态误差向量；角速度期望先转换到当前机体系再参与速率环。
-	const Dcmf error_matrix = (R_sp.transpose() * R - R.transpose() * R_sp) * 0.5f;
-	const Vector3f attitude_error(error_matrix(2, 1), error_matrix(0, 2), error_matrix(1, 0));
+	// 四元数误差在俯仰跨越 +/-90 度时连续，并避免传统 SO(3) 反对称
+	// 误差在正好 180 度时为零的非期望平衡点。
+	const Dcmf R(q);
+	const Vector3f attitude_error = quaternionAttitudeError(q, q_sp);
 	const Vector3f rate_error = omega - omega_sp_body;
 	const Vector3f attitude_gain(_p_roll_p.get(), _p_pitch_p.get(), _p_yaw_p.get());
 	const Vector3f rate_gain(_p_roll_rate_p.get(), _p_pitch_rate_p.get(), _p_yaw_rate_p.get());
@@ -205,13 +215,16 @@ void GeoAttControl::Run()
 			       || offboard_rate_only || (!attitude_valid && rates_valid);
 	const Dcmf R_sp(rate_only ? q : q_reference);
 	Vector3f omega_sp_body = rate_only ? rates_reference : R.transpose() * R_sp * rates_reference;
+	const bool quaternion_reference_enabled = _p_quaternion_reference_enable.get();
 
 	// 姿态硬限幅：到达边界时只禁止继续向外的角速度指令，
 	// 向内的指令仍然保留，用于把飞机拉回限制范围内。
 	const Eulerf current_euler(q);
-	const float roll_limit = math::radians(math::constrain(_p_roll_max.get(), 1.f, 85.f));
-	const float pitch_limit = math::radians(math::constrain(_p_pitch_max.get(), 1.f, 85.f));
-	if (!rate_only) {
+	// 有限 Euler 参考模式允许把保护范围设到接近 180 度。连续翻转则由
+	// GAC_Q_REF_EN 的四元数参考路径处理，不会经过这里的 Euler 限制。
+	const float roll_limit = math::radians(math::constrain(_p_roll_max.get(), 1.f, 179.9f));
+	const float pitch_limit = math::radians(math::constrain(_p_pitch_max.get(), 1.f, 179.9f));
+	if (!rate_only && !quaternion_reference_enabled) {
 		if (current_euler.phi() >= roll_limit && omega_sp_body(0) > 0.f) { omega_sp_body(0) = 0.f; }
 		if (current_euler.phi() <= -roll_limit && omega_sp_body(0) < 0.f) { omega_sp_body(0) = 0.f; }
 		if (current_euler.theta() >= pitch_limit && omega_sp_body(1) > 0.f) { omega_sp_body(1) = 0.f; }
@@ -224,15 +237,13 @@ void GeoAttControl::Run()
 							 math::max(_p_izz.get(), 0.001f)));
 
 	if (_armed && rates_valid) {
-		torque = computeTorque(R, R_sp, omega, omega_sp_body, dt);
+		torque = computeTorque(q, rate_only ? q : q_reference, omega, omega_sp_body, dt);
 
 		// 刚体转动动力学：J*omega_dot = tau_cmd + d_tau - omega×J*omega。
 		// 使用上一周期实际发布的力矩反解外部等效扰动力矩 d_tau，再经过
 		// 一阶低通滤波。只在稳定飞行且控制分配未饱和时学习，避免把机动、
 		// 执行器饱和和起飞瞬态误认为恒定扰动。
-		const Dcmf attitude_error_matrix = (R_sp.transpose() * R - R.transpose() * R_sp) * 0.5f;
-		const Vector3f attitude_error(attitude_error_matrix(2, 1), attitude_error_matrix(0, 2),
-					      attitude_error_matrix(1, 0));
+		const Vector3f attitude_error = quaternionAttitudeError(q, rate_only ? q : q_reference);
 		const Vector3f measured_angular_acceleration(angular_velocity.xyz_derivative[0],
 							 angular_velocity.xyz_derivative[1],
 							 angular_velocity.xyz_derivative[2]);
@@ -273,7 +284,7 @@ void GeoAttControl::Run()
 	// 对实际姿态再做一次单向力矩保护。仅限制把飞机继续推向边界外的
 	// 力矩，向内的力矩仍保留用于刹车和回中；这样即使存在角速度惯性，
 	// 控制器也不会在已经达到 pitch/roll 限制后继续施加外向力矩。
-	if (!rate_only) {
+	if (!rate_only && !quaternion_reference_enabled) {
 		if ((current_euler.phi() >= roll_limit && torque(0) > 0.f)
 		    || (current_euler.phi() <= -roll_limit && torque(0) < 0.f)) {
 			torque(0) = 0.f;

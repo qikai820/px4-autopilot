@@ -3,34 +3,50 @@ parameters:
   - group: Geometric Position Control
     definitions:
       GPC_RATE_HZ: {description: {short: Position and force loop rate}, type: float, unit: Hz, min: 10, max: 100, default: 50.0}
-      GPC_MASS: {description: {short: Vehicle mass}, type: float, unit: kg, min: 0.1, max: 50.0, default: 6.8}
-      GPC_THR_MAX: {description: {short: Maximum total physical thrust}, type: float, unit: N, min: 1.0, max: 1000.0, default: 189.836}
-      GPC_XY_P: {description: {short: Horizontal position proportional gain}, type: float, default: 1.0}
-      GPC_Z_P: {description: {short: Vertical position proportional gain}, type: float, default: 2.5}
-      GPC_XY_VP: {description: {short: Horizontal velocity proportional gain}, type: float, default: 1.0}
-      GPC_Z_VP: {description: {short: Vertical velocity proportional gain}, type: float, default: 2.0}
-      GPC_VEL_I: {description: {short: Velocity integral gain}, type: float, default: 0.02}
-      GPC_VEL_ILIM: {description: {short: Velocity integral limit}, type: float, default: 2.0}
+      GPC_MASS:
+        description:
+          short: Vehicle mass
+          long: Vehicle mass used to convert desired acceleration to force. Set it to the actual takeoff mass including battery and payload; an error directly biases vertical thrust.
+        type: float
+        unit: kg
+        min: 0.1
+        max: 50.0
+        default: 6.8
+      GPC_THR_MAX:
+        description:
+          short: Maximum total physical thrust
+          long: Total upward thrust available from all rotors in newtons. Use a measured value at the lowest expected battery voltage, not the motor or ESC theoretical maximum.
+        type: float
+        unit: N
+        min: 1.0
+        max: 1000.0
+        default: 189.836
+      GPC_XY_P: {description: {short: Horizontal position proportional gain, long: Converts horizontal position error to a velocity or acceleration correction. Increase for faster position capture; too high causes overshoot and attitude oscillation.}, type: float, default: 1.0}
+      GPC_Z_P: {description: {short: Vertical position proportional gain, long: Converts altitude error to vertical velocity correction. Increase for faster altitude capture; reduce if the vehicle climbs then sinks or oscillates around the setpoint.}, type: float, default: 2.5}
+      GPC_XY_VP: {description: {short: Horizontal velocity proportional gain, long: Damps horizontal velocity error and determines acceleration response. Increase for tighter tracking, but check thrust and tilt saturation.}, type: float, default: 1.0}
+      GPC_Z_VP: {description: {short: Vertical velocity proportional gain, long: Main damping gain for the vertical speed loop. Increase to stop residual climb or descent sooner; too high amplifies velocity estimate noise.}, type: float, default: 2.0}
+      GPC_VEL_I: {description: {short: Velocity integral gain, long: Integrates persistent velocity error to compensate hover-thrust bias and slow disturbances. Start small and reduce it if altitude overshoot or integrator windup appears.}, type: float, default: 0.02}
+      GPC_VEL_ILIM: {description: {short: Velocity integral limit, long: Absolute limit of the velocity-loop integrator contribution. It prevents prolonged saturation from storing excessive correction; increase only when a known steady bias cannot be removed.}, type: float, default: 2.0}
       GPC_VX_MAX: {description: {short: Maximum X velocity}, type: float, unit: m/s, default: 2.0}
       GPC_VY_MAX: {description: {short: Maximum Y velocity}, type: float, unit: m/s, default: 2.0}
-      GPC_VZ_MAX: {description: {short: Maximum Z velocity}, type: float, unit: m/s, default: 1.0}
+      GPC_VZ_MAX: {description: {short: Maximum vertical velocity, long: Limit for commanded vertical speed. A lower value makes altitude changes gentler; it does not limit the measured vehicle speed during a transient.}, type: float, unit: m/s, default: 1.0}
       GPC_AX_MAX: {description: {short: Maximum X acceleration}, type: float, unit: m/s^2, default: 2.0}
       GPC_AY_MAX: {description: {short: Maximum Y acceleration}, type: float, unit: m/s^2, default: 2.0}
-      GPC_AZ_MAX: {description: {short: Maximum Z acceleration}, type: float, unit: m/s^2, default: 1.0}
-      GPC_MAN_DZ: {description: {short: Manual stick deadzone}, type: float, min: 0.0, max: 0.5, default: 0.1}
+      GPC_AZ_MAX: {description: {short: Maximum vertical acceleration, long: Slew limit for the vertical-speed setpoint and vertical acceleration demand. During a full climb-to-descent reversal, the minimum theoretical transition time is approximately 2*GPC_VZ_MAX/GPC_AZ_MAX.}, type: float, unit: m/s^2, default: 1.0}
+      GPC_MAN_DZ: {description: {short: Manual stick deadzone, long: Neutral-stick deadzone used in manual mode. Increase to reject transmitter noise; too large makes low-rate commands unresponsive.}, type: float, min: 0.0, max: 0.5, default: 0.1}
       GPC_MAN_FMAX: {description: {short: Maximum manual horizontal force}, type: float, unit: N, default: 40.0}
-      GPC_RATE_MAX: {description: {short: Maximum manual attitude rate}, type: float, unit: rad/s, default: 0.5}
-      GPC_ROLL_MAX: {description: {short: Maximum roll reference}, type: float, unit: deg, default: 20.0}
-      GPC_PITCH_MAX: {description: {short: Maximum pitch reference}, type: float, unit: deg, default: 20.0}
-      GPC_ADP_MODE: {description: {short: Position and velocity adaptation mode}, type: int32, min: 0, max: 2, default: 1}
+      GPC_RATE_MAX: {description: {short: Maximum manual attitude rate, long: Maximum roll, pitch and yaw rate generated from a full manual stick command. Unit is rad/s; this limits the setpoint sent to the attitude controller, not the measured body rate.}, type: float, unit: rad/s, default: 0.5}
+      GPC_ROLL_MAX: {description: {short: Maximum roll reference, long: Hard roll-angle limit in finite Euler-reference mode. GAC_Q_REF_EN bypasses it and uses a continuous quaternion reference.}, type: float, unit: deg, min: 1, max: 179.9, default: 20.0}
+      GPC_PITCH_MAX: {description: {short: Maximum pitch reference, long: Hard pitch-angle limit in finite Euler-reference mode. GAC_Q_REF_EN bypasses it and uses a continuous quaternion reference.}, type: float, unit: deg, min: 1, max: 179.9, default: 20.0}
+      GPC_ADP_MODE: {description: {short: Position and velocity adaptation mode, long: Selects the adaptive acceleration/disturbance path - 0 disabled, 1 estimate and log only, 2 apply the estimate in closed loop.}, type: int32, min: 0, max: 2, default: 1}
       GPC_ADP_CUTOFF: {description: {short: Adaptive acceleration observer cutoff}, type: float, unit: 1/s, min: 0.05, max: 20.0, default: 1.0}
       GPC_ADP_POS_I: {description: {short: Position adaptive velocity gain}, type: float, unit: 1/s, min: 0.0, max: 2.0, default: 0.05}
       GPC_ADP_POS_LIM: {description: {short: Position adaptive velocity limit}, type: float, unit: m/s, min: 0.0, max: 5.0, default: 0.5}
       GPC_ADP_ACC_LIM: {description: {short: Velocity adaptive acceleration limit}, type: float, unit: m/s^2, min: 0.0, max: 20.0, default: 3.0}
-      GPC_HTE_EN: {description: {short: Enable hover thrust estimator}, type: boolean, default: true}
-      GPC_HTE_GAIN: {description: {short: Hover thrust estimator convergence gain}, type: float, unit: 1/s, min: 0.0, max: 5.0, default: 0.2}
+      GPC_HTE_EN: {description: {short: Enable hover thrust estimator, long: Learns the normalized thrust required for zero vertical acceleration. Disable only for controlled tests; the learned value is bounded by GPC_HTE_MIN and GPC_HTE_MAX.}, type: boolean, default: true}
+      GPC_HTE_GAIN: {description: {short: Hover thrust estimator convergence gain, long: Adaptation rate of the hover-thrust estimate. Higher values track battery or payload changes faster but also follow transient acceleration and noise.}, type: float, unit: 1/s, min: 0.0, max: 5.0, default: 0.2}
       GPC_HTE_MIN: {description: {short: Minimum learned hover thrust}, type: float, min: 0.05, max: 0.9, default: 0.2}
       GPC_HTE_MAX: {description: {short: Maximum learned hover thrust}, type: float, min: 0.1, max: 0.95, default: 0.7}
       GPC_HTE_TILT: {description: {short: Maximum tilt while learning hover thrust}, type: float, unit: deg, min: 1.0, max: 45.0, default: 15.0}
-      GPC_VCAP_ACC: {description: {short: Vertical capture braking acceleration}, type: float, unit: m/s^2, min: 0.1, max: 10.0, default: 2.0}
-      GPC_VCAP_VEL: {description: {short: Vertical capture stop threshold}, type: float, unit: m/s, min: 0.02, max: 1.0, default: 0.15}
+      GPC_VCAP_ACC: {description: {short: Vertical capture braking acceleration, long: Braking acceleration used when switching to altitude hold while the vehicle still has vertical speed. Increase to stop sooner, but keep below the thrust margin available in hover.}, type: float, unit: m/s^2, min: 0.1, max: 10.0, default: 2.0}
+      GPC_VCAP_VEL: {description: {short: Vertical capture stop threshold, long: Capture is considered settled when the absolute vertical speed is below this threshold. Lower values reduce residual speed but may delay completion in noisy estimates.}, type: float, unit: m/s, min: 0.02, max: 1.0, default: 0.15}

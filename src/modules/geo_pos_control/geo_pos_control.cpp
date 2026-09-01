@@ -45,8 +45,8 @@ void GeoPosControl::resetState(const Quatf &q, const Vector3f &pos, const Vector
 void GeoPosControl::limitAttitudeReference()
 {
 	const Eulerf euler(_attitude_reference);
-	const float roll_limit = math::radians(math::constrain(_p_roll_max.get(), 1.f, 85.f));
-	const float pitch_limit = math::radians(math::constrain(_p_pitch_max.get(), 1.f, 85.f));
+	const float roll_limit = math::radians(math::constrain(_p_roll_max.get(), 1.f, 179.9f));
+	const float pitch_limit = math::radians(math::constrain(_p_pitch_max.get(), 1.f, 179.9f));
 	_attitude_reference = Quatf(Eulerf(math::constrain(euler.phi(), -roll_limit, roll_limit),
 					      math::constrain(euler.theta(), -pitch_limit, pitch_limit), euler.psi()));
 	_attitude_reference.normalize();
@@ -495,38 +495,51 @@ void GeoPosControl::Run()
 	}
 
 	if (!rate_only) {
-		// 手动姿态参考采用独立的 Euler 轴积分。用一个合成旋转轴更新
-		// 四元数时，已有的 pitch 会把 pitch 角速度投影到 roll，导致两个
-		// 摇杆相互影响；独立积分可以保证每个轴严格受自己的角度限制。
-		Eulerf euler_ref(_attitude_reference);
-		const float roll_limit = math::radians(math::constrain(_p_roll_max.get(), 1.f, 85.f));
-		const float pitch_limit = math::radians(math::constrain(_p_pitch_max.get(), 1.f, 85.f));
-		float roll_rate = rates_sp(0);
-		float pitch_rate = rates_sp(1);
+		if (_p_quaternion_reference_enable.get()) {
+			// 连续四元数参考：rates_sp 是期望参考机体系角速度。右乘由
+			// 旋转向量构造的小增量，可连续通过俯仰 +/-90 度并完成翻转，
+			// 不再从四元数反解 Euler 角参与下一周期计算。
+			const Vector3f delta_angle = rates_sp * dt;
 
-		// 到达边界后只阻止继续向外运动，允许反向摇杆立即脱离边界。
-		if ((euler_ref.phi() >= roll_limit && roll_rate > 0.f)
-		    || (euler_ref.phi() <= -roll_limit && roll_rate < 0.f)) {
-			roll_rate = 0.f;
-		}
-		if ((euler_ref.theta() >= pitch_limit && pitch_rate > 0.f)
-		    || (euler_ref.theta() <= -pitch_limit && pitch_rate < 0.f)) {
-			pitch_rate = 0.f;
-		}
+			if (delta_angle.isAllFinite() && delta_angle.norm() > 1e-7f) {
+				_attitude_reference = _attitude_reference * Quatf(AxisAnglef(delta_angle));
+				_attitude_reference.normalize();
+			}
 
-		const float roll = math::constrain(euler_ref.phi() + roll_rate * dt,
-						   -roll_limit, roll_limit);
-		const float pitch = math::constrain(euler_ref.theta() + pitch_rate * dt,
-						    -pitch_limit, pitch_limit);
-		_attitude_reference = Quatf(Eulerf(roll, pitch, euler_ref.psi() + rates_sp(2) * dt));
-		_attitude_reference.normalize();
+		} else {
+			// 有限倾角模式仍使用独立 Euler 轴积分，以提供明确的滚转和
+			// 俯仰安全边界。连续翻转应启用 GAC_Q_REF_EN，避免使用 Euler
+			// 表达作为状态；有限 Euler 模式仅放宽到接近 180 度。
+			Eulerf euler_ref(_attitude_reference);
+			const float roll_limit = math::radians(math::constrain(_p_roll_max.get(), 1.f, 179.9f));
+			const float pitch_limit = math::radians(math::constrain(_p_pitch_max.get(), 1.f, 179.9f));
+			float roll_rate = rates_sp(0);
+			float pitch_rate = rates_sp(1);
+
+			// 到达边界后只阻止继续向外运动，允许反向摇杆立即脱离边界。
+			if ((euler_ref.phi() >= roll_limit && roll_rate > 0.f)
+			    || (euler_ref.phi() <= -roll_limit && roll_rate < 0.f)) {
+				roll_rate = 0.f;
+			}
+			if ((euler_ref.theta() >= pitch_limit && pitch_rate > 0.f)
+			    || (euler_ref.theta() <= -pitch_limit && pitch_rate < 0.f)) {
+				pitch_rate = 0.f;
+			}
+
+			const float roll = math::constrain(euler_ref.phi() + roll_rate * dt,
+							   -roll_limit, roll_limit);
+			const float pitch = math::constrain(euler_ref.theta() + pitch_rate * dt,
+							    -pitch_limit, pitch_limit);
+			_attitude_reference = Quatf(Eulerf(roll, pitch, euler_ref.psi() + rates_sp(2) * dt));
+			_attitude_reference.normalize();
+		}
 	}
 
 	if (position_mode) {
 		// aux1/aux2 是机体系水平速度指令，先按当前航向旋转到世界 NED；
 		// throttle 是垂向速度指令。位置期望随速度指令积分更新。
 		const float yaw = Eulerf(q).psi();
-		const float vx_body = manual_valid ? math::deadzone(manual.aux1, dz) * _p_vx_max.get() : 0.f;
+		const float vx_body = manual_valid ? math::deadzone(-manual.aux1, dz) * _p_vx_max.get() : 0.f;
 		const float vy_body = manual_valid ? math::deadzone(manual.aux2, dz) * _p_vy_max.get() : 0.f;
 		const float vz = manual_valid ? -math::deadzone(manual.throttle, dz) * _p_vz_max.get() : 0.f;
 		velocity_sp = Vector3f(cosf(yaw) * vx_body - sinf(yaw) * vy_body,

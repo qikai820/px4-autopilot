@@ -798,6 +798,21 @@ parameters:
             max: 1.0
             default: 0.20
 
+        CA_MQ_SSTEP:
+            description:
+                short: MorphQuad servo slew step
+                long: |
+                  Maximum alpha/beta servo output change per control
+                  allocation update in normalized actuator units. A value
+                  of 0 disables the slew limiter. With +/-180 degree
+                  servos, 0.05 corresponds to about 9 degrees per update.
+            type: float
+            decimal: 3
+            increment: 0.01
+            min: 0.0
+            max: 2.0
+            default: 0.05
+
         CA_MQ_NS_GAIN:
             description:
                 short: Null-space descent gain
