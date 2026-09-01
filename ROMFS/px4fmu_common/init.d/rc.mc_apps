@@ -41,3 +41,10 @@ if param compare -s MC_NN_EN 1
 then
 	mc_nn_control start
 fi
+
+# Register Dock Guidance only after Commander is running. The Viztra serial
+# driver itself is started earlier from rc.sensors.
+if param compare -s SENS_EN_VIZTRA 1
+then
+	dock_guidance start
+fi
