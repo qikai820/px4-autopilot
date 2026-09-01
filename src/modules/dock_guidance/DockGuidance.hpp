@@ -44,6 +44,14 @@
 #include <uORB/topics/vehicle_local_position.h>
 #include <uORB/topics/parameter_update.h>
 #include <uORB/topics/dock_guidance_setpoint.h>
+#include <uORB/topics/arming_check_reply.h>
+#include <uORB/topics/arming_check_request.h>
+#include <uORB/topics/register_ext_component_reply.h>
+#include <uORB/topics/register_ext_component_request.h>
+#include <uORB/topics/unregister_ext_component.h>
+#include <uORB/topics/vehicle_control_mode.h>
+#include <uORB/topics/vehicle_rates_setpoint.h>
+#include <uORB/topics/vehicle_status.h>
 
 #include <matrix/matrix/math.hpp>
 
@@ -58,6 +66,7 @@ public:
 	static int task_spawn(int argc, char *argv[]);
 	static int custom_command(int argc, char *argv[]);
 	static int print_usage(const char *reason = nullptr);
+	int print_status() override;
 
 	bool init();
 
@@ -78,6 +87,14 @@ private:
 	void Run() override;
 	void update_parameters();
 	void update_camera_rotation();
+	void register_dock_mode(hrt_abstime now);
+	void check_mode_registration();
+	void configure_dock_mode(hrt_abstime now);
+	void unregister_dock_mode();
+	void reply_to_arming_check(const arming_check_request_s &request);
+	void update_mode_state();
+	void publish_rates_setpoint(const dock_guidance_setpoint_s &setpoint, bool reset_integral);
+	void publish_safe_rates_setpoint(hrt_abstime timestamp);
 
 	// 保存并读取与相机画面时间对齐的飞行器状态。
 	void push_delay_history(hrt_abstime timestamp);
@@ -101,10 +118,18 @@ private:
 	uORB::Subscription _att_sub{ORB_ID(vehicle_attitude)};
 	uORB::Subscription _gyro_sub{ORB_ID(vehicle_angular_velocity)};
 	uORB::Subscription _local_pos_sub{ORB_ID(vehicle_local_position)};
+	uORB::Subscription _vehicle_status_sub{ORB_ID(vehicle_status)};
+	uORB::Subscription _register_ext_component_reply_sub{ORB_ID(register_ext_component_reply)};
+	uORB::Subscription _arming_check_request_sub{ORB_ID(arming_check_request)};
 	uORB::SubscriptionInterval _parameter_update_sub{ORB_ID(parameter_update), 1_s};
 
 	// 对接引导输出，供未来的 Dock 模式仲裁器或控制器订阅。
 	uORB::Publication<dock_guidance_setpoint_s> _setpoint_pub{ORB_ID(dock_guidance_setpoint)};
+	uORB::Publication<vehicle_rates_setpoint_s> _rates_setpoint_pub{ORB_ID(vehicle_rates_setpoint)};
+	uORB::Publication<register_ext_component_request_s> _register_ext_component_request_pub{ORB_ID(register_ext_component_request)};
+	uORB::Publication<unregister_ext_component_s> _unregister_ext_component_pub{ORB_ID(unregister_ext_component)};
+	uORB::Publication<vehicle_control_mode_s> _config_control_setpoints_pub{ORB_ID(config_control_setpoints)};
+	uORB::Publication<arming_check_reply_s> _arming_check_reply_pub{ORB_ID(arming_check_reply)};
 
 	// 相机系与 PX4 机体系（FRD）之间的可配置安装旋转矩阵。
 	matrix::Matrix3f _rot_body_to_cam;
@@ -145,6 +170,14 @@ private:
 	uint64_t _last_observation_us{0};
 	uint64_t _last_sample_us{0};
 	bool _setpoint_valid{false};
+	bool _dock_mode_active{false};
+	bool _reset_rate_integral{false};
+	bool _unregistration_sent{false};
+	int8_t _arming_check_id{-1};
+	int8_t _mode_id{-1};
+	uint64_t _mode_request_id{0};
+	hrt_abstime _last_registration_request_us{0};
+	hrt_abstime _last_mode_config_us{0};
 
 	// 环形历史缓冲：以四元数保存姿态，避免欧拉角跨界和奇异点插值错误。
 	matrix::Quatf _att_delay_buf[DELAY_BUF_SIZE] {};

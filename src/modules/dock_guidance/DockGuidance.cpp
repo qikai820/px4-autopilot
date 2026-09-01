@@ -37,6 +37,8 @@
 #include <mathlib/math/Functions.hpp>
 #include <px4_platform_common/log.h>
 
+#include <cstring>
+
 using namespace matrix;
 
 DockGuidance::DockGuidance() :
@@ -53,6 +55,7 @@ bool
 DockGuidance::init()
 {
 	update_parameters();
+	_mode_request_id = hrt_absolute_time();
 
 	// 新视觉观测会立即触发运行；固定周期同时负责状态历史采样和断流看门狗。
 	if (!_viztra_sub.registerCallback()) {
@@ -71,6 +74,18 @@ void
 DockGuidance::Run()
 {
 	if (should_exit()) {
+		if (!_unregistration_sent) {
+			if (_dock_mode_active) {
+				publish_safe_rates_setpoint(hrt_absolute_time());
+			}
+
+			unregister_dock_mode();
+			_unregistration_sent = true;
+			// 给 Commander 留出一个更新周期消费注销消息，再销毁 uORB 发布者。
+			ScheduleDelayed(200_ms);
+			return;
+		}
+
 		_viztra_sub.unregisterCallback();
 		ScheduleClear();
 		exit_and_cleanup();
@@ -84,6 +99,25 @@ DockGuidance::Run()
 	}
 
 	const uint64_t now_us = hrt_absolute_time();
+
+	if (_mode_id < 0 || _arming_check_id < 0) {
+		if ((_last_registration_request_us == 0) || (now_us - _last_registration_request_us > 1_s)) {
+			register_dock_mode(now_us);
+		}
+
+		check_mode_registration();
+
+	} else if ((_last_mode_config_us == 0) || (now_us - _last_mode_config_us > 1_s)) {
+		configure_dock_mode(now_us);
+	}
+
+	arming_check_request_s arming_check_request{};
+
+	if (_arming_check_request_sub.update(&arming_check_request)) {
+		reply_to_arming_check(arming_check_request);
+	}
+
+	update_mode_state();
 	push_delay_history(now_us);
 
 	viztra_observation_s obs;
@@ -320,6 +354,153 @@ DockGuidance::invalidate_setpoint(hrt_abstime timestamp, const char *reason)
 	sp.valid = false;
 	sp.stage = static_cast<uint8_t>(Stage::NONE);
 	_setpoint_pub.publish(sp);
+
+	if (_dock_mode_active) {
+		publish_safe_rates_setpoint(timestamp);
+	}
+}
+
+void
+DockGuidance::register_dock_mode(hrt_abstime now)
+{
+	register_ext_component_request_s request{};
+	request.timestamp = now;
+	request.request_id = _mode_request_id;
+	request.px4_ros2_api_version = register_ext_component_request_s::LATEST_PX4_ROS2_API_VERSION;
+	request.register_arming_check = true;
+	request.register_mode = true;
+	strncpy(request.name, "Dock Guidance", sizeof(request.name) - 1);
+	_register_ext_component_request_pub.publish(request);
+	_last_registration_request_us = now;
+}
+
+void
+DockGuidance::check_mode_registration()
+{
+	register_ext_component_reply_s reply{};
+	int remaining = register_ext_component_reply_s::ORB_QUEUE_LENGTH;
+
+	while ((_mode_id < 0 || _arming_check_id < 0) && remaining-- > 0
+	       && _register_ext_component_reply_sub.update(&reply)) {
+		if (reply.request_id != _mode_request_id) {
+			continue;
+		}
+
+		if (reply.success) {
+			_mode_id = reply.mode_id;
+			_arming_check_id = reply.arming_check_id;
+			PX4_INFO("Dock mode registered: mode=%d check=%d", _mode_id, _arming_check_id);
+			configure_dock_mode(hrt_absolute_time());
+
+		} else {
+			PX4_WARN("Dock mode registration rejected");
+		}
+	}
+}
+
+void
+DockGuidance::configure_dock_mode(hrt_abstime now)
+{
+	if (_mode_id < 0) {
+		return;
+	}
+
+	vehicle_control_mode_s control_mode{};
+	control_mode.timestamp = now;
+	control_mode.source_id = static_cast<uint8_t>(_mode_id);
+	control_mode.flag_control_rates_enabled = true;
+	control_mode.flag_control_allocation_enabled = true;
+	_config_control_setpoints_pub.publish(control_mode);
+	_last_mode_config_us = now;
+}
+
+void
+DockGuidance::unregister_dock_mode()
+{
+	if (_mode_id < 0 && _arming_check_id < 0) {
+		return;
+	}
+
+	unregister_ext_component_s request{};
+	request.timestamp = hrt_absolute_time();
+	request.mode_id = _mode_id;
+	request.arming_check_id = _arming_check_id;
+	request.mode_executor_id = -1;
+	strncpy(request.name, "Dock Guidance", sizeof(request.name) - 1);
+	_unregister_ext_component_pub.publish(request);
+	_mode_id = -1;
+	_arming_check_id = -1;
+	_dock_mode_active = false;
+}
+
+void
+DockGuidance::reply_to_arming_check(const arming_check_request_s &request)
+{
+	if (_arming_check_id < 0) {
+		return;
+	}
+
+	arming_check_reply_s reply{};
+	reply.timestamp = hrt_absolute_time();
+	reply.request_id = request.request_id;
+	reply.registration_id = _arming_check_id;
+	reply.health_component_index = arming_check_reply_s::HEALTH_COMPONENT_INDEX_NONE;
+	reply.can_arm_and_run = _setpoint_valid;
+	reply.mode_req_angular_velocity = true;
+	reply.mode_req_attitude = true;
+	reply.mode_req_manual_control = true;
+	_arming_check_reply_pub.publish(reply);
+}
+
+void
+DockGuidance::update_mode_state()
+{
+	vehicle_status_s status{};
+
+	if (!_vehicle_status_sub.copy(&status)) {
+		return;
+	}
+
+	const bool active = (_mode_id >= 0) && (status.nav_state == static_cast<uint8_t>(_mode_id));
+
+	if (active && !_dock_mode_active) {
+		PX4_INFO("Dock mode active");
+		_reset_rate_integral = true;
+
+		if (!_setpoint_valid) {
+			// 正常情况下已解锁时 Commander 会拒绝无视觉的模式切换；这里仍清除旧模式遗留指令作为最后防线。
+			publish_safe_rates_setpoint(hrt_absolute_time());
+		}
+
+	} else if (!active && _dock_mode_active) {
+		PX4_INFO("Dock mode inactive");
+	}
+
+	_dock_mode_active = active;
+}
+
+void
+DockGuidance::publish_rates_setpoint(const dock_guidance_setpoint_s &setpoint, bool reset_integral)
+{
+	vehicle_rates_setpoint_s rates{};
+	rates.timestamp = setpoint.timestamp;
+	rates.roll = setpoint.roll_rate_rad_s;
+	rates.pitch = setpoint.pitch_rate_rad_s;
+	rates.yaw = setpoint.yaw_rate_rad_s;
+	rates.thrust_body[0] = 0.0f;
+	rates.thrust_body[1] = 0.0f;
+	rates.thrust_body[2] = -math::constrain(setpoint.throttle, 0.0f, 1.0f);
+	rates.reset_integral = reset_integral;
+	_rates_setpoint_pub.publish(rates);
+}
+
+void
+DockGuidance::publish_safe_rates_setpoint(hrt_abstime timestamp)
+{
+	dock_guidance_setpoint_s safe{};
+	safe.timestamp = timestamp;
+	safe.throttle = math::constrain(_param_dock_thr.get(), 0.0f, 1.0f);
+	publish_rates_setpoint(safe, true);
 }
 
 // ---------- 视觉观测处理 ----------
@@ -563,6 +744,11 @@ DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s)
 	sp.valid = true;
 	_setpoint_pub.publish(sp);
 	_setpoint_valid = true;
+
+	if (_dock_mode_active) {
+		publish_rates_setpoint(sp, _reset_rate_integral);
+		_reset_rate_integral = false;
+	}
 }
 
 void
@@ -677,6 +863,15 @@ DockGuidance::custom_command(int argc, char *argv[])
 }
 
 int
+DockGuidance::print_status()
+{
+	PX4_INFO("Dock mode: %s", (_mode_id >= 0) ? "registered" : "not registered");
+	PX4_INFO("mode id: %d, arming check id: %d", _mode_id, _arming_check_id);
+	PX4_INFO("active: %s, vision: %s", _dock_mode_active ? "yes" : "no", _setpoint_valid ? "valid" : "invalid");
+	return 0;
+}
+
+int
 DockGuidance::print_usage(const char *reason)
 {
 	if (reason) {
@@ -690,6 +885,8 @@ DockGuidance::print_usage(const char *reason)
 Visual docking guidance controller.  Subscribes to viztra_observation for
 camera line-of-sight data and produces body-frame rate setpoints via a
 three-stage controller (pitch capture → angle capture → LOS-rate tracking).
+It registers a selectable external flight mode named "Dock Guidance". In that
+mode only the PX4 rate controller and control allocation remain enabled.
 
 ### Usage
 
