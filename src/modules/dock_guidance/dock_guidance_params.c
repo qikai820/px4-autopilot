@@ -18,6 +18,33 @@ PARAM_DEFINE_INT32(DOCK_CAM_DLY, 0);
 PARAM_DEFINE_INT32(DOCK_OBS_TOUT, 150);
 
 /**
+ * Camera-to-body roll rotation [deg]
+ *
+ * @min -180
+ * @max 180
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_CAM_ROLL, -90.0f);
+
+/**
+ * Camera-to-body pitch rotation [deg]
+ *
+ * @min -180
+ * @max 180
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_CAM_PITCH, 0.0f);
+
+/**
+ * Camera-to-body yaw rotation [deg]
+ *
+ * @min -180
+ * @max 180
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_CAM_YAW, 0.0f);
+
+/**
  * LOS vector filter cutoff frequency [Hz]
  *
  * @group Dock Guidance
@@ -88,6 +115,42 @@ PARAM_DEFINE_FLOAT(DOCK_RATE_SLEW, 300.0f);
  * @group Dock Guidance
  */
 PARAM_DEFINE_FLOAT(DOCK_VIS_LIM, 20.0f);
+
+/**
+ * Visibility-stage hysteresis [deg]
+ *
+ * @min 0
+ * @max 20
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_VIS_HYST, 3.0f);
+
+/**
+ * Pitch-capture entry angle [deg]
+ *
+ * @min 10
+ * @max 89
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_PCAP_ENT, 60.0f);
+
+/**
+ * Pitch-capture exit angle [deg]
+ *
+ * @min 5
+ * @max 89
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_PCAP_EXT, 50.0f);
+
+/**
+ * Maximum accepted camera LOS angle [deg]
+ *
+ * @min 10
+ * @max 89.9
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_LOS_MAX, 89.0f);
 
 /**
  * LOS yaw rate P gain

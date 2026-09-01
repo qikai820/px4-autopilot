@@ -43,15 +43,6 @@ DockGuidance::DockGuidance() :
 	ModuleParams(nullptr),
 	ScheduledWorkItem(MODULE_NAME, px4::wq_configurations::nav_and_controllers)
 {
-	// 相机坐标系约定：X 向前、Y 向右、Z 向下。
-	// 机体系遵循 PX4 FRD：X 向前、Y 向右、Z 向下。
-	// 本安装矩阵用于把相机视线/角速度指令转换到机体系；安装方向改变时应在此处修改。
-	_rot_cam_to_body(0, 0) = 1.0f;  _rot_cam_to_body(0, 1) = 0.0f; _rot_cam_to_body(0, 2) = 0.0f;
-	_rot_cam_to_body(1, 0) = 0.0f;  _rot_cam_to_body(1, 1) = 0.0f; _rot_cam_to_body(1, 2) = 1.0f;
-	_rot_cam_to_body(2, 0) = 0.0f;  _rot_cam_to_body(2, 1) = -1.0f; _rot_cam_to_body(2, 2) = 0.0f;
-
-	_rot_body_to_cam = _rot_cam_to_body;
-	_rot_body_to_cam.transpose();
 }
 
 DockGuidance::~DockGuidance()
@@ -61,6 +52,8 @@ DockGuidance::~DockGuidance()
 bool
 DockGuidance::init()
 {
+	update_parameters();
+
 	// 新视觉观测会立即触发运行；固定周期同时负责状态历史采样和断流看门狗。
 	if (!_viztra_sub.registerCallback()) {
 		PX4_ERR("viztra callback registration failed");
@@ -181,6 +174,13 @@ DockGuidance::Run()
 		return;
 	}
 
+	const float los_limit = math::constrain(_param_dock_los_max.get(), 10.0f, 89.9f);
+
+	if ((fabsf(los_yaw_deg) > los_limit) || (fabsf(los_pitch_deg) > los_limit)) {
+		invalidate_setpoint(now_us, "LOS outside configured range");
+		return;
+	}
+
 	process_observation(los_yaw_deg, los_pitch_deg, att_deg, gyro_dps, run_dt_s, sample_us);
 }
 
@@ -199,22 +199,15 @@ DockGuidance::push_delay_history(hrt_abstime timestamp)
 
 	const Quatf q(att.q);
 
-	if (!q.isAllFinite() || !Vector3f(av.xyz).isAllFinite()) {
+	if (!q.isAllFinite() || (q.norm() < 0.5f) || !Vector3f(av.xyz).isAllFinite()) {
 		return;
 	}
-
-	const Dcmf R(q);
-	Vector3f euler_deg;
-	Eulerf euler(R);
-	euler_deg(0) = math::degrees(euler.phi());
-	euler_deg(1) = math::degrees(euler.theta());
-	euler_deg(2) = math::degrees(euler.psi());
 
 	Vector3f gyro_dps(math::degrees(av.xyz[0]),
 			  math::degrees(av.xyz[1]),
 			  math::degrees(av.xyz[2]));
 
-	_att_delay_buf[_delay_idx] = euler_deg;
+	_att_delay_buf[_delay_idx] = q.normalized();
 	_gyro_delay_buf[_delay_idx] = gyro_dps;
 	_delay_time_buf[_delay_idx] = timestamp;
 	_delay_idx = (_delay_idx + 1) % DELAY_BUF_SIZE;
@@ -236,7 +229,8 @@ DockGuidance::get_delayed_state(hrt_abstime timestamp_sample, Vector3f &att_deg,
 	if (target_us <= _delay_time_buf[oldest]) {
 		// 历史尚未覆盖相机采样时刻时不使用错误姿态；等缓冲区积累足够数据后再输出有效指令。
 		if (target_us == _delay_time_buf[oldest]) {
-			att_deg = _att_delay_buf[oldest];
+			const Eulerf euler(_att_delay_buf[oldest]);
+			att_deg = Vector3f(math::degrees(euler.phi()), math::degrees(euler.theta()), math::degrees(euler.psi()));
 			gyro_dps = _gyro_delay_buf[oldest];
 			return true;
 		}
@@ -245,7 +239,8 @@ DockGuidance::get_delayed_state(hrt_abstime timestamp_sample, Vector3f &att_deg,
 	}
 
 	if (target_us >= _delay_time_buf[newest]) {
-		att_deg = _att_delay_buf[newest];
+		const Eulerf euler(_att_delay_buf[newest]);
+		att_deg = Vector3f(math::degrees(euler.phi()), math::degrees(euler.theta()), math::degrees(euler.psi()));
 		gyro_dps = _gyro_delay_buf[newest];
 		return true;
 	}
@@ -259,9 +254,23 @@ DockGuidance::get_delayed_state(hrt_abstime timestamp_sample, Vector3f &att_deg,
 			const float alpha = (span_us > 0) ?
 					    static_cast<float>(target_us - _delay_time_buf[previous]) / static_cast<float>(span_us) : 0.0f;
 
+			Quatf q_previous = _att_delay_buf[previous];
+			Quatf q_next = _att_delay_buf[next];
+
+			// q 与 -q 表示同一姿态，选择短弧一侧后再做归一化线性插值。
+			if (q_previous.dot(q_next) < 0.0f) {
+				q_next *= -1.0f;
+			}
+
+			Quatf q_interpolated(q_previous(0) + alpha * (q_next(0) - q_previous(0)),
+					      q_previous(1) + alpha * (q_next(1) - q_previous(1)),
+					      q_previous(2) + alpha * (q_next(2) - q_previous(2)),
+					      q_previous(3) + alpha * (q_next(3) - q_previous(3)));
+			q_interpolated.normalize();
+			const Eulerf euler(q_interpolated);
+			att_deg = Vector3f(math::degrees(euler.phi()), math::degrees(euler.theta()), math::degrees(euler.psi()));
+
 			for (int axis = 0; axis < 3; ++axis) {
-				const float angle_delta = remainderf(_att_delay_buf[next](axis) - _att_delay_buf[previous](axis), 360.0f);
-				att_deg(axis) = _att_delay_buf[previous](axis) + alpha * angle_delta;
 				gyro_dps(axis) = _gyro_delay_buf[previous](axis) + alpha *
 						 (_gyro_delay_buf[next](axis) - _gyro_delay_buf[previous](axis));
 			}
@@ -339,7 +348,7 @@ DockGuidance::process_observation(float los_yaw_deg, float los_pitch_deg,
 	_los_e_unit = R_ned_cam * los_c_unit;
 	_los_e_unit.normalize();
 
-	_los_e_deg(0) = matrix::wrap_pi(math::degrees(atan2f(_los_e_unit(1), _los_e_unit(0))));
+	_los_e_deg(0) = math::degrees(matrix::wrap_pi(atan2f(_los_e_unit(1), _los_e_unit(0))));
 	_los_e_deg(1) = math::degrees(atan2f(-_los_e_unit(2), Vector2f(_los_e_unit(0), _los_e_unit(1)).norm()));
 
 	// 对单位视线向量低通滤波，而不是直接滤波欧拉角，避免角度跨 ±180° 时出现跳变。
@@ -398,9 +407,8 @@ DockGuidance::process_observation(float los_yaw_deg, float los_pitch_deg,
 
 	// 读取地速并转换为地理系航向/俯仰角。
 	// 当前版本仅保存该信息，尚未将其用于控制律。
-	vehicle_local_position_s lpos;
-	_local_pos_sub.copy(&lpos);
-	_velocity_valid = lpos.v_xy_valid && lpos.v_z_valid;
+	vehicle_local_position_s lpos{};
+	_velocity_valid = _local_pos_sub.copy(&lpos) && lpos.v_xy_valid && lpos.v_z_valid;
 	const Vector3f vel_ned(lpos.vx, lpos.vy, lpos.vz);
 	_velocity_speed_ms = vel_ned.norm();
 	_velocity_valid = _velocity_valid && (_velocity_speed_ms > 5.0f);
@@ -436,15 +444,21 @@ DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s)
 	const float yaw_err_abs = fabsf(_los_c_deg(0));
 	const float rate_limit = math::constrain(_param_dock_rate_max.get(), 1.0f, 360.0f);
 	const float vis_limit = math::max(_param_dock_vis_lim.get(), 0.0f);
+	const float vis_hysteresis = math::constrain(_param_dock_vis_hyst.get(), 0.0f, vis_limit);
+	const float pitch_capture_enter = math::constrain(_param_dock_pcap_enter.get(), 10.0f, 89.0f);
+	const float pitch_capture_exit = math::constrain(_param_dock_pcap_exit.get(), 5.0f, pitch_capture_enter);
 
 	const float yaw_p_rate = _param_dock_yaw_p.get() * _los_c_deg(0);
 	const float pitch_p_rate = _param_dock_pit_p.get() * _los_c_deg(1);
 	const float level_rate = (fabsf(_camera_e_deg(1)) < 80.0f) ?
 				 -_param_dock_rll_p.get() * _camera_e_deg(0) : 0.0f;
 
-	const bool outside_vis = (pitch_err_abs > vis_limit) || (yaw_err_abs > vis_limit);
+	const float active_vis_limit = (_stage == Stage::ANGLE_CAPTURE) ? vis_limit - vis_hysteresis : vis_limit;
+	const bool outside_vis = (pitch_err_abs > active_vis_limit) || (yaw_err_abs > active_vis_limit);
+	const bool pitch_capture = (_stage == Stage::PITCH_CAPTURE) ?
+				   (pitch_err_abs > pitch_capture_exit) : (pitch_err_abs > pitch_capture_enter);
 
-	if (pitch_err_abs > 60.0f) {
+	if (pitch_capture) {
 		// 阶段 1：目标接近相机上下边界时，优先仅调整俯仰，先将目标拉回可视区域。
 		if (_stage != Stage::PITCH_CAPTURE) {
 			PX4_INFO("dock stage PITCH_CAPTURE");
@@ -527,14 +541,22 @@ DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s)
 		return;
 	}
 
+	const float throttle = _param_dock_thr.get();
+	const float throttle_rate = _param_dock_thr_rate.get();
+
+	if (!std::isfinite(throttle) || !std::isfinite(throttle_rate)) {
+		invalidate_setpoint(hrt_absolute_time(), "non-finite throttle");
+		return;
+	}
+
 	// 发布独立的 Dock 引导设定值。当前模块不直接接管 PX4 的 vehicle_rates_setpoint。
 	dock_guidance_setpoint_s sp{};
 	sp.timestamp = hrt_absolute_time();
 	sp.roll_rate_rad_s = math::radians(_target_rate_b_dps(0));
 	sp.pitch_rate_rad_s = math::radians(_target_rate_b_dps(1));
 	sp.yaw_rate_rad_s = math::radians(_target_rate_b_dps(2));
-	sp.throttle = math::constrain(_param_dock_thr.get(), 0.0f, 1.0f);
-	sp.throttle_rate = math::max(_param_dock_thr_rate.get(), 0.0f);
+	sp.throttle = math::constrain(throttle, 0.0f, 1.0f);
+	sp.throttle_rate = math::max(throttle_rate, 0.0f);
 	sp.camera_yaw_deg = _los_c_deg(0);
 	sp.camera_pitch_deg = _los_c_deg(1);
 	sp.stage = static_cast<uint8_t>(_stage);
@@ -612,6 +634,19 @@ void
 DockGuidance::update_parameters()
 {
 	updateParams();
+	update_camera_rotation();
+}
+
+void
+DockGuidance::update_camera_rotation()
+{
+	// 三个参数定义从相机坐标系到 PX4 FRD 机体系的 3-2-1 旋转。
+	// 默认 roll=-90 deg 与优化前的固定矩阵完全一致，因此升级后不改变当前安装行为。
+	_rot_cam_to_body = Dcmf(Eulerf(math::radians(_param_dock_cam_roll.get()),
+					 math::radians(_param_dock_cam_pitch.get()),
+					 math::radians(_param_dock_cam_yaw.get())));
+	_rot_body_to_cam = _rot_cam_to_body;
+	_rot_body_to_cam.transpose();
 }
 
 int

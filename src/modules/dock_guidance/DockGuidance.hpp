@@ -77,6 +77,7 @@ private:
 
 	void Run() override;
 	void update_parameters();
+	void update_camera_rotation();
 
 	// 保存并读取与相机画面时间对齐的飞行器状态。
 	void push_delay_history(hrt_abstime timestamp);
@@ -105,7 +106,7 @@ private:
 	// 对接引导输出，供未来的 Dock 模式仲裁器或控制器订阅。
 	uORB::Publication<dock_guidance_setpoint_s> _setpoint_pub{ORB_ID(dock_guidance_setpoint)};
 
-	// 相机系与 PX4 机体系（FRD）之间的固定安装旋转矩阵。
+	// 相机系与 PX4 机体系（FRD）之间的可配置安装旋转矩阵。
 	matrix::Matrix3f _rot_body_to_cam;
 	matrix::Matrix3f _rot_cam_to_body;
 
@@ -145,8 +146,8 @@ private:
 	uint64_t _last_sample_us{0};
 	bool _setpoint_valid{false};
 
-	// 环形历史缓冲：以度保存姿态和机体系角速度，用于相机延时补偿。
-	matrix::Vector3f _att_delay_buf[DELAY_BUF_SIZE] {};
+	// 环形历史缓冲：以四元数保存姿态，避免欧拉角跨界和奇异点插值错误。
+	matrix::Quatf _att_delay_buf[DELAY_BUF_SIZE] {};
 	matrix::Vector3f _gyro_delay_buf[DELAY_BUF_SIZE] {};
 	hrt_abstime _delay_time_buf[DELAY_BUF_SIZE] {};
 	int _delay_idx{0};
@@ -159,6 +160,9 @@ private:
 	DEFINE_PARAMETERS(
 		(ParamInt<px4::params::DOCK_CAM_DLY>)   _param_dock_cam_dly,
 		(ParamInt<px4::params::DOCK_OBS_TOUT>)  _param_dock_obs_tout,
+		(ParamFloat<px4::params::DOCK_CAM_ROLL>) _param_dock_cam_roll,
+		(ParamFloat<px4::params::DOCK_CAM_PITCH>) _param_dock_cam_pitch,
+		(ParamFloat<px4::params::DOCK_CAM_YAW>) _param_dock_cam_yaw,
 		(ParamFloat<px4::params::DOCK_FILT_HZ>) _param_dock_filt_hz,
 		(ParamFloat<px4::params::DOCK_RES_X>)   _param_dock_res_x,
 		(ParamFloat<px4::params::DOCK_RES_Y>)   _param_dock_res_y,
@@ -169,6 +173,10 @@ private:
 		(ParamFloat<px4::params::DOCK_RATE_MAX>) _param_dock_rate_max,
 		(ParamFloat<px4::params::DOCK_RATE_SLEW>) _param_dock_rate_slew,
 		(ParamFloat<px4::params::DOCK_VIS_LIM>) _param_dock_vis_lim,
+		(ParamFloat<px4::params::DOCK_VIS_HYST>) _param_dock_vis_hyst,
+		(ParamFloat<px4::params::DOCK_PCAP_ENT>) _param_dock_pcap_enter,
+		(ParamFloat<px4::params::DOCK_PCAP_EXT>) _param_dock_pcap_exit,
+		(ParamFloat<px4::params::DOCK_LOS_MAX>) _param_dock_los_max,
 		(ParamFloat<px4::params::DOCK_NAV_Y_P>) _param_dock_nav_y_p,
 		(ParamFloat<px4::params::DOCK_NAV_P_P>) _param_dock_nav_p_p,
 		(ParamFloat<px4::params::DOCK_FWD_PIT>) _param_dock_fwd_pit,
