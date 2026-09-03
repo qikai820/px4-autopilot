@@ -4,6 +4,8 @@ px4_add_module(
 	STACK_MAIN 1800
 	SRCS
 		uorb_udp_bridge.cpp
+	MODULE_CONFIG
+		module.yaml
 	DEPENDS
 		px4_work_queue
 )

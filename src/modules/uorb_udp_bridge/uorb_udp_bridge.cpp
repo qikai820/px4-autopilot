@@ -1,9 +1,11 @@
 #include <px4_platform_common/module.h>
-#include <px4_platform_common/px4_work_queue/ScheduledWorkItem.hpp>
+#include <px4_platform_common/tasks.h>
+#include <lib/parameters/param.h>
 #include <uORB/Subscription.hpp>
 
 #include <uORB/uORBMessageFields.hpp>
 #include <uORB/uORB.h>
+#include <uORB/topics/parameter_update.h>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -18,10 +20,11 @@
 
 using namespace time_literals;
 
-class UorbUdpBridge final : public ModuleBase<UorbUdpBridge>, public px4::ScheduledWorkItem
+class UorbUdpBridge final : public ModuleBase<UorbUdpBridge>
 {
 public:
-	UorbUdpBridge() : ScheduledWorkItem(MODULE_NAME, px4::wq_configurations::lp_default) {}
+	static constexpr unsigned GENERIC_TOPIC_COUNT{6};
+	UorbUdpBridge() = default;
 	~UorbUdpBridge() override
 	{
 		close_socket();
@@ -30,16 +33,21 @@ public:
 		}
 	}
 
-	static int task_spawn(int, char **)
+	static int task_spawn(int argc, char **argv)
 	{
-		UorbUdpBridge *instance = new UorbUdpBridge();
-		if (!instance) { return PX4_ERROR; }
-		_object.store(instance);
-		_task_id = task_id_is_work_queue;
-		if (instance->init()) { return PX4_OK; }
-		_object.store(nullptr);
-		delete instance;
-		return PX4_ERROR;
+		_task_id = px4_task_spawn_cmd("uorb_udp_bridge",
+					      SCHED_DEFAULT,
+					      SCHED_PRIORITY_DEFAULT - 20,
+					      PX4_STACK_ADJUSTED(4096),
+					      (px4_main_t)&run_trampoline,
+					      (char *const *)argv);
+
+		if (_task_id < 0) {
+			_task_id = -1;
+			return -errno;
+		}
+
+		return wait_until_running();
 	}
 
 	static UorbUdpBridge *instantiate(int, char **) { return new UorbUdpBridge(); }
@@ -50,7 +58,7 @@ public:
 			UorbUdpBridge *instance = get_instance();
 			if (!instance || argc < 2) { return PX4_ERROR; }
 			const int port = (argc > 2) ? atoi(argv[2]) : 9870;
-			const float rate = (argc > 3) ? strtof(argv[3], nullptr) : 50.f;
+			const float rate = (argc > 3) ? strtof(argv[3], nullptr) : 20.f;
 			return instance->configure(argv[1], port, rate) ? PX4_OK : PX4_ERROR;
 		}
 		return print_usage("unknown command");
@@ -61,46 +69,87 @@ public:
 		if (reason) { PX4_WARN("%s", reason); }
 		PX4_INFO("usage: uorb_udp_bridge {start|stop|status}");
 		PX4_INFO("  uorb_udp_bridge config <ip> [port] [rate_hz]");
-		PX4_INFO("  default: 192.168.3.100:9870, 50 Hz");
+		PX4_INFO("  default: 192.168.3.109:9870, 20 Hz");
 		return 0;
 	}
 
 	int print_status() override
 	{
-		PX4_INFO("UDP fd=%d %s:%u at %.1f Hz, sent %lu datagrams (%lu bytes), errors %lu last_errno %d",
-			 _socket, _address, _port, (double)_rate_hz, (unsigned long)_sent,
-			 (unsigned long)_bytes_sent, (unsigned long)_send_errors, _last_errno);
+		PX4_INFO("UDP fd=%d %s:%u at %.1f Hz (requested %.1f, max %.1f), sent %lu datagrams (%lu bytes), splits %lu, drops %lu, errors %lu last_errno %d",
+			 _socket, _address, _port, (double)_rate_hz, (double)_requested_rate_hz, (double)_max_rate_hz,
+			 (unsigned long)_sent,
+			 (unsigned long)_bytes_sent, (unsigned long)_packet_splits, (unsigned long)_oversize_drops,
+			 (unsigned long)_send_errors, _last_errno);
 		return 0;
 	}
 
 	bool init()
 	{
-		if (!configure(_address, _port, _rate_hz)) { return false; }
+		_max_rate_param = param_find("UORB_UDP_MAX_HZ");
+		update_rate_limit(false);
+
+		if (!configure(_address, _port, _requested_rate_hz)) { return false; }
 		init_generic_topics();
 		return true;
 	}
 
-	void Run() override
+	void run() override
 	{
-		if (should_exit()) {
-			close_socket();
-			ScheduleClear();
+		if (!init()) {
 			return;
 		}
 
-		// NuttX file descriptors belong to the task group that created them.
-		// Create the socket from the work-queue context where sendto() runs.
-		if (_socket < 0 && !open_socket()) {
-			return;
+		hrt_abstime next_run = hrt_absolute_time();
+
+		while (!should_exit()) {
+			// Create and use the socket in this task. NuttX file descriptors
+			// belong to the task group that created them.
+			if (_socket < 0 && !open_socket()) {
+				px4_usleep(1_s);
+				continue;
+			}
+
+			parameter_update_s parameter_update;
+
+			if (_parameter_update_sub.update(&parameter_update)) {
+				update_rate_limit(true);
+			}
+
+			publish_generic_topics();
+
+			const hrt_abstime interval_us = static_cast<hrt_abstime>(1'000'000.f / _rate_hz);
+			next_run += interval_us;
+			const hrt_abstime now = hrt_absolute_time();
+
+			if (next_run > now) {
+				px4_usleep(next_run - now);
+
+			} else {
+				// Do not run catch-up bursts after serialization or network stalls.
+				next_run = now;
+			}
 		}
 
-		publish_generic_topics();
+		close_socket();
 	}
 
 private:
+	static constexpr unsigned MAX_LAYOUT_FIELDS{96};
+	struct FieldLayout {
+		const char *type{nullptr};
+		uint16_t offset{0};
+		uint8_t array_size{1};
+		char name[48]{};
+	};
+	struct TopicLayout {
+		FieldLayout fields[MAX_LAYOUT_FIELDS]{};
+		uint8_t count{0};
+		bool valid{false};
+	};
+
 	bool configure(const char *address, int port, float rate)
 	{
-		if (port < 1 || port > 65535 || rate <= 0.f) { return false; }
+		if (port < 1 || port > 65535 || rate <= 0.f || !std::isfinite(rate)) { return false; }
 		char address_copy[INET_ADDRSTRLEN]{};
 		strncpy(address_copy, address, sizeof(address_copy) - 1);
 		struct sockaddr_in dest{};
@@ -109,9 +158,28 @@ private:
 		if (inet_aton(address, &dest.sin_addr) == 0) { return false; }
 		_dest = dest;
 		strncpy(_address, address_copy, sizeof(_address) - 1);
-		_port = (uint16_t)port; _rate_hz = rate;
-		ScheduleOnInterval((uint32_t)(1'000'000.f / rate));
+		_port = (uint16_t)port;
+		_requested_rate_hz = rate;
+		_rate_hz = math::min(_requested_rate_hz, _max_rate_hz);
 		return true;
+	}
+
+	void update_rate_limit(bool reschedule)
+	{
+		float max_rate_hz = _max_rate_hz;
+
+		if (_max_rate_param != PARAM_INVALID && param_get(_max_rate_param, &max_rate_hz) == PX4_OK
+		    && std::isfinite(max_rate_hz)) {
+			_max_rate_hz = math::constrain(max_rate_hz, 1.f, 120.f);
+		}
+
+		const float limited_rate_hz = math::min(_requested_rate_hz, _max_rate_hz);
+
+		if (reschedule && fabsf(limited_rate_hz - _rate_hz) > 0.01f) {
+			_rate_hz = limited_rate_hz;
+			PX4_INFO("rate updated: requested %.1f Hz, max %.1f Hz, effective %.1f Hz",
+				 (double)_requested_rate_hz, (double)_max_rate_hz, (double)_rate_hz);
+		}
 	}
 
 	bool open_socket()
@@ -136,10 +204,8 @@ private:
 	}
 
 	void close_socket() { if (_socket >= 0) { ::close(_socket); _socket = -1; } }
-	void begin(const char *topic, uint64_t timestamp)
+	void start_packet(uint64_t timestamp)
 	{
-		strncpy(_topic, topic, sizeof(_topic) - 1);
-		_topic[sizeof(_topic) - 1] = '\0';
 		_message_valid = true;
 		const int length = snprintf(_buffer, sizeof(_buffer), "{\"time\":%.6f",
 					(double)timestamp * 1e-6);
@@ -173,6 +239,7 @@ private:
 				if (strcmp(generic_topic_names()[i], topics[j]->o_name) == 0) {
 					_generic_meta[i] = topics[j];
 					_generic_subs[i] = new uORB::Subscription(topics[j]);
+					init_topic_layout(i);
 					break;
 				}
 			}
@@ -185,35 +252,57 @@ private:
 
 	void publish_generic_topics()
 	{
+		const hrt_abstime now = hrt_absolute_time();
+		start_packet(now);
+		bool any_updated = false;
+
 		for (unsigned i = 0; i < GENERIC_TOPIC_COUNT; ++i) {
 			if (_generic_meta[i] == nullptr || _generic_subs[i] == nullptr
 			    || _generic_meta[i]->o_size > sizeof(_generic_data[i])) {
 				continue;
 			}
+			if (now - _last_topic_send[i] < _topic_interval_us[i]) { continue; }
+			_last_topic_send[i] = now;
 
-			if (_generic_subs[i]->update(_generic_data[i])) {
-				serialize_generic_topic(*_generic_meta[i], _generic_data[i]);
+			// Copy only when the subscription reports a new generation. The source
+			// timestamp check filters duplicate samples after a missed publication.
+			if (_generic_subs[i]->updated() && _generic_subs[i]->update(_generic_data[i])) {
+				uint64_t sample_timestamp = 0;
+				memcpy(&sample_timestamp, _generic_data[i], sizeof(sample_timestamp));
+
+				if (sample_timestamp == 0 || sample_timestamp == _last_topic_timestamp[i]) {
+					continue;
+				}
+
+				_last_topic_timestamp[i] = sample_timestamp;
+				serialize_generic_topic(i, _generic_data[i]);
+				any_updated = true;
 			}
+		}
+
+		if (any_updated) {
+			end();
+		} else {
+			_length = 0;
 		}
 	}
 
-	void serialize_generic_topic(const orb_metadata &meta, const uint8_t *data)
+	void init_topic_layout(unsigned topic_index)
 	{
-		begin(meta.o_name, hrt_absolute_time());
+		const orb_metadata &meta = *_generic_meta[topic_index];
 		char format_buffer[128];
 		uORB::MessageFormatReader format_reader(format_buffer, sizeof(format_buffer));
 
 		if (!format_reader.readUntilFormat(meta.o_id)) {
-			_length = 0;
 			return;
 		}
 
 		int data_offset = 0;
 		int field_length = 0;
 
-		while (format_reader.readNextField(field_length)) {
+		TopicLayout &layout = _topic_layout[topic_index];
+		while (format_reader.readNextField(field_length) && layout.count < MAX_LAYOUT_FIELDS) {
 			if (field_length <= 0 || field_length >= static_cast<int>(sizeof(format_buffer))) {
-				_length = 0;
 				return;
 			}
 
@@ -222,7 +311,6 @@ private:
 			int array_size = 1;
 
 			if (field_name == nullptr) {
-				_length = 0;
 				return;
 			}
 
@@ -232,6 +320,13 @@ private:
 				array_size = atoi(array_start + 1);
 			}
 
+			FieldLayout &field = layout.fields[layout.count++];
+			field.type = c_type;
+			field.offset = data_offset;
+			field.array_size = array_size;
+			strncpy(field.name, field_name, sizeof(field.name) - 1);
+			field.name[sizeof(field.name) - 1] = '\0';
+
 			if (c_type == nullptr) {
 				// Nested message fields are not flattened yet, but their bytes must
 				// still be skipped to keep the following fields aligned.
@@ -239,16 +334,28 @@ private:
 				continue;
 			}
 
-			for (int index = 0; index < array_size; ++index) {
-				const uint8_t *value = data + data_offset;
-				if (strncmp(field_name, "_padding", 8) != 0) {
-					append_generic_value(c_type, field_name, index, array_size, value);
-				}
-				data_offset += primitive_size(c_type);
+			if (c_type != nullptr) {
+				data_offset += primitive_size(c_type) * array_size;
 			}
 		}
+		layout.valid = layout.count > 0;
+	}
 
-		end();
+	void serialize_generic_topic(unsigned topic_index, const uint8_t *data)
+	{
+		const orb_metadata &meta = *_generic_meta[topic_index];
+		strncpy(_topic, meta.o_name, sizeof(_topic) - 1);
+		_topic[sizeof(_topic) - 1] = '\0';
+		const TopicLayout &layout = _topic_layout[topic_index];
+		if (!layout.valid) { return; }
+		for (unsigned i = 0; i < layout.count; ++i) {
+			const FieldLayout &field = layout.fields[i];
+			if (field.type == nullptr || strncmp(field.name, "_padding", 8) == 0) { continue; }
+			for (unsigned index = 0; index < field.array_size; ++index) {
+				append_generic_value(field.type, field.name, index, field.array_size,
+							 data + field.offset + index * primitive_size(field.type));
+			}
+		}
 	}
 
 	static size_t primitive_size(const char *c_type)
@@ -337,17 +444,9 @@ private:
 	{
 		static const char *const names[] {
 			"vehicle_attitude",
-			"geo_control_attitude_setpoint",
-			"vehicle_angular_velocity",
-			"geo_control_position_adaptive",
 			"vehicle_local_position",
-			"vehicle_local_position_setpoint",
-			"vehicle_angular_acceleration_setpoint",
-			"vehicle_thrust_setpoint",
-			"vehicle_torque_setpoint",
 			"actuator_motors",
 			"actuator_servos",
-			"vehicle_control_mode",
 			"viztra_observation",
 			"viztra_status"
 		};
@@ -355,11 +454,22 @@ private:
 	}
 	void append(const char *text, size_t length)
 	{
-		if (!_message_valid || _length > sizeof(_buffer) - 2 || length > sizeof(_buffer) - _length - 2) {
-			// Never transmit a partially written JSON object. The next topic
-			// starts a fresh message and can recover from this overflow.
+		if (!_message_valid || length + 1 > UDP_PAYLOAD_LIMIT) {
 			_message_valid = false;
+			++_oversize_drops;
 			return;
+		}
+
+		if (_length + length + 1 > UDP_PAYLOAD_LIMIT) {
+			// Keep every datagram below the Ethernet MTU. IP fragmentation
+			// hides later JSON fields from UDP-port packet filters and is more
+			// likely to be lost on embedded Ethernet paths.
+			// Finish the current valid JSON object and continue the same topic
+			// in a new packet. This avoids dropping a complete update batch when
+			// several large uORB topics are updated in the same cycle.
+			end();
+			++_packet_splits;
+			start_packet(hrt_absolute_time());
 		}
 
 		memcpy(_buffer + _length, text, length);
@@ -367,7 +477,7 @@ private:
 	}
 	void end()
 	{
-		if (!_message_valid || _length + 1 >= sizeof(_buffer)) {
+		if (!_message_valid || _length + 1 > UDP_PAYLOAD_LIMIT || _length + 1 >= sizeof(_buffer)) {
 			_length = 0;
 			return;
 		}
@@ -399,14 +509,24 @@ private:
 	}
 
 	int _socket{-1}; sockaddr_in _dest{}; char _address[INET_ADDRSTRLEN] {"192.168.3.100"};
-	uint16_t _port{9870}; float _rate_hz{50.f}; uint32_t _sent{0}; uint32_t _bytes_sent{0};
-	uint32_t _send_errors{0}; int _last_errno{0}; hrt_abstime _last_error_report{0};
+	uint16_t _port{9870}; float _rate_hz{20.f}; float _requested_rate_hz{20.f}; float _max_rate_hz{20.f};
+	param_t _max_rate_param{PARAM_INVALID};
+	uORB::Subscription _parameter_update_sub{ORB_ID(parameter_update)};
+	uint32_t _sent{0}; uint32_t _bytes_sent{0};
+	uint32_t _send_errors{0}; uint32_t _packet_splits{0}; uint32_t _oversize_drops{0};
+	int _last_errno{0}; hrt_abstime _last_error_report{0};
 	static constexpr double VALUE_LIMIT{1.e6};
-	static constexpr unsigned GENERIC_TOPIC_COUNT{14};
-	char _buffer[4096]{}; char _topic[64]{}; size_t _length{0}; bool _message_valid{true};
+	static constexpr size_t UDP_PAYLOAD_LIMIT{1400};
+	char _buffer[UDP_PAYLOAD_LIMIT + 1]{}; char _topic[64]{}; size_t _length{0}; bool _message_valid{true};
 	const orb_metadata *_generic_meta[GENERIC_TOPIC_COUNT]{};
 	uORB::Subscription *_generic_subs[GENERIC_TOPIC_COUNT]{};
 	uint8_t _generic_data[GENERIC_TOPIC_COUNT][2048]{};
+	uint64_t _last_topic_timestamp[GENERIC_TOPIC_COUNT]{};
+	TopicLayout _topic_layout[GENERIC_TOPIC_COUNT]{};
+	const hrt_abstime _topic_interval_us[GENERIC_TOPIC_COUNT] {
+		20_ms, 20_ms, 20_ms, 20_ms, 100_ms, 500_ms
+	};
+	hrt_abstime _last_topic_send[GENERIC_TOPIC_COUNT]{};
 };
 
 extern "C" __EXPORT int uorb_udp_bridge_main(int argc, char *argv[])

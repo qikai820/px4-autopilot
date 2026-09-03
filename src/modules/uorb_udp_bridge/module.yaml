@@ -1,0 +1,16 @@
+module_name: uORB UDP JSON bridge
+
+parameters:
+    - group: System
+      definitions:
+        UORB_UDP_MAX_HZ:
+            description:
+                short: Maximum uORB UDP update rate
+                long: Maximum frequency at which updated uORB messages are sent by the UDP bridge. The actual rate also depends on the uORB publication rate.
+            type: float
+            unit: Hz
+            min: 1
+            max: 120
+            decimal: 1
+            increment: 1
+            default: 20
