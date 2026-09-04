@@ -23,7 +23,7 @@ using namespace time_literals;
 class UorbUdpBridge final : public ModuleBase<UorbUdpBridge>
 {
 public:
-	static constexpr unsigned GENERIC_TOPIC_COUNT{6};
+	static constexpr unsigned GENERIC_TOPIC_COUNT{10};
 	UorbUdpBridge() = default;
 	~UorbUdpBridge() override
 	{
@@ -448,8 +448,16 @@ private:
 			"actuator_motors",
 			"actuator_servos",
 			"viztra_observation",
-			"viztra_status"
+			"viztra_status",
+			// Dock/inner-loop diagnosis: actual body rates and each controller
+			// setpoint are exported as complete generic uORB JSON objects.
+			"vehicle_angular_velocity",
+			"vehicle_rates_setpoint",
+			"vehicle_attitude_setpoint",
+			"vehicle_local_position_setpoint"
 		};
+		static_assert(sizeof(names) / sizeof(names[0]) == GENERIC_TOPIC_COUNT,
+			      "generic topic count does not match topic registry");
 		return names;
 	}
 	void append(const char *text, size_t length)
@@ -524,7 +532,8 @@ private:
 	uint64_t _last_topic_timestamp[GENERIC_TOPIC_COUNT]{};
 	TopicLayout _topic_layout[GENERIC_TOPIC_COUNT]{};
 	const hrt_abstime _topic_interval_us[GENERIC_TOPIC_COUNT] {
-		20_ms, 20_ms, 20_ms, 20_ms, 100_ms, 500_ms
+		20_ms, 20_ms, 20_ms, 20_ms, 100_ms, 500_ms,
+		20_ms, 20_ms, 20_ms, 20_ms
 	};
 	hrt_abstime _last_topic_send[GENERIC_TOPIC_COUNT]{};
 };

@@ -8,6 +8,13 @@ serial_config:
 parameters:
     - group: Sensors
       definitions:
+        SENS_EN_VIZTRA:
+            description:
+                short: Enable Viztra visual observation driver
+                long: Enable the Viztra serial driver during sensor startup. The serial port is selected by VIZTRA_CFG.
+            type: boolean
+            default: 0
+            reboot_required: true
         VIZTRA_TOUT:
             description:
                 short: Viztra observation timeout

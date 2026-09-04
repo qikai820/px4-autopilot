@@ -59,6 +59,9 @@ void LoggedTopics::add_default_topics()
 	add_topic("config_overrides");
 	add_topic("cpuload");
 	add_topic("distance_sensor_mode_change_request");
+	// Dock mode diagnostics: record both the raw visual input and the final
+	// rate/throttle command so visual, speed and actuator behavior can be aligned.
+	add_topic("dock_guidance_setpoint", 20);
 	add_topic_multi("dronecan_node_status", 250);
 	add_optional_topic("external_ins_attitude");
 	add_optional_topic("external_ins_global_position");
@@ -153,6 +156,7 @@ void LoggedTopics::add_default_topics()
 	add_topic("vehicle_rates_setpoint", 20);
 	add_topic("vehicle_roi", 1000);
 	add_topic("vehicle_status");
+	add_topic("viztra_observation", 20);
 	add_optional_topic("vtol_vehicle_status", 200);
 	add_topic("wind", 1000);
 	add_topic("fixed_wing_lateral_setpoint");

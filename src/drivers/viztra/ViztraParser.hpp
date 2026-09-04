@@ -37,7 +37,8 @@
 class ViztraParser
 {
 public:
-	static constexpr uint8_t FRAME_LENGTH{21};
+	static constexpr uint8_t LEGACY_FRAME_LENGTH{21};
+	static constexpr uint8_t EXTENDED_FRAME_LENGTH{33};
 
 	enum class Result : uint8_t {
 		None,
@@ -53,6 +54,10 @@ public:
 		uint8_t offset_y[4];
 		uint16_t width;
 		uint16_t height;
+		uint8_t relative_n[4];
+		uint8_t relative_e[4];
+		uint8_t relative_d[4];
+		bool has_relative_position;
 	};
 
 	Result parse(uint8_t byte, Frame &frame)
@@ -82,24 +87,29 @@ public:
 		}
 
 		if (_index == 5) {
-			if ((_buffer[2] != kCommand0) || (_buffer[3] != kCommand1) || (_buffer[4] != kPayloadLength)) {
+			if ((_buffer[2] != kCommand0) || (_buffer[3] != kCommand1)
+			    || ((_buffer[4] != kLegacyPayloadLength) && (_buffer[4] != kExtendedPayloadLength))) {
 				reset();
 				return Result::FormatError;
 			}
+
+			_expected_length = static_cast<uint8_t>(_buffer[4] + 7U);
 		}
 
-		if (_index < FRAME_LENGTH) {
+		if (_index < _expected_length) {
 			return Result::None;
 		}
 
-		const bool valid_end = _buffer[20] == kEnd;
+		const uint8_t checksum_index = static_cast<uint8_t>(_expected_length - 2U);
+		const uint8_t end_index = static_cast<uint8_t>(_expected_length - 1U);
+		const bool valid_end = _buffer[end_index] == kEnd;
 		uint8_t checksum = 0;
 
-		for (uint8_t i = 2; i <= 18; i++) {
+		for (uint8_t i = 2; i < checksum_index; i++) {
 			checksum += _buffer[i];
 		}
 
-		const bool valid_checksum = checksum == _buffer[19];
+		const bool valid_checksum = checksum == _buffer[checksum_index];
 
 		if (valid_end && valid_checksum) {
 			frame.status = _buffer[5];
@@ -112,6 +122,15 @@ public:
 
 			frame.width = read_le_u16(&_buffer[15]);
 			frame.height = read_le_u16(&_buffer[17]);
+			frame.has_relative_position = _buffer[4] == kExtendedPayloadLength;
+
+			if (frame.has_relative_position) {
+				for (uint8_t i = 0; i < 4; i++) {
+					frame.relative_n[i] = _buffer[19 + i];
+					frame.relative_e[i] = _buffer[23 + i];
+					frame.relative_d[i] = _buffer[27 + i];
+				}
+			}
 			reset();
 			return Result::Frame;
 		}
@@ -123,6 +142,7 @@ public:
 	void reset()
 	{
 		_index = 0;
+		_expected_length = EXTENDED_FRAME_LENGTH;
 	}
 
 private:
@@ -130,7 +150,8 @@ private:
 	static constexpr uint8_t kHeader1{0x07};
 	static constexpr uint8_t kCommand0{0x00};
 	static constexpr uint8_t kCommand1{0x81};
-	static constexpr uint8_t kPayloadLength{0x0e};
+	static constexpr uint8_t kLegacyPayloadLength{0x0e};
+	static constexpr uint8_t kExtendedPayloadLength{0x1a};
 	static constexpr uint8_t kEnd{0x79};
 
 	static uint16_t read_le_u16(const uint8_t *data)
@@ -138,6 +159,7 @@ private:
 		return static_cast<uint16_t>(data[0]) | (static_cast<uint16_t>(data[1]) << 8);
 	}
 
-	uint8_t _buffer[FRAME_LENGTH] {};
+	uint8_t _buffer[EXTENDED_FRAME_LENGTH] {};
 	uint8_t _index{0};
+	uint8_t _expected_length{EXTENDED_FRAME_LENGTH};
 };

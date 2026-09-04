@@ -37,6 +37,7 @@
 #include <mathlib/math/Functions.hpp>
 #include <px4_platform_common/log.h>
 
+#include <cmath>
 #include <cstring>
 
 using namespace matrix;
@@ -76,7 +77,7 @@ DockGuidance::Run()
 	if (should_exit()) {
 		if (!_unregistration_sent) {
 			if (_dock_mode_active) {
-				publish_safe_rates_setpoint(hrt_absolute_time());
+				publish_safe_velocity_setpoint(hrt_absolute_time());
 			}
 
 			unregister_dock_mode();
@@ -127,7 +128,17 @@ DockGuidance::Run()
 					    int32_t{5000})) * 1000ULL;
 
 		if (_setpoint_valid && (now_us > _last_observation_us) && ((now_us - _last_observation_us) > timeout_us)) {
-			invalidate_setpoint(now_us, "vision timeout");
+			handle_visual_loss(now_us, "vision timeout");
+
+		} else if (_dock_mode_active && !_setpoint_valid) {
+			// Commander may need more than one work-queue cycle to leave the external mode.
+			// Keep refreshing a zero-velocity request until control ownership changes.
+			publish_safe_velocity_setpoint(now_us);
+
+		} else if (_dock_mode_active && _setpoint_valid) {
+			// Keep mc_pos_control supplied between camera frames. The visual watchdog above
+			// prevents a stale direction from being held after the configured timeout.
+			publish_velocity_setpoint(now_us, _velocity_setpoint_ned, _yaw_setpoint_rad);
 		}
 
 		return;
@@ -146,7 +157,7 @@ DockGuidance::Run()
 				    int32_t{5000})) * 1000ULL;
 
 	if ((now_us > sample_us) && ((now_us - sample_us) > timeout_us)) {
-		invalidate_setpoint(now_us, "stale observation");
+		handle_visual_loss(now_us, "stale observation");
 		return;
 	}
 
@@ -163,13 +174,14 @@ DockGuidance::Run()
 	// 无目标或输入非法时，清空内部状态并明确发布 invalid，
 	// 使下游控制器可以立即放弃视觉引导。
 	if (!obs.valid || !std::isfinite(obs.offset_x) || !std::isfinite(obs.offset_y)) {
-		invalidate_setpoint(now_us, "invalid observation");
+		handle_visual_loss(now_us, "invalid observation");
 		return;
 	}
 
 	// 取与相机画面时间对应的姿态/角速度，减小图像传输和识别延迟带来的误差。
 	Vector3f att_deg;
 	Vector3f gyro_dps;
+
 	if (!get_delayed_state(sample_us, att_deg, gyro_dps)) {
 		invalidate_setpoint(now_us, "state history unavailable");
 		return;
@@ -206,18 +218,27 @@ DockGuidance::Run()
 	}
 
 	if (!std::isfinite(los_yaw_deg) || !std::isfinite(los_pitch_deg)) {
-		invalidate_setpoint(now_us, "invalid LOS");
+		handle_visual_loss(now_us, "invalid LOS");
 		return;
 	}
 
 	const float los_limit = math::constrain(_param_dock_los_max.get(), 10.0f, 89.9f);
 
 	if ((fabsf(los_yaw_deg) > los_limit) || (fabsf(los_pitch_deg) > los_limit)) {
-		invalidate_setpoint(now_us, "LOS outside configured range");
+		handle_visual_loss(now_us, "LOS outside configured range");
 		return;
 	}
 
-	process_observation(los_yaw_deg, los_pitch_deg, att_deg, gyro_dps, run_dt_s, sample_us);
+	_last_valid_observation_us = sample_us;
+	_vision_degraded = false;
+	const Vector3f relative_position_ned(obs.relative_n_m, obs.relative_e_m, obs.relative_d_m);
+	const uint64_t relative_timeout_us = static_cast<uint64_t>(
+			math::constrain(_param_dock_rel_tout.get(), int32_t{20}, int32_t{2000})) * 1000ULL;
+	const bool relative_position_fresh = (now_us >= sample_us) && ((now_us - sample_us) <= relative_timeout_us);
+	const bool relative_position_valid = obs.relative_position_valid && relative_position_ned.isAllFinite()
+					     && (relative_position_ned.norm() > 0.05f) && relative_position_fresh;
+	process_observation(los_yaw_deg, los_pitch_deg, relative_position_ned, relative_position_valid,
+			    att_deg, gyro_dps, run_dt_s, sample_us);
 }
 
 // ---------- 姿态/角速度延时缓冲 ----------
@@ -300,9 +321,9 @@ DockGuidance::get_delayed_state(hrt_abstime timestamp_sample, Vector3f &att_deg,
 			}
 
 			Quatf q_interpolated(q_previous(0) + alpha * (q_next(0) - q_previous(0)),
-					      q_previous(1) + alpha * (q_next(1) - q_previous(1)),
-					      q_previous(2) + alpha * (q_next(2) - q_previous(2)),
-					      q_previous(3) + alpha * (q_next(3) - q_previous(3)));
+					     q_previous(1) + alpha * (q_next(1) - q_previous(1)),
+					     q_previous(2) + alpha * (q_next(2) - q_previous(2)),
+					     q_previous(3) + alpha * (q_next(3) - q_previous(3)));
 			q_interpolated.normalize();
 			const Eulerf euler(q_interpolated);
 			att_deg = Vector3f(math::degrees(euler.phi()), math::degrees(euler.theta()), math::degrees(euler.psi()));
@@ -330,13 +351,18 @@ DockGuidance::reset_tracking_state()
 	_camera_e_deg.zero();
 	_gyro_c_dps.zero();
 	_los_c_rate_dps.zero();
-	_target_rate_c_dps.zero();
-	_target_rate_b_dps.zero();
+	_relative_position_ned.zero();
+	_relative_position_valid = false;
+	_relative_distance_m = NAN;
+	_velocity_setpoint_ned.zero();
+	_yaw_setpoint_rad = NAN;
+	_commanded_speed_ms = 0.0f;
+	_fov_ratio = 0.0f;
 	_stage = Stage::NONE;
-	_have_last_target = false;
-	_los_rate_control_active = false;
-	_los_yaw_rate_pid_I = 0.0f;
-	_los_pitch_rate_pid_I = 0.0f;
+	_aligned_since_us = 0;
+	_last_control_update_us = 0;
+	_last_valid_observation_us = 0;
+	_vision_degraded = false;
 	_filt_initialized = false;
 	_deriv_count = 0;
 	_deriv_idx = 0;
@@ -354,12 +380,46 @@ DockGuidance::invalidate_setpoint(hrt_abstime timestamp, const char *reason)
 
 	dock_guidance_setpoint_s sp{};
 	sp.timestamp = timestamp;
+	sp.relative_distance_m = NAN;
 	sp.valid = false;
 	sp.stage = static_cast<uint8_t>(Stage::NONE);
 	_setpoint_pub.publish(sp);
 
 	if (_dock_mode_active) {
-		publish_safe_rates_setpoint(timestamp);
+		publish_safe_velocity_setpoint(timestamp);
+	}
+}
+
+void
+DockGuidance::handle_visual_loss(hrt_abstime timestamp, const char *reason)
+{
+	// Grace is only for an already-running Dock mode. While inactive, one bad
+	// observation must immediately block a new mode entry.
+	if (!_dock_mode_active || !_setpoint_valid || (_last_valid_observation_us == 0)) {
+		invalidate_setpoint(timestamp, reason);
+		return;
+	}
+
+	const uint64_t observation_timeout_us = static_cast<uint64_t>(
+			math::constrain(_param_dock_obs_tout.get(), int32_t{20}, int32_t{5000})) * 1000ULL;
+	const uint64_t configured_grace_us = static_cast<uint64_t>(
+			math::constrain(_param_dock_vis_grace.get(), int32_t{20}, int32_t{2000})) * 1000ULL;
+	const uint64_t grace_us = math::max(observation_timeout_us, configured_grace_us);
+	const uint64_t age_us = (timestamp > _last_valid_observation_us) ? timestamp - _last_valid_observation_us : 0;
+
+	if (age_us <= grace_us) {
+		if (!_vision_degraded) {
+			PX4_WARN("dock: %s, grace period", reason);
+		}
+
+		_vision_degraded = true;
+
+		if (_dock_mode_active) {
+			publish_degraded_setpoint(timestamp);
+		}
+
+	} else {
+		invalidate_setpoint(timestamp, reason);
 	}
 }
 
@@ -411,6 +471,10 @@ DockGuidance::configure_dock_mode(hrt_abstime now)
 	vehicle_control_mode_s control_mode{};
 	control_mode.timestamp = now;
 	control_mode.source_id = static_cast<uint8_t>(_mode_id);
+	control_mode.flag_control_velocity_enabled = true;
+	control_mode.flag_control_altitude_enabled = true;
+	control_mode.flag_control_climb_rate_enabled = true;
+	control_mode.flag_control_attitude_enabled = true;
 	control_mode.flag_control_rates_enabled = true;
 	control_mode.flag_control_allocation_enabled = true;
 	_config_control_setpoints_pub.publish(control_mode);
@@ -451,6 +515,8 @@ DockGuidance::reply_to_arming_check(const arming_check_request_s &request)
 	reply.can_arm_and_run = _setpoint_valid;
 	reply.mode_req_angular_velocity = true;
 	reply.mode_req_attitude = true;
+	reply.mode_req_local_alt = true;
+	reply.mode_req_local_position = true;
 	reply.mode_req_manual_control = true;
 	_arming_check_reply_pub.publish(reply);
 }
@@ -468,48 +534,128 @@ DockGuidance::update_mode_state()
 
 	if (active && !_dock_mode_active) {
 		PX4_INFO("Dock mode active");
-		_reset_rate_integral = true;
+		set_stage(Stage::ALIGN);
+		_commanded_speed_ms = 0.0f;
+		_aligned_since_us = 0;
+		_last_control_update_us = 0;
+		_velocity_setpoint_ned.zero();
 
-		if (!_setpoint_valid) {
-			// 正常情况下已解锁时 Commander 会拒绝无视觉的模式切换；这里仍清除旧模式遗留指令作为最后防线。
-			publish_safe_rates_setpoint(hrt_absolute_time());
-		}
+		// mc_pos_control requires a trajectory setpoint no older than the instant
+		// position control becomes active. Start with a zero-velocity request.
+		publish_safe_velocity_setpoint(hrt_absolute_time());
 
 	} else if (!active && _dock_mode_active) {
 		PX4_INFO("Dock mode inactive");
+		_commanded_speed_ms = 0.0f;
+		_aligned_since_us = 0;
+		_last_control_update_us = 0;
+		_velocity_setpoint_ned.zero();
+		set_stage(Stage::ALIGN);
 	}
 
 	_dock_mode_active = active;
 }
 
 void
-DockGuidance::publish_rates_setpoint(const dock_guidance_setpoint_s &setpoint, bool reset_integral)
+DockGuidance::publish_velocity_setpoint(hrt_abstime timestamp, const Vector3f &velocity_ned,
+					float yaw_setpoint_rad)
 {
-	vehicle_rates_setpoint_s rates{};
-	rates.timestamp = setpoint.timestamp;
-	rates.roll = setpoint.roll_rate_rad_s;
-	rates.pitch = setpoint.pitch_rate_rad_s;
-	rates.yaw = setpoint.yaw_rate_rad_s;
-	rates.thrust_body[0] = 0.0f;
-	rates.thrust_body[1] = 0.0f;
-	rates.thrust_body[2] = -math::constrain(setpoint.throttle, 0.0f, 1.0f);
-	rates.reset_integral = reset_integral;
-	_rates_setpoint_pub.publish(rates);
+	trajectory_setpoint_s trajectory{};
+	trajectory.timestamp = timestamp;
+
+	for (int axis = 0; axis < 3; ++axis) {
+		trajectory.position[axis] = NAN;
+		trajectory.velocity[axis] = velocity_ned(axis);
+		trajectory.acceleration[axis] = NAN;
+		trajectory.jerk[axis] = NAN;
+	}
+
+	trajectory.yaw = yaw_setpoint_rad;
+	trajectory.yawspeed = NAN;
+	_trajectory_setpoint_pub.publish(trajectory);
 }
 
 void
-DockGuidance::publish_safe_rates_setpoint(hrt_abstime timestamp)
+DockGuidance::publish_safe_velocity_setpoint(hrt_abstime timestamp)
 {
-	dock_guidance_setpoint_s safe{};
-	safe.timestamp = timestamp;
-	safe.throttle = math::constrain(_param_dock_thr.get(), 0.0f, 1.0f);
-	publish_rates_setpoint(safe, true);
+	_velocity_setpoint_ned.zero();
+	publish_velocity_setpoint(timestamp, _velocity_setpoint_ned, _yaw_setpoint_rad);
+}
+
+void
+DockGuidance::publish_degraded_setpoint(hrt_abstime timestamp)
+{
+	const float dt_s = (_last_control_update_us > 0 && timestamp > _last_control_update_us) ?
+			   math::constrain((timestamp - _last_control_update_us) * 1e-6f, 0.002f, 0.1f) : LOOP_DT;
+	const float deceleration = math::constrain(_param_dock_dec_max.get(), 0.1f, 20.0f);
+	const float speed = _velocity_setpoint_ned.norm();
+
+	if (speed > 0.01f) {
+		const float next_speed = math::max(speed - deceleration * dt_s, 0.0f);
+		_velocity_setpoint_ned *= next_speed / speed;
+
+	} else {
+		_velocity_setpoint_ned.zero();
+	}
+
+	_commanded_speed_ms = _velocity_setpoint_ned.norm();
+	_last_control_update_us = timestamp;
+	set_stage(Stage::RECOVERY);
+	publish_guidance_status(timestamp, true, true);
+	publish_velocity_setpoint(timestamp, _velocity_setpoint_ned, _yaw_setpoint_rad);
+}
+
+void
+DockGuidance::publish_guidance_status(hrt_abstime timestamp, bool valid, bool degraded)
+{
+	dock_guidance_setpoint_s status{};
+	status.timestamp = timestamp;
+	status.closing_speed_m_s = _closing_speed_ms;
+	status.target_speed_m_s = _commanded_speed_ms;
+	_velocity_setpoint_ned.copyTo(status.velocity_setpoint_ned_m_s);
+	_relative_position_ned.copyTo(status.relative_position_ned_m);
+	status.relative_distance_m = _relative_distance_m;
+	status.fov_ratio = _fov_ratio;
+	status.camera_yaw_deg = _los_c_deg(0);
+	status.camera_pitch_deg = _los_c_deg(1);
+	status.stage = static_cast<uint8_t>(_stage);
+	status.velocity_valid = _velocity_valid;
+	status.relative_position_valid = _relative_position_valid;
+	status.vision_degraded = degraded;
+	status.valid = valid;
+	_setpoint_pub.publish(status);
+}
+
+void
+DockGuidance::set_stage(Stage stage)
+{
+	if (_stage == stage) {
+		return;
+	}
+
+	_stage = stage;
+
+	switch (stage) {
+	case Stage::NONE: PX4_INFO("dock stage NONE"); break;
+
+	case Stage::ALIGN: PX4_INFO("dock stage ALIGN"); break;
+
+	case Stage::ACCELERATE: PX4_INFO("dock stage ACCELERATE"); break;
+
+	case Stage::MAX_SPEED_APPROACH: PX4_INFO("dock stage MAX_SPEED"); break;
+
+	case Stage::TERMINAL_BRAKE: PX4_INFO("dock stage BRAKE"); break;
+
+	case Stage::RECOVERY: PX4_INFO("dock stage RECOVERY"); break;
+	}
 }
 
 // ---------- 视觉观测处理 ----------
 
 void
 DockGuidance::process_observation(float los_yaw_deg, float los_pitch_deg,
+				  const Vector3f &relative_position_ned,
+				  bool relative_position_valid,
 				  const Vector3f &att_deg,
 				  const Vector3f &gyro_dps,
 				  float dt_s, hrt_abstime timestamp_sample)
@@ -573,7 +719,7 @@ DockGuidance::process_observation(float los_yaw_deg, float los_pitch_deg,
 
 	if (_deriv_count >= DERIV_SIZE) {
 		_los_e_dot = Vector3f(derivative_filter(_los_x_deriv_buf), derivative_filter(_los_y_deriv_buf),
-					 derivative_filter(_los_z_deriv_buf));
+				      derivative_filter(_los_z_deriv_buf));
 		_los_e_dot -= _los_e_unit * (_los_e_unit * _los_e_dot);
 	}
 
@@ -588,32 +734,61 @@ DockGuidance::process_observation(float los_yaw_deg, float los_pitch_deg,
 	R_ned_from_cam_T.transpose();
 	_los_c_rate_dps = R_ned_from_cam_T * _los_e_rate_dps;
 	_gyro_c_dps = _rot_body_to_cam * gyro_dps;
+	_relative_position_valid = relative_position_valid;
 
-	// 读取地速并转换为地理系航向/俯仰角。
-	// 当前版本仅保存该信息，尚未将其用于控制律。
-	vehicle_local_position_s lpos{};
-	_velocity_valid = _local_pos_sub.copy(&lpos) && lpos.v_xy_valid && lpos.v_z_valid;
-	const Vector3f vel_ned(lpos.vx, lpos.vy, lpos.vz);
-	_velocity_speed_ms = vel_ned.norm();
-	_velocity_valid = _velocity_valid && (_velocity_speed_ms > 5.0f);
-
-	if (_velocity_valid) {
-		_velocity_e_deg(0) = math::degrees(atan2f(vel_ned(1), vel_ned(0)));
-		_velocity_e_deg(1) = math::degrees(atan2f(-vel_ned(2), Vector2f(vel_ned(0), vel_ned(1)).norm()));
+	if (_relative_position_valid) {
+		_relative_position_ned = relative_position_ned;
+		_relative_distance_m = relative_position_ned.norm();
 
 	} else {
+		_relative_position_ned.zero();
+		_relative_distance_m = NAN;
+	}
+
+	// 使用 EKF 融合后的本机速度，不直接使用原始 GPS 速度。将速度投影到
+	// 地理系 LOS 后得到朝目标运动的接近速度，供油门速度闭环使用。
+	vehicle_local_position_s lpos{};
+	const bool have_local_position = _local_pos_sub.copy(&lpos);
+	const hrt_abstime now = hrt_absolute_time();
+	const bool velocity_fresh = have_local_position && (lpos.timestamp > 0) && (now >= lpos.timestamp)
+				    && ((now - lpos.timestamp) < 500_ms);
+	_velocity_ned = Vector3f(lpos.vx, lpos.vy, lpos.vz);
+	_velocity_valid = velocity_fresh && lpos.v_xy_valid && lpos.v_z_valid && _velocity_ned.isAllFinite();
+
+	if (_velocity_valid) {
+		_velocity_speed_ms = _velocity_ned.norm();
+		_closing_speed_ms = _velocity_ned * _los_e_unit;
+		_velocity_e_deg(0) = math::degrees(atan2f(_velocity_ned(1), _velocity_ned(0)));
+		_velocity_e_deg(1) = math::degrees(atan2f(-_velocity_ned(2),
+						   Vector2f(_velocity_ned(0), _velocity_ned(1)).norm()));
+
+	} else {
+		_velocity_ned.zero();
+		_velocity_speed_ms = 0.0f;
+		_closing_speed_ms = 0.0f;
 		_velocity_e_deg.zero();
 	}
 
-	compute_control(att_deg, dt_s);
+	if (!_velocity_valid) {
+		invalidate_setpoint(now, "local velocity invalid");
+		return;
+	}
+
+	if (!_relative_position_valid) {
+		invalidate_setpoint(now, "relative target position invalid");
+		return;
+	}
+
+	compute_control(att_deg, dt_s, now);
 }
 
 // ---------- 三阶段视觉引导控制器 ----------
 
 void
-DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s)
+DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s, hrt_abstime now)
 {
-	// 计算相机在 NED 中的姿态，用于水平滚转约束与前进俯仰目标。
+	// The camera-frame errors define image safety, while the filtered NED LOS
+	// defines the direction of the velocity vector sent to mc_pos_control.
 	const Dcmf R_ned_body(Eulerf(math::radians(att_deg(0)),
 				     math::radians(att_deg(1)),
 				     math::radians(att_deg(2))));
@@ -624,158 +799,165 @@ DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s)
 	_camera_e_deg(1) = math::degrees(cam_euler.theta());
 	_camera_e_deg(2) = math::degrees(cam_euler.psi());
 
-	const float pitch_err_abs = fabsf(_los_c_deg(1));
-	const float yaw_err_abs = fabsf(_los_c_deg(0));
-	const float rate_limit = math::constrain(_param_dock_rate_max.get(), 1.0f, 360.0f);
-	const float vis_limit = math::max(_param_dock_vis_lim.get(), 0.0f);
-	const float vis_hysteresis = math::constrain(_param_dock_vis_hyst.get(), 0.0f, vis_limit);
-	const float pitch_capture_enter = math::constrain(_param_dock_pcap_enter.get(), 10.0f, 89.0f);
-	const float pitch_capture_exit = math::constrain(_param_dock_pcap_exit.get(), 5.0f, pitch_capture_enter);
+	const float half_fov_x = math::max(0.5f * _param_dock_fov_x.get(), 5.0f);
+	const float half_fov_y = math::max(0.5f * _param_dock_fov_y.get(), 5.0f);
+	const float yaw_ratio = fabsf(_los_c_deg(0)) / half_fov_x;
+	const float pitch_ratio = fabsf(_los_c_deg(1)) / half_fov_y;
+	_fov_ratio = math::max(yaw_ratio, pitch_ratio);
 
-	const float yaw_p_rate = _param_dock_yaw_p.get() * _los_c_deg(0);
-	const float pitch_p_rate = _param_dock_pit_p.get() * _los_c_deg(1);
-	const float level_rate = (fabsf(_camera_e_deg(1)) < 80.0f) ?
-				 -_param_dock_rll_p.get() * _camera_e_deg(0) : 0.0f;
+	const float hard_ratio = math::constrain(_param_dock_fov_hard.get(), 0.30f, 0.99f);
+	const float soft_ratio = math::constrain(_param_dock_fov_soft.get(), 0.15f, hard_ratio - 0.05f);
+	const float align_ratio = math::constrain(_param_dock_fov_align.get(), 0.05f, soft_ratio - 0.05f);
 
-	const float active_vis_limit = (_stage == Stage::ANGLE_CAPTURE) ? vis_limit - vis_hysteresis : vis_limit;
-	const bool outside_vis = (pitch_err_abs > active_vis_limit) || (yaw_err_abs > active_vis_limit);
-	const bool pitch_capture = (_stage == Stage::PITCH_CAPTURE) ?
-				   (pitch_err_abs > pitch_capture_exit) : (pitch_err_abs > pitch_capture_enter);
+	if (_fov_ratio >= hard_ratio) {
+		invalidate_setpoint(now, "target reached hard FOV boundary");
+		return;
+	}
 
-	if (pitch_capture) {
-		// 阶段 1：目标接近相机上下边界时，优先仅调整俯仰，先将目标拉回可视区域。
-		if (_stage != Stage::PITCH_CAPTURE) {
-			PX4_INFO("dock stage PITCH_CAPTURE");
-		}
+	Vector3f approach_direction = _los_e_unit;
 
-		_stage = Stage::PITCH_CAPTURE;
+	if (!approach_direction.isAllFinite() || approach_direction.norm() < 0.5f) {
+		invalidate_setpoint(now, "invalid approach direction");
+		return;
+	}
 
-		if (_los_rate_control_active) {
-			_los_yaw_rate_pid_I = 0.0f;
-			_los_pitch_rate_pid_I = 0.0f;
-			_los_rate_control_active = false;
-		}
+	approach_direction.normalize();
+	const Vector3f camera_forward_ned = R_ned_cam * Vector3f(1.0f, 0.0f, 0.0f);
+	const float horizontal_los = Vector2f(approach_direction(0), approach_direction(1)).norm();
 
-		_target_rate_c_dps(0) = 0.0f;
-		_target_rate_c_dps(1) = math::constrain(pitch_p_rate, -rate_limit, rate_limit);
-		_target_rate_c_dps(2) = 0.0f;
-
-	} else if (outside_vis) {
-		// 阶段 2：目标仍在可视中心范围外，同时调整滚转水平、俯仰和偏航进行捕获。
-		if (_stage != Stage::ANGLE_CAPTURE) {
-			PX4_INFO("dock stage ANGLE_CAPTURE");
-		}
-
-		_stage = Stage::ANGLE_CAPTURE;
-
-		if (_los_rate_control_active) {
-			_los_yaw_rate_pid_I = 0.0f;
-			_los_pitch_rate_pid_I = 0.0f;
-			_los_rate_control_active = false;
-		}
-
-		_target_rate_c_dps(0) = math::constrain(level_rate, -rate_limit, rate_limit);
-		_target_rate_c_dps(1) = math::constrain(pitch_p_rate, -rate_limit, rate_limit);
-		_target_rate_c_dps(2) = math::constrain(yaw_p_rate, -rate_limit, rate_limit);
+	if (horizontal_los > 0.05f) {
+		const float target_yaw = atan2f(approach_direction(1), approach_direction(0));
+		const float camera_yaw = atan2f(camera_forward_ned(1), camera_forward_ned(0));
+		const float current_body_yaw = math::radians(att_deg(2));
+		_yaw_setpoint_rad = matrix::wrap_pi(current_body_yaw + matrix::wrap_pi(target_yaw - camera_yaw));
 
 	} else {
-		// 阶段 3：目标已在中心可视范围内。
-		// 使用 LOS 角速度抑制目标漂移，同时叠加前进俯仰和残余角度修正以执行跟踪/对接。
-		if (_stage != Stage::LOS_RATE) {
-			PX4_INFO("dock stage LOS_RATE");
-		}
-
-		_stage = Stage::LOS_RATE;
-
-		const float fwd_pitch_rate = math::constrain(
-			_param_dock_fwd_pit.get() - _camera_e_deg(1), 0.0f, 5.0f);
-
-		if (!_los_rate_control_active) {
-			_los_yaw_rate_pid_I = 0.0f;
-			_los_pitch_rate_pid_I = 0.0f;
-			_los_rate_control_active = true;
-		}
-
-		const float nav_y_p = _param_dock_nav_y_p.get();
-		const float nav_p_p = _param_dock_nav_p_p.get();
-
-		_target_rate_c_dps(0) = math::constrain(level_rate, -rate_limit, rate_limit);
-		_target_rate_c_dps(1) = math::constrain(
-			-nav_p_p * _los_c_rate_dps(1) + fwd_pitch_rate + _param_dock_trc_p.get() * _los_c_deg(1),
-			-rate_limit, rate_limit);
-		_target_rate_c_dps(2) = math::constrain(
-			-nav_y_p * _los_c_rate_dps(2) + _param_dock_trc_y.get() * _los_c_deg(0),
-			-rate_limit, rate_limit);
+		_yaw_setpoint_rad = math::radians(att_deg(2));
 	}
 
-	apply_visibility_limit();
-	// 控制律先在相机系生成；转换到机体系后，下游可直接作为飞行器角速度指令使用。
-	const Vector3f requested_rate_b_dps = _rot_cam_to_body * _target_rate_c_dps;
-	const float max_delta = math::constrain(_param_dock_rate_slew.get(), 1.0f, 2000.0f) *
-				math::constrain(obs_dt_s, 0.002f, 0.1f);
+	const float dt_s = (_last_control_update_us > 0 && now > _last_control_update_us) ?
+			   math::constrain((now - _last_control_update_us) * 1e-6f, 0.002f, 0.1f) :
+			   math::constrain(obs_dt_s, 0.002f, 0.1f);
+	_last_control_update_us = now;
 
-	for (int axis = 0; axis < 3; ++axis) {
-		_target_rate_b_dps(axis) += math::constrain(requested_rate_b_dps(axis) - _target_rate_b_dps(axis),
-						     -max_delta, max_delta);
-		_target_rate_b_dps(axis) = math::constrain(_target_rate_b_dps(axis), -rate_limit, rate_limit);
-	}
-
-	if (!_target_rate_b_dps.isAllFinite()) {
-		invalidate_setpoint(hrt_absolute_time(), "non-finite output");
+	// Before the external mode owns control, only validate and publish status.
+	// Starting the acceleration timer while another mode is active would create
+	// an immediate high-speed setpoint on mode entry.
+	if (!_dock_mode_active) {
+		set_stage(Stage::ALIGN);
+		_commanded_speed_ms = 0.0f;
+		_velocity_setpoint_ned.zero();
+		_aligned_since_us = 0;
+		_setpoint_valid = true;
+		publish_guidance_status(now, true, false);
 		return;
 	}
 
-	const float throttle = _param_dock_thr.get();
-	const float throttle_rate = _param_dock_thr_rate.get();
-
-	if (!std::isfinite(throttle) || !std::isfinite(throttle_rate)) {
-		invalidate_setpoint(hrt_absolute_time(), "non-finite throttle");
-		return;
+	if (_stage == Stage::NONE) {
+		set_stage(Stage::ALIGN);
 	}
 
-	// 发布独立的 Dock 引导设定值。当前模块不直接接管 PX4 的 vehicle_rates_setpoint。
-	dock_guidance_setpoint_s sp{};
-	sp.timestamp = hrt_absolute_time();
-	sp.roll_rate_rad_s = math::radians(_target_rate_b_dps(0));
-	sp.pitch_rate_rad_s = math::radians(_target_rate_b_dps(1));
-	sp.yaw_rate_rad_s = math::radians(_target_rate_b_dps(2));
-	sp.throttle = math::constrain(throttle, 0.0f, 1.0f);
-	sp.throttle_rate = math::max(throttle_rate, 0.0f);
-	sp.camera_yaw_deg = _los_c_deg(0);
-	sp.camera_pitch_deg = _los_c_deg(1);
-	sp.stage = static_cast<uint8_t>(_stage);
-	sp.valid = true;
-	_setpoint_pub.publish(sp);
+	if ((_fov_ratio >= soft_ratio) && (_stage != Stage::ALIGN) && (_stage != Stage::RECOVERY)) {
+		set_stage(Stage::RECOVERY);
+		_aligned_since_us = 0;
+	}
+
+	const float acceleration = math::constrain(_param_dock_acc_max.get(), 0.1f, 20.0f);
+	const float deceleration = math::constrain(_param_dock_dec_max.get(), 0.1f, 20.0f);
+
+	if (_stage == Stage::ALIGN) {
+		_commanded_speed_ms = 0.0f;
+		_velocity_setpoint_ned.zero();
+
+		// Translate toward the target only in the plane perpendicular to the
+		// installed camera optical axis. This is mounting-agnostic (including the
+		// default -90 deg camera roll) and does not start forward approach early.
+		Vector3f transverse_direction = approach_direction
+						- camera_forward_ned * (camera_forward_ned * approach_direction);
+		const float transverse_norm = transverse_direction.norm();
+
+		if (transverse_norm > 0.001f) {
+			transverse_direction /= transverse_norm;
+			const float alignment_speed = math::constrain(_param_dock_align_speed.get(), 0.1f, 5.0f);
+			const float alignment_scale = math::constrain(_fov_ratio / math::max(align_ratio, 0.05f), 0.0f, 1.0f);
+			_velocity_setpoint_ned = transverse_direction * alignment_speed * alignment_scale;
+		}
+
+		if (_fov_ratio <= align_ratio) {
+			if (_aligned_since_us == 0) {
+				_aligned_since_us = now;
+			}
+
+			const uint64_t align_time_us = static_cast<uint64_t>(
+							       math::constrain(_param_dock_align_t.get(), 0.05f, 5.0f) * 1e6f);
+
+			if ((now - _aligned_since_us) >= align_time_us) {
+				set_stage(Stage::ACCELERATE);
+				_aligned_since_us = 0;
+			}
+
+		} else {
+			_aligned_since_us = 0;
+		}
+
+	} else if (_stage == Stage::RECOVERY) {
+		_commanded_speed_ms = math::max(_commanded_speed_ms - deceleration * dt_s, 0.0f);
+		_velocity_setpoint_ned = approach_direction * _commanded_speed_ms;
+
+		if (_commanded_speed_ms <= 0.05f) {
+			_commanded_speed_ms = 0.0f;
+			_velocity_setpoint_ned.zero();
+			set_stage(Stage::ALIGN);
+			_aligned_since_us = 0;
+		}
+
+	} else {
+		// Respect mc_pos_control component limits before publishing the vector. If
+		// each component were clipped independently downstream, the velocity would
+		// no longer point along LOS and a fixed camera could lose the target.
+		float controller_limited_speed = 100.0f;
+		const float horizontal_direction = Vector2f(approach_direction(0), approach_direction(1)).norm();
+
+		if (horizontal_direction > 0.01f) {
+			controller_limited_speed = math::min(controller_limited_speed,
+							     math::max(_param_mpc_xy_vel_max.get(), 0.0f) / horizontal_direction);
+		}
+
+		if (approach_direction(2) < -0.01f) {
+			controller_limited_speed = math::min(controller_limited_speed,
+							     math::max(_param_mpc_z_vel_max_up.get(), 0.0f) / -approach_direction(2));
+
+		} else if (approach_direction(2) > 0.01f) {
+			controller_limited_speed = math::min(controller_limited_speed,
+							     math::max(_param_mpc_z_vel_max_down.get(), 0.0f) / approach_direction(2));
+		}
+
+		const float maximum_speed = math::min(math::constrain(_param_dock_vel_max.get(), 0.0f, 100.0f),
+						      controller_limited_speed);
+		const float stop_distance = math::constrain(_param_dock_stop_dist.get(), 0.0f, 100.0f);
+		const float remaining_distance = math::max(_relative_distance_m - stop_distance, 0.0f);
+		const float braking_speed = sqrtf(2.0f * deceleration * remaining_distance);
+		const float desired_speed = math::min(maximum_speed, braking_speed);
+		const float speed_delta = math::constrain(desired_speed - _commanded_speed_ms,
+					  -deceleration * dt_s, acceleration * dt_s);
+		_commanded_speed_ms = math::constrain(_commanded_speed_ms + speed_delta, 0.0f, desired_speed);
+		_velocity_setpoint_ned = approach_direction * _commanded_speed_ms;
+
+		if (desired_speed < maximum_speed - 0.05f) {
+			set_stage(Stage::TERMINAL_BRAKE);
+
+		} else if (_commanded_speed_ms >= maximum_speed - 0.05f) {
+			set_stage(Stage::MAX_SPEED_APPROACH);
+
+		} else {
+			set_stage(Stage::ACCELERATE);
+		}
+	}
+
+	_closing_speed_ms = _velocity_ned * approach_direction;
 	_setpoint_valid = true;
-
-	if (_dock_mode_active) {
-		publish_rates_setpoint(sp, _reset_rate_integral);
-		_reset_rate_integral = false;
-	}
-}
-
-void
-DockGuidance::apply_visibility_limit()
-{
-	// 当目标已经靠近视场边界时，禁止会把目标进一步推离画面的指令方向。
-	// 这不是对输出幅值限幅，而是基于目标偏差符号的方向保护。
-	const float limit = math::max(_param_dock_vis_lim.get(), 0.0f);
-	const float yaw_err = _los_c_deg(0);
-	const float pitch_err = _los_c_deg(1);
-
-	if ((yaw_err > limit) && (_target_rate_c_dps(2) < 0.0f)) {
-		_target_rate_c_dps(2) = 0.0f;
-
-	} else if ((yaw_err < -limit) && (_target_rate_c_dps(2) > 0.0f)) {
-		_target_rate_c_dps(2) = 0.0f;
-	}
-
-	if ((pitch_err > limit) && (_target_rate_c_dps(1) < 0.0f)) {
-		_target_rate_c_dps(1) = 0.0f;
-
-	} else if ((pitch_err < -limit) && (_target_rate_c_dps(1) > 0.0f)) {
-		_target_rate_c_dps(1) = 0.0f;
-	}
+	publish_guidance_status(now, true, false);
+	publish_velocity_setpoint(now, _velocity_setpoint_ned, _yaw_setpoint_rad);
 }
 
 // ---------- 数值计算辅助函数 ----------
@@ -832,8 +1014,8 @@ DockGuidance::update_camera_rotation()
 	// 三个参数定义从相机坐标系到 PX4 FRD 机体系的 3-2-1 旋转。
 	// 默认 roll=-90 deg 与优化前的固定矩阵完全一致，因此升级后不改变当前安装行为。
 	_rot_cam_to_body = Dcmf(Eulerf(math::radians(_param_dock_cam_roll.get()),
-					 math::radians(_param_dock_cam_pitch.get()),
-					 math::radians(_param_dock_cam_yaw.get())));
+				       math::radians(_param_dock_cam_pitch.get()),
+				       math::radians(_param_dock_cam_yaw.get())));
 	_rot_body_to_cam = _rot_cam_to_body;
 	_rot_body_to_cam.transpose();
 }
@@ -870,7 +1052,13 @@ DockGuidance::print_status()
 {
 	PX4_INFO("Dock mode: %s", (_mode_id >= 0) ? "registered" : "not registered");
 	PX4_INFO("mode id: %d, arming check id: %d", _mode_id, _arming_check_id);
-	PX4_INFO("active: %s, vision: %s", _dock_mode_active ? "yes" : "no", _setpoint_valid ? "valid" : "invalid");
+	PX4_INFO("active: %s, vision: %s%s", _dock_mode_active ? "yes" : "no",
+		 _setpoint_valid ? "valid" : "invalid", _vision_degraded ? " (degraded)" : "");
+	PX4_INFO("velocity: %s, closing: %.2f m/s, command: %.2f m/s",
+		 _velocity_valid ? "valid" : "invalid", (double)_closing_speed_ms, (double)_commanded_speed_ms);
+	PX4_INFO("relative position: %s, distance: %.2f m, FOV ratio: %.2f, stage: %u",
+		 _relative_position_valid ? "valid" : "invalid", (double)_relative_distance_m,
+		 (double)_fov_ratio, static_cast<unsigned>(_stage));
 	return 0;
 }
 
@@ -886,10 +1074,11 @@ DockGuidance::print_usage(const char *reason)
 ### Description
 
 Visual docking guidance controller.  Subscribes to viztra_observation for
-camera line-of-sight data and produces body-frame rate setpoints via a
-three-stage controller (pitch capture → angle capture → LOS-rate tracking).
-It registers a selectable external flight mode named "Dock Guidance". In that
-mode only the PX4 rate controller and control allocation remain enabled.
+camera line-of-sight and target-relative NED position. It produces a 3D NED
+velocity setpoint through alignment, acceleration, maximum-speed approach,
+terminal braking and recovery stages. The selectable "Dock Guidance" mode uses
+PX4 multicopter position, attitude and rate control for coupled thrust and
+altitude control.
 
 ### Usage
 

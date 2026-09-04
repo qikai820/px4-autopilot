@@ -43,8 +43,8 @@ then
 fi
 
 # Register Dock Guidance only after Commander is running. The Viztra serial
-# driver itself is started earlier from rc.sensors.
-if param compare -s SENS_EN_VIZTRA 1
+# driver itself is started independently from rc.sensors.
+if param greater -s DOCK_GUIDANCE 0
 then
 	dock_guidance start
 fi

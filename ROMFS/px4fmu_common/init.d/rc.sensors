@@ -8,6 +8,33 @@
 #                           Begin Optional drivers                            #
 ###############################################################################
 
+# Viztra visual observation driver.
+# Start it here when explicitly enabled. rc.serial_port translates the
+# VIZTRA_CFG serial-port index into the board-specific device path and marks the
+# port as occupied, so the later generated rc.serial script will not start a
+# second instance.
+if param compare -s SENS_EN_VIZTRA 1
+then
+	param set-default VIZTRA_CFG 102
+	if param compare -s VIZTRA_CFG 0
+	then
+		param set VIZTRA_CFG 102
+	fi
+
+	set PRT VIZTRA_CFG
+	. ${R}etc/init.d/rc.serial_port
+	if [ "$SERIAL_DEV" != none ]
+	then
+		echo "Starting Viztra Visual Observation on $SERIAL_DEV"
+		viztra start -d "$SERIAL_DEV"
+	else
+		echo "VIZTRA_CFG does not select a valid serial port"
+	fi
+	unset SERIAL_DEV
+	unset BAUD_PARAM
+	unset PRT
+fi
+
 if param compare -s SENS_EN_BATT 1
 then
 	batt_smbus start -X

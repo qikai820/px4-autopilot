@@ -48,12 +48,14 @@
 #include <uORB/topics/arming_check_request.h>
 #include <uORB/topics/register_ext_component_reply.h>
 #include <uORB/topics/register_ext_component_request.h>
+#include <uORB/topics/trajectory_setpoint.h>
 #include <uORB/topics/unregister_ext_component.h>
 #include <uORB/topics/vehicle_control_mode.h>
-#include <uORB/topics/vehicle_rates_setpoint.h>
 #include <uORB/topics/vehicle_status.h>
 
 #include <matrix/matrix/math.hpp>
+
+#include <cmath>
 
 using namespace time_literals;
 
@@ -79,9 +81,11 @@ private:
 
 	enum class Stage : uint8_t {
 		NONE = 0,
-		PITCH_CAPTURE = 1,
-		ANGLE_CAPTURE = 2,
-		LOS_RATE = 3
+		ALIGN = 1,
+		ACCELERATE = 2,
+		MAX_SPEED_APPROACH = 3,
+		TERMINAL_BRAKE = 4,
+		RECOVERY = 5
 	};
 
 	void Run() override;
@@ -93,8 +97,13 @@ private:
 	void unregister_dock_mode();
 	void reply_to_arming_check(const arming_check_request_s &request);
 	void update_mode_state();
-	void publish_rates_setpoint(const dock_guidance_setpoint_s &setpoint, bool reset_integral);
-	void publish_safe_rates_setpoint(hrt_abstime timestamp);
+	void publish_velocity_setpoint(hrt_abstime timestamp, const matrix::Vector3f &velocity_ned,
+				       float yaw_setpoint_rad);
+	void publish_safe_velocity_setpoint(hrt_abstime timestamp);
+	void handle_visual_loss(hrt_abstime timestamp, const char *reason);
+	void publish_degraded_setpoint(hrt_abstime timestamp);
+	void publish_guidance_status(hrt_abstime timestamp, bool valid, bool degraded);
+	void set_stage(Stage stage);
 
 	// 保存并读取与相机画面时间对齐的飞行器状态。
 	void push_delay_history(hrt_abstime timestamp);
@@ -104,11 +113,12 @@ private:
 	void reset_tracking_state();
 
 	void process_observation(float los_yaw_deg, float los_pitch_deg,
+				 const matrix::Vector3f &relative_position_ned,
+				 bool relative_position_valid,
 				 const matrix::Vector3f &att_deg,
 				 const matrix::Vector3f &gyro_dps,
 				 float dt_s, hrt_abstime timestamp_sample);
-	void compute_control(const matrix::Vector3f &att_deg, float obs_dt_s);
-	void apply_visibility_limit();
+	void compute_control(const matrix::Vector3f &att_deg, float obs_dt_s, hrt_abstime now);
 
 	float low_pass_filter(float &state, float input, float cutoff_hz, float dt);
 	float derivative_filter(const float *buf) const;
@@ -125,7 +135,7 @@ private:
 
 	// 对接引导输出，供未来的 Dock 模式仲裁器或控制器订阅。
 	uORB::Publication<dock_guidance_setpoint_s> _setpoint_pub{ORB_ID(dock_guidance_setpoint)};
-	uORB::Publication<vehicle_rates_setpoint_s> _rates_setpoint_pub{ORB_ID(vehicle_rates_setpoint)};
+	uORB::Publication<trajectory_setpoint_s> _trajectory_setpoint_pub{ORB_ID(trajectory_setpoint)};
 	uORB::Publication<register_ext_component_request_s> _register_ext_component_request_pub{ORB_ID(register_ext_component_request)};
 	uORB::Publication<unregister_ext_component_s> _unregister_ext_component_pub{ORB_ID(unregister_ext_component)};
 	uORB::Publication<vehicle_control_mode_s> _config_control_setpoints_pub{ORB_ID(config_control_setpoints)};
@@ -144,8 +154,6 @@ private:
 	matrix::Vector3f _camera_e_deg{0.0f, 0.0f, 0.0f};
 	matrix::Vector3f _gyro_c_dps{0.0f, 0.0f, 0.0f};
 	matrix::Vector3f _los_c_rate_dps{0.0f, 0.0f, 0.0f};
-	matrix::Vector3f _target_rate_c_dps{0.0f, 0.0f, 0.0f};
-	matrix::Vector3f _target_rate_b_dps{0.0f, 0.0f, 0.0f};
 
 	// 低通后的 LOS 分量，以及用于窗口差分的历史数据。
 	float _los_x_filt{0.0f};
@@ -160,18 +168,14 @@ private:
 	int _deriv_count{0};
 	int _deriv_idx{0};
 
-	float _los_yaw_rate_pid_I{0.0f};
-	float _los_pitch_rate_pid_I{0.0f};
-	bool _los_rate_control_active{false};
-
 	// 当前视觉捕获阶段与视觉目标状态。
 	Stage _stage{Stage::NONE};
-	bool _have_last_target{false};
 	uint64_t _last_observation_us{0};
 	uint64_t _last_sample_us{0};
+	uint64_t _last_valid_observation_us{0};
 	bool _setpoint_valid{false};
 	bool _dock_mode_active{false};
-	bool _reset_rate_integral{false};
+	bool _vision_degraded{false};
 	bool _unregistration_sent{false};
 	int8_t _arming_check_id{-1};
 	int8_t _mode_id{-1};
@@ -186,9 +190,20 @@ private:
 	int _delay_idx{0};
 	int _delay_count{0};
 
+	matrix::Vector3f _velocity_ned{0.0f, 0.0f, 0.0f};
 	float _velocity_speed_ms{0.0f};
+	float _closing_speed_ms{0.0f};
 	bool _velocity_valid{false};
 	matrix::Vector2f _velocity_e_deg{0.0f, 0.0f};
+	matrix::Vector3f _relative_position_ned{0.0f, 0.0f, 0.0f};
+	bool _relative_position_valid{false};
+	float _relative_distance_m{NAN};
+	matrix::Vector3f _velocity_setpoint_ned{0.0f, 0.0f, 0.0f};
+	float _yaw_setpoint_rad{NAN};
+	float _commanded_speed_ms{0.0f};
+	float _fov_ratio{0.0f};
+	hrt_abstime _aligned_since_us{0};
+	hrt_abstime _last_control_update_us{0};
 
 	DEFINE_PARAMETERS(
 		(ParamInt<px4::params::DOCK_CAM_DLY>)   _param_dock_cam_dly,
@@ -201,22 +216,20 @@ private:
 		(ParamFloat<px4::params::DOCK_RES_Y>)   _param_dock_res_y,
 		(ParamFloat<px4::params::DOCK_FOV_X>)   _param_dock_fov_x,
 		(ParamFloat<px4::params::DOCK_FOV_Y>)   _param_dock_fov_y,
-		(ParamFloat<px4::params::DOCK_YAW_P>)   _param_dock_yaw_p,
-		(ParamFloat<px4::params::DOCK_PIT_P>)   _param_dock_pit_p,
-		(ParamFloat<px4::params::DOCK_RATE_MAX>) _param_dock_rate_max,
-		(ParamFloat<px4::params::DOCK_RATE_SLEW>) _param_dock_rate_slew,
-		(ParamFloat<px4::params::DOCK_VIS_LIM>) _param_dock_vis_lim,
-		(ParamFloat<px4::params::DOCK_VIS_HYST>) _param_dock_vis_hyst,
-		(ParamFloat<px4::params::DOCK_PCAP_ENT>) _param_dock_pcap_enter,
-		(ParamFloat<px4::params::DOCK_PCAP_EXT>) _param_dock_pcap_exit,
 		(ParamFloat<px4::params::DOCK_LOS_MAX>) _param_dock_los_max,
-		(ParamFloat<px4::params::DOCK_NAV_Y_P>) _param_dock_nav_y_p,
-		(ParamFloat<px4::params::DOCK_NAV_P_P>) _param_dock_nav_p_p,
-		(ParamFloat<px4::params::DOCK_FWD_PIT>) _param_dock_fwd_pit,
-		(ParamFloat<px4::params::DOCK_TRC_Y>)   _param_dock_trc_y,
-		(ParamFloat<px4::params::DOCK_TRC_P>)   _param_dock_trc_p,
-		(ParamFloat<px4::params::DOCK_THR>)     _param_dock_thr,
-		(ParamFloat<px4::params::DOCK_THR_RATE>) _param_dock_thr_rate,
-		(ParamFloat<px4::params::DOCK_RLL_P>)   _param_dock_rll_p
+		(ParamFloat<px4::params::DOCK_VEL_MAX>) _param_dock_vel_max,
+		(ParamFloat<px4::params::DOCK_ACC_MAX>) _param_dock_acc_max,
+		(ParamFloat<px4::params::DOCK_DEC_MAX>) _param_dock_dec_max,
+		(ParamFloat<px4::params::DOCK_STOP_DIST>) _param_dock_stop_dist,
+		(ParamFloat<px4::params::DOCK_ALIGN_T>) _param_dock_align_t,
+		(ParamFloat<px4::params::DOCK_FOV_ALIGN>) _param_dock_fov_align,
+		(ParamFloat<px4::params::DOCK_FOV_SOFT>) _param_dock_fov_soft,
+		(ParamFloat<px4::params::DOCK_FOV_HARD>) _param_dock_fov_hard,
+		(ParamFloat<px4::params::DOCK_ALIGN_SPD>) _param_dock_align_speed,
+		(ParamInt<px4::params::DOCK_VIS_GRACE>) _param_dock_vis_grace,
+		(ParamInt<px4::params::DOCK_REL_TOUT>) _param_dock_rel_tout,
+		(ParamFloat<px4::params::MPC_XY_VEL_MAX>) _param_mpc_xy_vel_max,
+		(ParamFloat<px4::params::MPC_Z_VEL_MAX_UP>) _param_mpc_z_vel_max_up,
+		(ParamFloat<px4::params::MPC_Z_VEL_MAX_DN>) _param_mpc_z_vel_max_down
 	)
 };

@@ -180,6 +180,11 @@ private:
 		const bool board_reports_valid = (frame.status & 0x01U) != 0U && (frame.status & 0x02U) == 0U;
 		const float offset_x = offsets_are_angles ? read_le_float(frame.offset_x) : read_le_int32(frame.offset_x);
 		const float offset_y = offsets_are_angles ? read_le_float(frame.offset_y) : read_le_int32(frame.offset_y);
+		const float relative_n_m = frame.has_relative_position ? read_le_float(frame.relative_n) : NAN;
+		const float relative_e_m = frame.has_relative_position ? read_le_float(frame.relative_e) : NAN;
+		const float relative_d_m = frame.has_relative_position ? read_le_float(frame.relative_d) : NAN;
+		const bool relative_position_valid = frame.has_relative_position && std::isfinite(relative_n_m)
+					     && std::isfinite(relative_e_m) && std::isfinite(relative_d_m);
 		const bool observation_valid = board_reports_valid && std::isfinite(offset_x) && std::isfinite(offset_y);
 
 		if (board_reports_valid && !observation_valid) {
@@ -191,12 +196,16 @@ private:
 		observation.timestamp_sample = timestamp;
 		observation.offset_x = offset_x;
 		observation.offset_y = offset_y;
+		observation.relative_n_m = relative_n_m;
+		observation.relative_e_m = relative_e_m;
+		observation.relative_d_m = relative_d_m;
 		observation.target_width_px = frame.width;
 		observation.target_height_px = frame.height;
 		observation.video_channel = frame.channel;
 		observation.protocol_status = frame.status;
 		observation.valid = observation_valid;
 		observation.offsets_are_angles = offsets_are_angles;
+		observation.relative_position_valid = relative_position_valid;
 		_observation_pub.publish(observation);
 
 		if (observation_valid) {

@@ -1,17 +1,19 @@
-# Guidance setpoint produced by the dock-guidance module.
-# All fields are in the body frame unless noted otherwise.
+# Guidance state produced by the dock-guidance module.
 
 uint64 timestamp                     # time since system start (microseconds)
 
-float32 roll_rate_rad_s              # body-x angular rate setpoint [rad/s]
-float32 pitch_rate_rad_s             # body-y angular rate setpoint [rad/s]
-float32 yaw_rate_rad_s               # body-z angular rate setpoint [rad/s]
-
-float32 throttle                     # normalized throttle [0, 1]
-float32 throttle_rate                # max throttle change per second [1/s]
+float32 closing_speed_m_s            # ground speed projected onto the earth-frame LOS [m/s]
+float32 target_speed_m_s             # commanded approach-speed magnitude [m/s]
+float32[3] velocity_setpoint_ned_m_s # NED velocity setpoint sent to mc_pos_control [m/s]
+float32[3] relative_position_ned_m   # target position relative to vehicle in NED [m]
+float32 relative_distance_m          # target slant range [m]
+float32 fov_ratio                    # largest normalized image offset; 1 is the image edge
 
 float32 camera_yaw_deg               # camera-frame yaw error [deg] (right-positive)
 float32 camera_pitch_deg             # camera-frame pitch error [deg] (up-positive)
 
-uint8 stage                          # current guidance stage (0=NONE 1=PITCH_CAP 2=ANGLE_CAP 3=LOS_RATE)
+uint8 stage                          # 0=NONE 1=ALIGN 2=ACCEL 3=MAX_SPEED 4=BRAKE 5=RECOVERY
+bool velocity_valid                  # fused local velocity is fresh and finite
+bool relative_position_valid         # fresh finite target-relative NED position is available
+bool vision_degraded                 # bridging a short visual dropout
 bool valid                           # true while the module has a usable target

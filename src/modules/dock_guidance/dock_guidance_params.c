@@ -1,6 +1,16 @@
 /**
+ * Enable Dock Guidance startup
+ *
+ * @boolean
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_INT32(DOCK_GUIDANCE, 1);
+
+/**
  * Camera delay compensation [ms]
  *
+ * @min 0
+ * @max 5000
  * @group Dock Guidance
  */
 PARAM_DEFINE_INT32(DOCK_CAM_DLY, 0);
@@ -80,70 +90,6 @@ PARAM_DEFINE_FLOAT(DOCK_FOV_X, 60.0f);
 PARAM_DEFINE_FLOAT(DOCK_FOV_Y, 45.0f);
 
 /**
- * Yaw angle proportional gain
- *
- * @group Dock Guidance
- */
-PARAM_DEFINE_FLOAT(DOCK_YAW_P, 1.0f);
-
-/**
- * Pitch angle proportional gain
- *
- * @group Dock Guidance
- */
-PARAM_DEFINE_FLOAT(DOCK_PIT_P, 1.0f);
-
-/**
- * Maximum angular rate command [deg/s]
- *
- * @group Dock Guidance
- */
-PARAM_DEFINE_FLOAT(DOCK_RATE_MAX, 60.0f);
-
-/**
- * Maximum angular-rate command slew [deg/s^2]
- *
- * @min 1
- * @max 2000
- * @group Dock Guidance
- */
-PARAM_DEFINE_FLOAT(DOCK_RATE_SLEW, 300.0f);
-
-/**
- * Visibility limit angle [deg]
- *
- * @group Dock Guidance
- */
-PARAM_DEFINE_FLOAT(DOCK_VIS_LIM, 20.0f);
-
-/**
- * Visibility-stage hysteresis [deg]
- *
- * @min 0
- * @max 20
- * @group Dock Guidance
- */
-PARAM_DEFINE_FLOAT(DOCK_VIS_HYST, 3.0f);
-
-/**
- * Pitch-capture entry angle [deg]
- *
- * @min 10
- * @max 89
- * @group Dock Guidance
- */
-PARAM_DEFINE_FLOAT(DOCK_PCAP_ENT, 60.0f);
-
-/**
- * Pitch-capture exit angle [deg]
- *
- * @min 5
- * @max 89
- * @group Dock Guidance
- */
-PARAM_DEFINE_FLOAT(DOCK_PCAP_EXT, 50.0f);
-
-/**
  * Maximum accepted camera LOS angle [deg]
  *
  * @min 10
@@ -153,57 +99,137 @@ PARAM_DEFINE_FLOAT(DOCK_PCAP_EXT, 50.0f);
 PARAM_DEFINE_FLOAT(DOCK_LOS_MAX, 89.0f);
 
 /**
- * LOS yaw rate P gain
+ * Maximum approach speed [m/s]
  *
+ * @min 0
+ * @max 100
+ * @decimal 1
  * @group Dock Guidance
  */
-PARAM_DEFINE_FLOAT(DOCK_NAV_Y_P, 3.0f);
+PARAM_DEFINE_FLOAT(DOCK_VEL_MAX, 15.0f);
 
 /**
- * LOS pitch rate P gain
+ * Maximum approach acceleration [m/s^2]
  *
+ * Limits how quickly the commanded LOS speed rises toward DOCK_VEL_MAX.
+ *
+ * @min 0.1
+ * @max 20
+ * @decimal 1
  * @group Dock Guidance
  */
-PARAM_DEFINE_FLOAT(DOCK_NAV_P_P, 3.0f);
+PARAM_DEFINE_FLOAT(DOCK_ACC_MAX, 3.0f);
 
 /**
- * Forward pitch angle target [deg]
+ * Maximum approach deceleration [m/s^2]
  *
+ * Used by the stopping-distance speed envelope and recovery state.
+ *
+ * @min 0.1
+ * @max 20
+ * @decimal 1
  * @group Dock Guidance
  */
-PARAM_DEFINE_FLOAT(DOCK_FWD_PIT, 30.0f);
+PARAM_DEFINE_FLOAT(DOCK_DEC_MAX, 3.0f);
 
 /**
- * Track yaw proportional gain
+ * Final stand-off distance [m]
  *
+ * The velocity envelope reaches zero at this target slant range.
+ *
+ * @min 0
+ * @max 100
+ * @decimal 1
  * @group Dock Guidance
  */
-PARAM_DEFINE_FLOAT(DOCK_TRC_Y, 1.0f);
+PARAM_DEFINE_FLOAT(DOCK_STOP_DIST, 2.0f);
 
 /**
- * Track pitch proportional gain
+ * Required target alignment time [s]
  *
+ * The target must remain inside DOCK_FOV_ALIGN for this duration before
+ * high-speed approach can start.
+ *
+ * @min 0.05
+ * @max 5
+ * @decimal 2
  * @group Dock Guidance
  */
-PARAM_DEFINE_FLOAT(DOCK_TRC_P, 1.0f);
+PARAM_DEFINE_FLOAT(DOCK_ALIGN_T, 0.30f);
 
 /**
- * Dock throttle [0, 1]
+ * Alignment region as fraction of camera half-FOV
  *
+ * 1.0 is the image edge. Both image axes must remain inside this ratio before
+ * approach can start.
+ *
+ * @min 0.05
+ * @max 0.8
+ * @decimal 2
  * @group Dock Guidance
  */
-PARAM_DEFINE_FLOAT(DOCK_THR, 0.5f);
+PARAM_DEFINE_FLOAT(DOCK_FOV_ALIGN, 0.30f);
 
 /**
- * Dock throttle rate limit [1/s]
+ * Soft FOV boundary as fraction of camera half-FOV
  *
+ * Crossing this boundary leaves high-speed approach and starts recovery.
+ *
+ * @min 0.1
+ * @max 0.95
+ * @decimal 2
  * @group Dock Guidance
  */
-PARAM_DEFINE_FLOAT(DOCK_THR_RATE, 0.1f);
+PARAM_DEFINE_FLOAT(DOCK_FOV_SOFT, 0.65f);
 
 /**
- * Camera roll level gain
+ * Hard FOV boundary as fraction of camera half-FOV
  *
+ * Crossing this boundary invalidates Dock Guidance so Commander can execute
+ * the configured mode-loss action before the target leaves the image.
+ *
+ * @min 0.2
+ * @max 0.99
+ * @decimal 2
  * @group Dock Guidance
  */
-PARAM_DEFINE_FLOAT(DOCK_RLL_P, 1.0f);
+PARAM_DEFINE_FLOAT(DOCK_FOV_HARD, 0.85f);
+
+/**
+ * Maximum alignment translation speed [m/s]
+ *
+ * While the target is not centered, Dock Guidance translates in the plane
+ * perpendicular to the installed camera optical axis. This removes image
+ * error without starting the high-speed approach.
+ *
+ * @min 0.1
+ * @max 5
+ * @decimal 1
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_ALIGN_SPD, 1.0f);
+
+/**
+ * Visual-loss grace period [ms]
+ *
+ * During this interval body-rate commands decay to zero and throttle can only
+ * move toward a lower conservative value. The mode becomes unhealthy after
+ * the grace period expires.
+ *
+ * @min 20
+ * @max 2000
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_INT32(DOCK_VIS_GRACE, 300);
+
+/**
+ * Relative-position timeout [ms]
+ *
+ * High-speed approach requires a fresh finite target-relative NED vector so
+ * the stopping-distance envelope always has a valid range.
+ *
+ * @min 20
+ * @max 2000
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_INT32(DOCK_REL_TOUT, 200);

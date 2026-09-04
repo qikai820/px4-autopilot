@@ -649,6 +649,11 @@ else
 		zenoh start
 	fi
 
+	if param greater SYS_HITL 0
+	then
+		uorb_udp_bridge start
+	fi
+
 #
 # End of autostart.
 #
