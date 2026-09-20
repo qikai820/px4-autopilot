@@ -6,6 +6,11 @@
 #include <uORB/uORBMessageFields.hpp>
 #include <uORB/uORB.h>
 #include <uORB/topics/parameter_update.h>
+#include <uORB/topics/vehicle_attitude.h>
+#include <uORB/topics/vehicle_attitude_setpoint.h>
+#include <uORB/topics/vehicle_rates_setpoint.h>
+
+#include <matrix/matrix/math.hpp>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -356,6 +361,32 @@ private:
 							 data + field.offset + index * primitive_size(field.type));
 			}
 		}
+
+		if (!strcmp(meta.o_name, "vehicle_attitude")) {
+			vehicle_attitude_s attitude{};
+			memcpy(&attitude, data, sizeof(attitude));
+			append_euler_angles(attitude.q);
+
+		} else if (!strcmp(meta.o_name, "vehicle_attitude_setpoint")) {
+			vehicle_attitude_setpoint_s attitude_setpoint{};
+			memcpy(&attitude_setpoint, data, sizeof(attitude_setpoint));
+			append_euler_angles(attitude_setpoint.q_d);
+
+		} else if (!strcmp(meta.o_name, "vehicle_rates_setpoint")) {
+			vehicle_rates_setpoint_s rates_setpoint{};
+			memcpy(&rates_setpoint, data, sizeof(rates_setpoint));
+			field_numeric("roll_rate", 0, 1, rates_setpoint.roll);
+			field_numeric("pitch_rate", 0, 1, rates_setpoint.pitch);
+			field_numeric("yaw_rate", 0, 1, rates_setpoint.yaw);
+		}
+	}
+
+	void append_euler_angles(const float q[4])
+	{
+		const matrix::Eulerf euler{matrix::Quatf{q}};
+		field_numeric("roll", 0, 1, euler.phi());
+		field_numeric("pitch", 0, 1, euler.theta());
+		field_numeric("yaw", 0, 1, euler.psi());
 	}
 
 	static size_t primitive_size(const char *c_type)
