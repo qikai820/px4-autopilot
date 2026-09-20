@@ -58,11 +58,17 @@ stateDiagram-v2
     ACCELERATE --> RECOVERY: 超过软视场边界
     MAX_SPEED_APPROACH --> RECOVERY: 超过软视场边界
     TERMINAL_BRAKE --> RECOVERY: 超过软视场边界
+    ALIGN --> EMERGENCY_RECOVERY: 硬边界持续 DOCK_FOV_H_T
+    ACCELERATE --> EMERGENCY_RECOVERY: 硬边界持续 DOCK_FOV_H_T
+    MAX_SPEED_APPROACH --> EMERGENCY_RECOVERY: 硬边界持续 DOCK_FOV_H_T
+    TERMINAL_BRAKE --> EMERGENCY_RECOVERY: 硬边界持续 DOCK_FOV_H_T
+    RECOVERY --> EMERGENCY_RECOVERY: 硬边界持续 DOCK_FOV_H_T
+    EMERGENCY_RECOVERY --> RECOVERY: 目标退回软边界以内
     ACCELERATE --> RECOVERY: 相对距离丢失
     MAX_SPEED_APPROACH --> RECOVERY: 相对距离丢失
     TERMINAL_BRAKE --> RECOVERY: 相对距离丢失
-    RECOVERY --> ALIGN: 速度指令减至零
-    ALIGN --> [*]: 硬视场边界/数据无效
+    RECOVERY --> ALIGN: 零接近速度且对准稳定 DOCK_REC_T
+    ALIGN --> [*]: 视觉超时/数据无效
     MAX_SPEED_APPROACH --> [*]: 硬视场边界/数据无效
 ```
 
@@ -73,13 +79,14 @@ stateDiagram-v2
 | `MAX_SPEED_APPROACH` | 最终三维速度模长保持 `DOCK_VEL_MAX`，图像修正不叠加额外速度 |
 | `TERMINAL_BRAKE` | 按剩余距离和 `DOCK_DEC_MAX` 生成制动速度包络 |
 | `RECOVERY` | 视场软边界或短时断流时将速度指令减到零 |
+| `EMERGENCY_RECOVERY` | 目标越过硬边界但仍可见时快速停止接近并继续跟踪，不触发 RTL |
 
 ## 最大速度与制动
 
 ```text
 pointing_error = camera_forward - LOS * dot(LOS, camera_forward)
 v_track = -distance * DOCK_IMG_P * pointing_error
-|v_track| <= DOCK_IMG_VMAX
+|v_track| <= min(DOCK_IMG_VMAX, DOCK_IMG_FRAC * speed_budget)
 v_close_cmd = sqrt(speed_budget^2 - |v_track|^2)
 v_sp = v_close_cmd * LOS + v_track
 
@@ -91,14 +98,14 @@ speed_budget = min(DOCK_VEL_MAX, v_brake)
 
 `v_track` 始终投影到 LOS 的垂直平面。高速阶段会从同一个总速度预算中为它预留空间，因此目标偏离时接近分量会暂时减小，但最终速度模长不会因图像修正而超过 `DOCK_VEL_MAX`。目标回到中心后，全部速度预算重新用于接近。
 
-旧 21 字节帧没有距离时，`v_track` 改由画面剩余角误差生成。`ALIGN` 中限制到 `DOCK_ALIGN_SPD`；`DOCK_LEGACY_APP=1` 时可进入高速阶段，跟踪修正限制到 `DOCK_IMG_VMAX`，但不具备距离制动。
+旧 21 字节帧没有距离时，`v_track` 改由画面剩余角误差生成。`ALIGN` 中限制到 `DOCK_ALIGN_SPD`；`DOCK_LEGACY_APP=1` 时接近速度仍限制到 `DOCK_LEG_VMAX`，但不具备距离制动。默认关闭无距离接近。
 
 在发布前，按 `MPC_XY_VEL_MAX`、`MPC_Z_VEL_MAX_UP` 和 `MPC_Z_VEL_MAX_DN` 对整个速度向量等比缩放，不允许下游单独截断各轴后改变进近方向。
 
 ## 视觉丢失
 
 - 短时丢失：进入 `RECOVERY`，按 `DOCK_DEC_MAX` 降低三维速度指令。
-- 超过 `max(DOCK_OBS_TOUT, DOCK_VIS_GRACE)`：设定值 invalid，持续发布零速度等待 Commander 退出模式。
+- 超过 `max(DOCK_OBS_TOUT, DOCK_VIS_GRACE)`：设定值 invalid，持续发布零速度并锁存故障；必须先切离 Dock 才能重新进入。
 - 相对 NED 位置无效：`DOCK_LEGACY_APP=1` 时允许角度跟踪高速接近，否则只能低速对准。
 - 本地速度无效：不允许进入/继续 Dock 模式。
 

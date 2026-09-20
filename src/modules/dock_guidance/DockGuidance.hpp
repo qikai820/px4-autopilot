@@ -87,7 +87,8 @@ private:
     ACCELERATE = 2,
     MAX_SPEED_APPROACH = 3,
     TERMINAL_BRAKE = 4,
-    RECOVERY = 5
+    RECOVERY = 5,
+    EMERGENCY_RECOVERY = 6
   };
 
   void Run() override;
@@ -119,6 +120,9 @@ private:
                            const matrix::Vector3f &tracking_velocity,
                            float speed_budget) const;
   void constrain_velocity_setpoint(matrix::Vector3f &velocity_ned) const;
+  void limit_velocity_setpoint_slew(
+      const matrix::Vector3f &previous_velocity_ned, float dt_s,
+      float acceleration, float deceleration, bool emergency_recovery);
 
   // 保存并读取与相机画面时间对齐的飞行器状态。
   void push_delay_history(hrt_abstime timestamp);
@@ -205,6 +209,7 @@ private:
   bool _setpoint_valid{false};
   bool _dock_mode_active{false};
   bool _vision_degraded{false};
+  bool _mode_fault_latched{false};
   bool _unregistration_sent{false};
   int8_t _arming_check_id{-1};
   int8_t _mode_id{-1};
@@ -232,9 +237,13 @@ private:
   float _yaw_setpoint_rad{NAN};
   float _commanded_speed_ms{0.0f};
   float _fov_ratio{0.0f};
+  float _fov_yaw_ratio{0.0f};
+  float _fov_pitch_ratio{0.0f};
   float _camera_mount_pitch_deg{0.0f};
   bool _camera_pitch_initialized{false};
   hrt_abstime _aligned_since_us{0};
+  hrt_abstime _hard_fov_since_us{0};
+  hrt_abstime _recovery_stable_since_us{0};
   hrt_abstime _last_control_update_us{0};
 
   DEFINE_PARAMETERS(
@@ -263,10 +272,16 @@ private:
       (ParamFloat<px4::params::DOCK_FOV_ALIGN>)_param_dock_fov_align,
       (ParamFloat<px4::params::DOCK_FOV_SOFT>)_param_dock_fov_soft,
       (ParamFloat<px4::params::DOCK_FOV_HARD>)_param_dock_fov_hard,
+      (ParamFloat<px4::params::DOCK_FOV_H_T>)_param_dock_fov_hard_time,
+      (ParamFloat<px4::params::DOCK_REC_T>)_param_dock_recovery_time,
       (ParamFloat<px4::params::DOCK_ALIGN_SPD>)_param_dock_align_speed,
       (ParamFloat<px4::params::DOCK_IMG_P>)_param_dock_img_p,
       (ParamFloat<px4::params::DOCK_IMG_VMAX>)_param_dock_img_vmax,
+      (ParamFloat<px4::params::DOCK_IMG_FRAC>)_param_dock_img_fraction,
+      (ParamFloat<px4::params::DOCK_LEG_VMAX>)_param_dock_legacy_vel_max,
       (ParamInt<px4::params::DOCK_LEGACY_APP>)_param_dock_legacy_approach,
+      (ParamFloat<px4::params::DOCK_YAW_DB>)_param_dock_yaw_deadband,
+      (ParamFloat<px4::params::DOCK_YAW_RATE>)_param_dock_yaw_rate,
       (ParamInt<px4::params::DOCK_VIS_GRACE>)_param_dock_vis_grace,
       (ParamInt<px4::params::DOCK_REL_TOUT>)_param_dock_rel_tout,
       (ParamFloat<px4::params::MPC_XY_VEL_MAX>)_param_mpc_xy_vel_max,

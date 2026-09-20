@@ -231,7 +231,7 @@ PARAM_DEFINE_FLOAT(DOCK_STOP_DIST, 2.0f);
  * @decimal 2
  * @group Dock Guidance
  */
-PARAM_DEFINE_FLOAT(DOCK_ALIGN_T, 0.30f);
+PARAM_DEFINE_FLOAT(DOCK_ALIGN_T, 1.0f);
 
 /**
  * Alignment region as fraction of camera half-FOV
@@ -261,8 +261,8 @@ PARAM_DEFINE_FLOAT(DOCK_FOV_SOFT, 0.65f);
 /**
  * Hard FOV boundary as fraction of camera half-FOV
  *
- * Crossing this boundary invalidates Dock Guidance so Commander can execute
- * the configured mode-loss action before the target leaves the image.
+ * Crossing this boundary starts emergency recovery while the observation is
+ * still valid. Dock Guidance only becomes unhealthy after actual visual loss.
  *
  * @min 0.2
  * @max 0.99
@@ -270,6 +270,32 @@ PARAM_DEFINE_FLOAT(DOCK_FOV_SOFT, 0.65f);
  * @group Dock Guidance
  */
 PARAM_DEFINE_FLOAT(DOCK_FOV_HARD, 0.85f);
+
+/**
+ * Hard FOV confirmation time [s]
+ *
+ * The target must remain beyond DOCK_FOV_HARD for this duration before
+ * emergency recovery is latched. This rejects single-frame image noise.
+ *
+ * @min 0
+ * @max 1
+ * @decimal 2
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_FOV_H_T, 0.15f);
+
+/**
+ * Recovery alignment hold time [s]
+ *
+ * Recovery may return to ALIGN only after speed is nearly zero and the target
+ * remains inside DOCK_FOV_ALIGN for this duration.
+ *
+ * @min 0.1
+ * @max 5
+ * @decimal 2
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_REC_T, 1.0f);
 
 /**
  * Maximum alignment translation speed [m/s]
@@ -297,7 +323,7 @@ PARAM_DEFINE_FLOAT(DOCK_ALIGN_SPD, 1.0f);
  * @decimal 2
  * @group Dock Guidance
  */
-PARAM_DEFINE_FLOAT(DOCK_IMG_P, 1.0f);
+PARAM_DEFINE_FLOAT(DOCK_IMG_P, 0.3f);
 
 /**
  * Maximum image tracking translation speed [m/s]
@@ -311,7 +337,35 @@ PARAM_DEFINE_FLOAT(DOCK_IMG_P, 1.0f);
  * @decimal 1
  * @group Dock Guidance
  */
-PARAM_DEFINE_FLOAT(DOCK_IMG_VMAX, 5.0f);
+PARAM_DEFINE_FLOAT(DOCK_IMG_VMAX, 1.0f);
+
+/**
+ * Maximum image-correction fraction
+ *
+ * Maximum fraction of the total velocity budget reserved for fixed-camera
+ * transverse image tracking. Lower values preserve closing speed and prevent
+ * image correction from reversing the horizontal approach direction.
+ *
+ * @min 0.05
+ * @max 0.8
+ * @decimal 2
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_IMG_FRAC, 0.40f);
+
+/**
+ * Maximum angle-only approach speed [m/s]
+ *
+ * Applied when DOCK_LEGACY_APP is enabled but no target-relative NED position
+ * is available. Range-less operation has no terminal stopping-distance
+ * envelope, so it must remain slower than a range-aided approach.
+ *
+ * @min 0.1
+ * @max 20
+ * @decimal 1
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_LEG_VMAX, 5.0f);
 
 /**
  * Allow angle-only approach with legacy Viztra frames
@@ -324,7 +378,33 @@ PARAM_DEFINE_FLOAT(DOCK_IMG_VMAX, 5.0f);
  * @boolean
  * @group Dock Guidance
  */
-PARAM_DEFINE_INT32(DOCK_LEGACY_APP, 1);
+PARAM_DEFINE_INT32(DOCK_LEGACY_APP, 0);
+
+/**
+ * Camera yaw-error deadband [deg]
+ *
+ * Horizontal image error inside this band does not change the vehicle yaw
+ * setpoint.
+ *
+ * @min 0
+ * @max 10
+ * @decimal 1
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_YAW_DB, 1.0f);
+
+/**
+ * Maximum yaw-setpoint slew rate [deg/s]
+ *
+ * Limits Dock Guidance yaw changes and prevents small image errors from
+ * producing large heading steps when the LOS is steep.
+ *
+ * @min 1
+ * @max 90
+ * @decimal 1
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_YAW_RATE, 10.0f);
 
 /**
  * Visual-loss grace period [ms]

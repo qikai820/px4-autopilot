@@ -388,8 +388,12 @@ void DockGuidance::reset_tracking_state() {
   _yaw_setpoint_rad = NAN;
   _commanded_speed_ms = 0.0f;
   _fov_ratio = 0.0f;
+  _fov_yaw_ratio = 0.0f;
+  _fov_pitch_ratio = 0.0f;
   _stage = Stage::NONE;
   _aligned_since_us = 0;
+  _hard_fov_since_us = 0;
+  _recovery_stable_since_us = 0;
   _last_control_update_us = 0;
   _last_valid_observation_us = 0;
   _vision_degraded = false;
@@ -400,11 +404,23 @@ void DockGuidance::reset_tracking_state() {
 
 void DockGuidance::invalidate_setpoint(hrt_abstime timestamp,
                                        const char *reason) {
+  const bool was_active = _dock_mode_active;
+  const float last_yaw_setpoint_rad = _yaw_setpoint_rad;
+
   if (_setpoint_valid) {
     PX4_WARN("dock: %s", reason);
   }
 
+  if (was_active) {
+    _mode_fault_latched = true;
+  }
+
   reset_tracking_state();
+
+  // Hold the last finite heading while publishing the final zero-velocity
+  // setpoint. Releasing yaw at the same instant as a mode failure creates an
+  // unnecessary heading step before Commander completes the fallback.
+  _yaw_setpoint_rad = last_yaw_setpoint_rad;
   _setpoint_valid = false;
 
   dock_guidance_setpoint_s sp{};
@@ -412,6 +428,10 @@ void DockGuidance::invalidate_setpoint(hrt_abstime timestamp,
   sp.relative_distance_m = NAN;
   sp.camera_mount_pitch_deg = _camera_mount_pitch_deg;
   sp.camera_servo_enabled = _param_dock_cam_pitch_variable.get() != 0;
+  sp.yaw_setpoint_deg = std::isfinite(_yaw_setpoint_rad)
+                            ? math::degrees(_yaw_setpoint_rad)
+                            : NAN;
+  sp.fault_latched = _mode_fault_latched;
   sp.valid = false;
   sp.stage = static_cast<uint8_t>(Stage::NONE);
   _setpoint_pub.publish(sp);
@@ -544,7 +564,7 @@ void DockGuidance::reply_to_arming_check(
   reply.registration_id = _arming_check_id;
   reply.health_component_index =
       arming_check_reply_s::HEALTH_COMPONENT_INDEX_NONE;
-  reply.can_arm_and_run = _setpoint_valid;
+  reply.can_arm_and_run = _setpoint_valid && !_mode_fault_latched;
   reply.mode_req_angular_velocity = true;
   reply.mode_req_attitude = true;
   reply.mode_req_local_alt = true;
@@ -562,6 +582,15 @@ void DockGuidance::update_mode_state() {
 
   const bool active =
       (_mode_id >= 0) && (status.nav_state == static_cast<uint8_t>(_mode_id));
+
+  // A real visual failure is latched so a still-selected Dock switch cannot
+  // bounce between Dock and RTL. The pilot clears the latch by deliberately
+  // selecting another mode before requesting Dock again.
+  if (_mode_fault_latched && (_mode_id >= 0) &&
+      (status.nav_state_user_intention != static_cast<uint8_t>(_mode_id))) {
+    _mode_fault_latched = false;
+    PX4_INFO("dock fault latch cleared by mode deselection");
+  }
 
   if (active && !_dock_mode_active) {
     PX4_INFO("Dock mode active");
@@ -648,14 +677,20 @@ void DockGuidance::publish_guidance_status(hrt_abstime timestamp, bool valid,
   _relative_position_ned.copyTo(status.relative_position_ned_m);
   status.relative_distance_m = _relative_distance_m;
   status.fov_ratio = _fov_ratio;
+  status.fov_yaw_ratio = _fov_yaw_ratio;
+  status.fov_pitch_ratio = _fov_pitch_ratio;
   status.camera_yaw_deg = _los_c_deg(0);
   status.camera_pitch_deg = _los_c_deg(1);
   status.camera_mount_pitch_deg = _camera_mount_pitch_deg;
+  status.yaw_setpoint_deg = std::isfinite(_yaw_setpoint_rad)
+                                ? math::degrees(_yaw_setpoint_rad)
+                                : NAN;
   status.stage = static_cast<uint8_t>(_stage);
   status.velocity_valid = _velocity_valid;
   status.relative_position_valid = _relative_position_valid;
   status.camera_servo_enabled = _param_dock_cam_pitch_variable.get() != 0;
   status.vision_degraded = degraded;
+  status.fault_latched = _mode_fault_latched;
   status.valid = valid;
   _setpoint_pub.publish(status);
 }
@@ -751,6 +786,10 @@ void DockGuidance::set_stage(Stage stage) {
   case Stage::RECOVERY:
     PX4_INFO("dock stage RECOVERY");
     break;
+
+  case Stage::EMERGENCY_RECOVERY:
+    PX4_WARN("dock stage EMERGENCY_RECOVERY");
+    break;
   }
 }
 
@@ -845,7 +884,9 @@ DockGuidance::compose_tracked_velocity(const Vector3f &approach_direction,
       tracking_velocity -
       approach_direction * (approach_direction * tracking_velocity);
   const float correction_speed = correction.norm();
-  const float correction_limit = 0.95f * speed_budget;
+  const float correction_fraction =
+      math::constrain(_param_dock_img_fraction.get(), 0.05f, 0.8f);
+  const float correction_limit = correction_fraction * speed_budget;
 
   if (correction_speed > correction_limit) {
     correction *= correction_limit / correction_speed;
@@ -856,7 +897,29 @@ DockGuidance::compose_tracked_velocity(const Vector3f &approach_direction,
       sqrtf(math::max(speed_budget * speed_budget -
                           limited_correction_speed * limited_correction_speed,
                       0.0f));
-  return approach_direction * closing_speed + correction;
+  Vector3f result = approach_direction * closing_speed + correction;
+
+  // A transverse correction around a steep LOS can otherwise reverse the
+  // horizontal component even though the 3-D dot product remains positive.
+  // Losing horizontal closing direction caused the large +/- pitch commands
+  // seen in flight. Retain cross-track correction but never command motion
+  // backwards along the horizontal target bearing.
+  Vector2f horizontal_approach(approach_direction(0), approach_direction(1));
+  const float horizontal_norm = horizontal_approach.norm();
+
+  if (horizontal_norm > 0.05f) {
+    horizontal_approach /= horizontal_norm;
+    Vector2f horizontal_result(result(0), result(1));
+    const float along_horizontal = horizontal_result * horizontal_approach;
+
+    if (along_horizontal < 0.0f) {
+      horizontal_result -= horizontal_approach * along_horizontal;
+      result(0) = horizontal_result(0);
+      result(1) = horizontal_result(1);
+    }
+  }
+
+  return result;
 }
 
 void DockGuidance::constrain_velocity_setpoint(Vector3f &velocity_ned) const {
@@ -881,6 +944,39 @@ void DockGuidance::constrain_velocity_setpoint(Vector3f &velocity_ned) const {
   }
 
   velocity_ned *= math::constrain(scale, 0.0f, 1.0f);
+}
+
+void DockGuidance::limit_velocity_setpoint_slew(
+    const Vector3f &previous_velocity_ned, float dt_s, float acceleration,
+    float deceleration, bool emergency_recovery) {
+  if (!previous_velocity_ned.isAllFinite() ||
+      !_velocity_setpoint_ned.isAllFinite()) {
+    _velocity_setpoint_ned.zero();
+    return;
+  }
+
+  Vector3f velocity_delta = _velocity_setpoint_ned - previous_velocity_ned;
+  const float delta_norm = velocity_delta.norm();
+
+  if (delta_norm < 0.001f) {
+    return;
+  }
+
+  const bool reducing_speed =
+      (_velocity_setpoint_ned.norm() < previous_velocity_ned.norm()) ||
+      ((previous_velocity_ned * _velocity_setpoint_ned) < 0.0f);
+  float slew_rate = reducing_speed ? deceleration : acceleration;
+
+  if (emergency_recovery) {
+    slew_rate = math::max(2.0f * deceleration, acceleration);
+  }
+
+  const float maximum_delta = math::max(slew_rate, 0.1f) * dt_s;
+
+  if (delta_norm > maximum_delta) {
+    _velocity_setpoint_ned =
+        previous_velocity_ned + velocity_delta * (maximum_delta / delta_norm);
+  }
 }
 
 // ---------- 视觉观测处理 ----------
@@ -1019,6 +1115,8 @@ void DockGuidance::process_observation(float los_yaw_deg, float los_pitch_deg,
 
 void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
                                    hrt_abstime now) {
+  const Vector3f previous_velocity_setpoint_ned = _velocity_setpoint_ned;
+
   // The camera-frame errors define image safety, while the filtered NED LOS
   // defines the direction of the velocity vector sent to mc_pos_control.
   const Dcmf R_ned_body(Eulerf(math::radians(att_deg(0)),
@@ -1033,9 +1131,9 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
 
   const float half_fov_x = math::max(0.5f * _param_dock_fov_x.get(), 5.0f);
   const float half_fov_y = math::max(0.5f * _param_dock_fov_y.get(), 5.0f);
-  const float yaw_ratio = fabsf(_los_c_deg(0)) / half_fov_x;
-  const float pitch_ratio = fabsf(_los_c_deg(1)) / half_fov_y;
-  _fov_ratio = math::max(yaw_ratio, pitch_ratio);
+  _fov_yaw_ratio = fabsf(_los_c_deg(0)) / half_fov_x;
+  _fov_pitch_ratio = fabsf(_los_c_deg(1)) / half_fov_y;
+  _fov_ratio = math::max(_fov_yaw_ratio, _fov_pitch_ratio);
 
   const float hard_ratio =
       math::constrain(_param_dock_fov_hard.get(), 0.30f, 0.99f);
@@ -1043,9 +1141,39 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
       math::constrain(_param_dock_fov_soft.get(), 0.15f, hard_ratio - 0.05f);
   const float align_ratio =
       math::constrain(_param_dock_fov_align.get(), 0.05f, soft_ratio - 0.05f);
+  const float dt_s =
+      (_last_control_update_us > 0 && now > _last_control_update_us)
+          ? math::constrain((now - _last_control_update_us) * 1e-6f, 0.002f,
+                            0.1f)
+          : math::constrain(obs_dt_s, 0.002f, 0.1f);
+  _last_control_update_us = now;
 
   if (_fov_ratio >= hard_ratio) {
-    invalidate_setpoint(now, "target reached hard FOV boundary");
+    if (_hard_fov_since_us == 0) {
+      _hard_fov_since_us = now;
+    }
+
+  } else {
+    _hard_fov_since_us = 0;
+  }
+
+  const uint64_t hard_fov_time_us = static_cast<uint64_t>(
+      math::constrain(_param_dock_fov_hard_time.get(), 0.0f, 1.0f) * 1e6f);
+  const bool hard_fov_confirmed =
+      (_hard_fov_since_us != 0) &&
+      ((now - _hard_fov_since_us) >= hard_fov_time_us);
+
+  if (_mode_fault_latched) {
+    _setpoint_valid = false;
+    _commanded_speed_ms = 0.0f;
+    _velocity_setpoint_ned.zero();
+    _tracking_velocity_ned.zero();
+    publish_guidance_status(now, false, false);
+
+    if (_dock_mode_active) {
+      publish_safe_velocity_setpoint(now);
+    }
+
     return;
   }
 
@@ -1072,25 +1200,39 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
   const float horizontal_los =
       Vector2f(approach_direction(0), approach_direction(1)).norm();
 
-  if (horizontal_los > 0.05f) {
+  const float current_body_yaw = math::radians(att_deg(2));
+  float raw_yaw_setpoint = std::isfinite(_yaw_setpoint_rad)
+                               ? _yaw_setpoint_rad
+                               : current_body_yaw;
+  const float yaw_deadband =
+      math::constrain(_param_dock_yaw_deadband.get(), 0.0f, 10.0f);
+  const bool recovery_heading_hold =
+      (_stage == Stage::RECOVERY) ||
+      (_stage == Stage::EMERGENCY_RECOVERY);
+
+  if (!recovery_heading_hold &&
+      (fabsf(_los_c_deg(0)) > yaw_deadband) && (horizontal_los > 0.25f)) {
     const float target_yaw =
         atan2f(approach_direction(1), approach_direction(0));
     const float camera_yaw =
         atan2f(camera_forward_ned(1), camera_forward_ned(0));
-    const float current_body_yaw = math::radians(att_deg(2));
-    _yaw_setpoint_rad = matrix::wrap_pi(
-        current_body_yaw + matrix::wrap_pi(target_yaw - camera_yaw));
-
-  } else {
-    _yaw_setpoint_rad = math::radians(att_deg(2));
+    const float yaw_authority =
+        math::constrain((horizontal_los - 0.25f) / (0.60f - 0.25f), 0.0f,
+                        1.0f);
+    const float yaw_correction =
+        matrix::wrap_pi(target_yaw - camera_yaw) * yaw_authority;
+    raw_yaw_setpoint = matrix::wrap_pi(current_body_yaw + yaw_correction);
   }
 
-  const float dt_s =
-      (_last_control_update_us > 0 && now > _last_control_update_us)
-          ? math::constrain((now - _last_control_update_us) * 1e-6f, 0.002f,
-                            0.1f)
-          : math::constrain(obs_dt_s, 0.002f, 0.1f);
-  _last_control_update_us = now;
+  const float maximum_yaw_delta = math::radians(
+      math::constrain(_param_dock_yaw_rate.get(), 1.0f, 90.0f) * dt_s);
+  const float previous_yaw_setpoint = std::isfinite(_yaw_setpoint_rad)
+                                          ? _yaw_setpoint_rad
+                                          : current_body_yaw;
+  const float yaw_delta = math::constrain(
+      matrix::wrap_pi(raw_yaw_setpoint - previous_yaw_setpoint),
+      -maximum_yaw_delta, maximum_yaw_delta);
+  _yaw_setpoint_rad = matrix::wrap_pi(previous_yaw_setpoint + yaw_delta);
 
   // Before the external mode owns control, only validate and publish status.
   // Starting the acceleration timer while another mode is active would create
@@ -1100,7 +1242,10 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
     _commanded_speed_ms = 0.0f;
     _velocity_setpoint_ned.zero();
     _tracking_velocity_ned.zero();
+    _yaw_setpoint_rad = current_body_yaw;
     _aligned_since_us = 0;
+    _hard_fov_since_us = 0;
+    _recovery_stable_since_us = 0;
     _setpoint_valid = true;
     publish_guidance_status(now, true, false);
     return;
@@ -1110,10 +1255,39 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
     set_stage(Stage::ALIGN);
   }
 
-  if ((_fov_ratio >= soft_ratio) && (_stage != Stage::ALIGN) &&
-      (_stage != Stage::RECOVERY)) {
+  const bool camera_servo_enabled =
+      _param_dock_cam_pitch_variable.get() != 0;
+  const float servo_minimum_pitch =
+      math::min(_param_dock_cam_pitch_min.get(),
+                _param_dock_cam_pitch_max.get());
+  const float servo_maximum_pitch =
+      math::max(_param_dock_cam_pitch_min.get(),
+                _param_dock_cam_pitch_max.get());
+  const float servo_deadband =
+      math::constrain(_param_dock_cam_pitch_deadband.get(), 0.0f, 10.0f);
+  const bool servo_at_outward_limit =
+      camera_servo_enabled &&
+      (((_camera_mount_pitch_deg <= servo_minimum_pitch + 0.5f) &&
+        (_los_c_deg(1) < -servo_deadband)) ||
+       ((_camera_mount_pitch_deg >= servo_maximum_pitch - 0.5f) &&
+        (_los_c_deg(1) > servo_deadband)));
+
+  if (hard_fov_confirmed && (_stage != Stage::EMERGENCY_RECOVERY)) {
+    set_stage(Stage::EMERGENCY_RECOVERY);
+    _aligned_since_us = 0;
+    _recovery_stable_since_us = 0;
+
+  } else if ((_stage == Stage::EMERGENCY_RECOVERY) &&
+             (_fov_ratio < soft_ratio)) {
+    set_stage(Stage::RECOVERY);
+    _recovery_stable_since_us = 0;
+
+  } else if (((_fov_ratio >= soft_ratio) || servo_at_outward_limit) &&
+             (_stage != Stage::ALIGN) && (_stage != Stage::RECOVERY) &&
+             (_stage != Stage::EMERGENCY_RECOVERY)) {
     set_stage(Stage::RECOVERY);
     _aligned_since_us = 0;
+    _recovery_stable_since_us = 0;
   }
 
   const bool legacy_approach_enabled = _param_dock_legacy_approach.get() != 0;
@@ -1122,15 +1296,21 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
   // to ALIGN. If it is enabled, angle tracking and FOV protection continue but
   // terminal distance braking remains unavailable until range returns.
   if (!legacy_approach_enabled && !_relative_position_valid &&
-      (_stage != Stage::ALIGN) && (_stage != Stage::RECOVERY)) {
+      (_stage != Stage::ALIGN) && (_stage != Stage::RECOVERY) &&
+      (_stage != Stage::EMERGENCY_RECOVERY)) {
     set_stage(Stage::RECOVERY);
     _aligned_since_us = 0;
+    _recovery_stable_since_us = 0;
   }
 
   const float acceleration =
       math::constrain(_param_dock_acc_max.get(), 0.1f, 20.0f);
   const float deceleration =
       math::constrain(_param_dock_dec_max.get(), 0.1f, 20.0f);
+  const bool camera_servo_ready =
+      !camera_servo_enabled ||
+      ((!servo_at_outward_limit) &&
+       (fabsf(_los_c_deg(1)) <= math::max(servo_deadband, 1.0f)));
 
   if (_stage == Stage::ALIGN) {
     _commanded_speed_ms = 0.0f;
@@ -1146,7 +1326,7 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
     constrain_velocity_setpoint(_velocity_setpoint_ned);
 
     if ((_relative_position_valid || legacy_approach_enabled) &&
-        (_fov_ratio <= align_ratio)) {
+        (_fov_ratio <= align_ratio) && camera_servo_ready) {
       if (_aligned_since_us == 0) {
         _aligned_since_us = now;
       }
@@ -1157,6 +1337,7 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
       if ((now - _aligned_since_us) >= align_time_us) {
         set_stage(Stage::ACCELERATE);
         _aligned_since_us = 0;
+        _recovery_stable_since_us = 0;
       }
 
     } else {
@@ -1166,17 +1347,71 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
   } else if (_stage == Stage::RECOVERY) {
     _commanded_speed_ms =
         math::max(_commanded_speed_ms - deceleration * dt_s, 0.0f);
-    _velocity_setpoint_ned = compose_tracked_velocity(
-        approach_direction, _tracking_velocity_ned, _commanded_speed_ms);
-    constrain_velocity_setpoint(_velocity_setpoint_ned);
 
-    if (_commanded_speed_ms <= 0.05f) {
+    if (_commanded_speed_ms > 0.05f) {
+      _velocity_setpoint_ned = compose_tracked_velocity(
+          approach_direction, _tracking_velocity_ned, _commanded_speed_ms);
+
+    } else {
       _commanded_speed_ms = 0.0f;
-      set_stage(Stage::ALIGN);
-      _aligned_since_us = 0;
+      _velocity_setpoint_ned = _tracking_velocity_ned;
+      const float alignment_speed =
+          math::constrain(_param_dock_align_speed.get(), 0.1f, 5.0f);
+
+      if (_velocity_setpoint_ned.norm() > alignment_speed) {
+        _velocity_setpoint_ned *=
+            alignment_speed / _velocity_setpoint_ned.norm();
+      }
     }
 
+    constrain_velocity_setpoint(_velocity_setpoint_ned);
+
+    if ((_commanded_speed_ms <= 0.05f) && (_fov_ratio <= align_ratio) &&
+        camera_servo_ready) {
+      if (_recovery_stable_since_us == 0) {
+        _recovery_stable_since_us = now;
+      }
+
+      const uint64_t recovery_time_us = static_cast<uint64_t>(
+          math::constrain(_param_dock_recovery_time.get(), 0.1f, 5.0f) *
+          1e6f);
+
+      if ((now - _recovery_stable_since_us) >= recovery_time_us) {
+        set_stage(Stage::ALIGN);
+        _aligned_since_us = 0;
+        _recovery_stable_since_us = 0;
+      }
+
+    } else {
+      _recovery_stable_since_us = 0;
+    }
+
+  } else if (_stage == Stage::EMERGENCY_RECOVERY) {
+    const float emergency_deceleration = 2.0f * deceleration;
+    _commanded_speed_ms = math::max(
+        _commanded_speed_ms - emergency_deceleration * dt_s, 0.0f);
+
+    if (_commanded_speed_ms > 0.05f) {
+      _velocity_setpoint_ned = compose_tracked_velocity(
+          approach_direction, _tracking_velocity_ned, _commanded_speed_ms);
+
+    } else {
+      _commanded_speed_ms = 0.0f;
+      _velocity_setpoint_ned = _tracking_velocity_ned;
+      const float alignment_speed =
+          math::constrain(_param_dock_align_speed.get(), 0.1f, 5.0f);
+
+      if (_velocity_setpoint_ned.norm() > alignment_speed) {
+        _velocity_setpoint_ned *=
+            alignment_speed / _velocity_setpoint_ned.norm();
+      }
+    }
+
+    constrain_velocity_setpoint(_velocity_setpoint_ned);
+    _recovery_stable_since_us = 0;
+
   } else {
+    _recovery_stable_since_us = 0;
     // Respect mc_pos_control component limits before publishing the vector. If
     // each component were clipped independently downstream, the velocity would
     // no longer point along LOS and a fixed camera could lose the target.
@@ -1203,10 +1438,26 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
                         approach_direction(2));
     }
 
-    const float maximum_speed =
+    float maximum_speed =
         math::min(math::constrain(_param_dock_vel_max.get(), 0.0f, 100.0f),
                   controller_limited_speed);
+
+    if (!_relative_position_valid && legacy_approach_enabled) {
+      maximum_speed =
+          math::min(maximum_speed,
+                    math::constrain(_param_dock_legacy_vel_max.get(), 0.1f,
+                                    20.0f));
+    }
+
     float desired_speed = maximum_speed;
+
+    // Reduce approach speed continuously as the target consumes the remaining
+    // image margin. This prevents the old accelerate/recovery limit cycle.
+    if (_fov_ratio > align_ratio) {
+      const float fov_speed_scale = math::constrain(
+          (soft_ratio - _fov_ratio) / (soft_ratio - align_ratio), 0.0f, 1.0f);
+      desired_speed *= fov_speed_scale;
+    }
 
     if (_relative_position_valid) {
       const float stop_distance =
@@ -1215,18 +1466,18 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
           math::max(_relative_distance_m - stop_distance, 0.0f);
       const float braking_speed =
           sqrtf(2.0f * deceleration * remaining_distance);
-      desired_speed = math::min(maximum_speed, braking_speed);
+      desired_speed = math::min(desired_speed, braking_speed);
     }
     const float speed_delta =
         math::constrain(desired_speed - _commanded_speed_ms,
                         -deceleration * dt_s, acceleration * dt_s);
-    _commanded_speed_ms =
-        math::constrain(_commanded_speed_ms + speed_delta, 0.0f, desired_speed);
+    _commanded_speed_ms = math::constrain(
+        _commanded_speed_ms + speed_delta, 0.0f, maximum_speed);
     _velocity_setpoint_ned = compose_tracked_velocity(
         approach_direction, _tracking_velocity_ned, _commanded_speed_ms);
     constrain_velocity_setpoint(_velocity_setpoint_ned);
 
-    if (_relative_position_valid && (desired_speed < maximum_speed - 0.05f)) {
+    if (desired_speed < maximum_speed - 0.05f) {
       set_stage(Stage::TERMINAL_BRAKE);
 
     } else if (_commanded_speed_ms >= maximum_speed - 0.05f) {
@@ -1237,6 +1488,10 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
     }
   }
 
+  limit_velocity_setpoint_slew(
+      previous_velocity_setpoint_ned, dt_s, acceleration, deceleration,
+      _stage == Stage::EMERGENCY_RECOVERY);
+  constrain_velocity_setpoint(_velocity_setpoint_ned);
   _closing_speed_ms = _velocity_ned * approach_direction;
   _setpoint_valid = true;
   publish_guidance_status(now, true, false);
@@ -1356,21 +1611,28 @@ int DockGuidance::custom_command(int argc, char *argv[]) {
 int DockGuidance::print_status() {
   PX4_INFO("Dock mode: %s", (_mode_id >= 0) ? "registered" : "not registered");
   PX4_INFO("mode id: %d, arming check id: %d", _mode_id, _arming_check_id);
-  PX4_INFO("active: %s, vision: %s%s", _dock_mode_active ? "yes" : "no",
+  PX4_INFO("active: %s, vision: %s%s, fault latch: %s",
+           _dock_mode_active ? "yes" : "no",
            _setpoint_valid ? "valid" : "invalid",
-           _vision_degraded ? " (degraded)" : "");
+           _vision_degraded ? " (degraded)" : "",
+           _mode_fault_latched ? "set" : "clear");
   PX4_INFO("velocity: %s, closing: %.2f m/s, command: %.2f m/s, image "
            "correction: %.2f m/s",
            _velocity_valid ? "valid" : "invalid", (double)_closing_speed_ms,
            (double)_commanded_speed_ms, (double)_tracking_velocity_ned.norm());
   PX4_INFO(
-      "relative position: %s, distance: %.2f m, FOV ratio: %.2f, stage: %u",
+      "relative position: %s, distance: %.2f m, FOV ratio: %.2f "
+      "(yaw %.2f, pitch %.2f), stage: %u",
       _relative_position_valid ? "valid" : "invalid",
       (double)_relative_distance_m, (double)_fov_ratio,
+      (double)_fov_yaw_ratio, (double)_fov_pitch_ratio,
       static_cast<unsigned>(_stage));
-  PX4_INFO("camera: %s, mount pitch: %.1f deg",
+  PX4_INFO("camera: %s, mount pitch: %.1f deg, yaw setpoint: %.1f deg",
            _param_dock_cam_pitch_variable.get() != 0 ? "pitch servo" : "fixed",
-           (double)_camera_mount_pitch_deg);
+           (double)_camera_mount_pitch_deg,
+           (double)(std::isfinite(_yaw_setpoint_rad)
+                        ? math::degrees(_yaw_setpoint_rad)
+                        : NAN));
 
   if (_setpoint_valid && !_relative_position_valid) {
     PX4_INFO("range unavailable: %s",
