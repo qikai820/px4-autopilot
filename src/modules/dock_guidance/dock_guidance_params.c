@@ -46,6 +46,82 @@ PARAM_DEFINE_FLOAT(DOCK_CAM_ROLL, -90.0f);
 PARAM_DEFINE_FLOAT(DOCK_CAM_PITCH, 0.0f);
 
 /**
+ * Enable variable camera pitch servo
+ *
+ * When enabled, Dock Guidance slowly changes the camera's body-relative pitch
+ * angle to remove sustained vertical image error. The servo is deliberately
+ * not commanded from vehicle attitude or angular rate, so it is not used as a
+ * stabilization gimbal. Assign an unused output to Gimbal Pitch (function 421).
+ *
+ * @boolean
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_INT32(DOCK_CAM_SERVO, 0);
+
+/**
+ * Camera pitch servo minimum angle [deg]
+ *
+ * This body-relative angle maps to normalized Gimbal Pitch output -1. Reverse
+ * the assigned PWM output when the physical servo direction is opposite.
+ *
+ * @min -180
+ * @max 180
+ * @decimal 1
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_CAM_P_MIN, 0.0f);
+
+/**
+ * Camera pitch servo maximum angle [deg]
+ *
+ * This body-relative angle maps to normalized Gimbal Pitch output +1.
+ *
+ * @min -180
+ * @max 180
+ * @decimal 1
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_CAM_P_MAX, 90.0f);
+
+/**
+ * Camera pitch servo maximum slew rate [deg/s]
+ *
+ * The low rate prevents the position servo from being used for attitude
+ * stabilization or from following high-frequency airframe motion.
+ *
+ * @min 0.1
+ * @max 30
+ * @decimal 1
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_CAM_P_RATE, 5.0f);
+
+/**
+ * Camera pitch image-centering time constant [s]
+ *
+ * Vertical image error is converted to a slow body-relative servo rate by
+ * dividing the error by this value. Larger values move the camera more slowly.
+ *
+ * @min 0.2
+ * @max 20
+ * @decimal 1
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_CAM_P_TC, 2.0f);
+
+/**
+ * Camera pitch servo image deadband [deg]
+ *
+ * Image errors inside this band do not move the servo.
+ *
+ * @min 0
+ * @max 10
+ * @decimal 1
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_CAM_P_DB, 0.5f);
+
+/**
  * Camera-to-body yaw rotation [deg]
  *
  * @min -180
@@ -198,9 +274,9 @@ PARAM_DEFINE_FLOAT(DOCK_FOV_HARD, 0.85f);
 /**
  * Maximum alignment translation speed [m/s]
  *
- * While the target is not centered, Dock Guidance translates in the plane
- * perpendicular to the installed camera optical axis. This removes image
- * error without starting the high-speed approach.
+ * While the target is not centered, Dock Guidance limits the image-servo
+ * translation to this speed. The correction stays perpendicular to target LOS,
+ * so it removes image error without starting the high-speed approach.
  *
  * @min 0.1
  * @max 5
@@ -210,11 +286,51 @@ PARAM_DEFINE_FLOAT(DOCK_FOV_HARD, 0.85f);
 PARAM_DEFINE_FLOAT(DOCK_ALIGN_SPD, 1.0f);
 
 /**
+ * Image tracking proportional gain [1/s]
+ *
+ * Converts the mounting-aware camera pointing error into a desired LOS angular
+ * correction. Target range then converts that angular correction into a
+ * translational velocity perpendicular to the target LOS.
+ *
+ * @min 0.05
+ * @max 5
+ * @decimal 2
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_IMG_P, 1.0f);
+
+/**
+ * Maximum image tracking translation speed [m/s]
+ *
+ * Limits the transverse velocity reserved for keeping the target in the fixed
+ * camera. During maximum-speed approach this correction uses part of the total
+ * DOCK_VEL_MAX velocity budget instead of increasing total speed.
+ *
+ * @min 0.1
+ * @max 20
+ * @decimal 1
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_IMG_VMAX, 5.0f);
+
+/**
+ * Allow angle-only approach with legacy Viztra frames
+ *
+ * When enabled, a valid 21-byte Viztra frame may enter acceleration and
+ * maximum-speed approach without relative NED position. Image-angle tracking
+ * and FOV protection remain active, but distance-based terminal braking is not
+ * available. Disable to restrict range-less operation to ALIGN.
+ *
+ * @boolean
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_INT32(DOCK_LEGACY_APP, 1);
+
+/**
  * Visual-loss grace period [ms]
  *
- * During this interval body-rate commands decay to zero and throttle can only
- * move toward a lower conservative value. The mode becomes unhealthy after
- * the grace period expires.
+ * During this interval the NED velocity setpoint decelerates toward zero.
+ * The mode becomes unhealthy after the grace period expires.
  *
  * @min 20
  * @max 2000
@@ -226,7 +342,8 @@ PARAM_DEFINE_INT32(DOCK_VIS_GRACE, 300);
  * Relative-position timeout [ms]
  *
  * High-speed approach requires a fresh finite target-relative NED vector so
- * the stopping-distance envelope always has a valid range.
+ * the stopping-distance envelope always has a valid range. Without one, Dock
+ * Guidance remains available in low-speed image-alignment mode only.
  *
  * @min 20
  * @max 2000

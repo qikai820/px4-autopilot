@@ -1,5 +1,6 @@
 # Visual observation reported by a Viztra-compatible tracking board.
-# This topic is observational only and is not consumed by vehicle flight control.
+# Visual target observation. DockGuidance consumes the angle and relative-position
+# fields while Dock mode is active; other modes do not use this topic for control.
 
 uint64 timestamp                 # time since system start (microseconds)
 uint64 timestamp_sample          # receive time of the complete serial frame (microseconds)
