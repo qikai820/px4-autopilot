@@ -12,6 +12,8 @@ px4_add_module(
 		DockGuidance.cpp
 		DockGuidanceDynamic.cpp
 		DockGuidance.hpp
+	MODULE_CONFIG
+		module.yaml
 	DEPENDS
 		mathlib
 		px4_work_queue

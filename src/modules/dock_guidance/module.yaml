@@ -1,1 +1,387 @@
 module_name: Dock Guidance
+
+# Parameter metadata is kept here so PX4 can generate the parameter table and
+# component metadata directly from the module configuration.
+parameters:
+  - group: Dock Guidance
+    definitions:
+      DOCK_GUIDANCE:
+        description: {short: Enable Dock Guidance startup}
+        type: boolean
+        default: true
+      DOCK_CAM_DLY:
+        description: {short: Camera delay compensation}
+        type: int32
+        min: 0
+        max: 5000
+        default: 0
+      DOCK_OBS_TOUT:
+        description: {short: Visual observation timeout}
+        type: int32
+        min: 20
+        max: 5000
+        default: 150
+      DOCK_CAM_ROLL:
+        description: {short: Camera-to-body roll rotation}
+        type: float
+        min: -180
+        max: 180
+        default: -90.0
+      DOCK_CAM_PITCH:
+        description: {short: Camera-to-body pitch rotation}
+        type: float
+        min: -180
+        max: 180
+        default: 0.0
+      DOCK_CAM_SERVO:
+        description:
+          short: Enable variable camera pitch servo
+          long: Assign an unused output to Gimbal Pitch (function 421).
+        type: boolean
+        default: false
+      DOCK_CAM_P_MIN:
+        description: {short: Camera pitch servo minimum angle}
+        type: float
+        min: -180
+        max: 180
+        decimal: 1
+        default: 0.0
+      DOCK_CAM_P_MAX:
+        description: {short: Camera pitch servo maximum angle}
+        type: float
+        min: -180
+        max: 180
+        decimal: 1
+        default: 90.0
+      DOCK_CAM_P_RATE:
+        description: {short: Camera pitch servo maximum slew rate}
+        type: float
+        min: 0.1
+        max: 30
+        decimal: 1
+        default: 5.0
+      DOCK_CAM_P_TC:
+        description: {short: Camera pitch image-centering time constant}
+        type: float
+        min: 0.2
+        max: 20
+        decimal: 1
+        default: 2.0
+      DOCK_CAM_P_DB:
+        description: {short: Camera pitch servo image deadband}
+        type: float
+        min: 0
+        max: 10
+        decimal: 1
+        default: 0.5
+      DOCK_CAM_YAW:
+        description: {short: Camera-to-body yaw rotation}
+        type: float
+        min: -180
+        max: 180
+        default: 0.0
+      DOCK_FILT_HZ:
+        description: {short: LOS vector filter cutoff frequency}
+        type: float
+        default: 2.0
+      DOCK_RES_X:
+        description: {short: Camera image width}
+        type: float
+        default: 1920.0
+      DOCK_RES_Y:
+        description: {short: Camera image height}
+        type: float
+        default: 1080.0
+      DOCK_FOV_X:
+        description: {short: Camera horizontal field of view}
+        type: float
+        default: 60.0
+      DOCK_FOV_Y:
+        description: {short: Camera vertical field of view}
+        type: float
+        default: 45.0
+      DOCK_LOS_MAX:
+        description: {short: Maximum accepted camera LOS angle}
+        type: float
+        min: 10
+        max: 89.9
+        default: 89.0
+      DOCK_VEL_MAX:
+        description: {short: Maximum approach speed}
+        type: float
+        min: 0
+        max: 100
+        decimal: 1
+        default: 15.0
+      DOCK_ACC_MAX:
+        description: {short: Maximum approach acceleration}
+        type: float
+        min: 0.1
+        max: 20
+        decimal: 1
+        default: 3.0
+      DOCK_DEC_MAX:
+        description: {short: Maximum approach deceleration}
+        type: float
+        min: 0.1
+        max: 20
+        decimal: 1
+        default: 3.0
+      DOCK_STOP_DIST:
+        description: {short: Final stand-off distance}
+        type: float
+        min: 0
+        max: 100
+        decimal: 1
+        default: 2.0
+      DOCK_ALIGN_T:
+        description: {short: Required target alignment time}
+        type: float
+        min: 0.05
+        max: 5
+        decimal: 2
+        default: 1.0
+      DOCK_FOV_ALIGN:
+        description: {short: Alignment region as fraction of camera half-FOV}
+        type: float
+        min: 0.05
+        max: 0.8
+        decimal: 2
+        default: 0.30
+      DOCK_FOV_SOFT:
+        description: {short: Soft FOV boundary as fraction of camera half-FOV}
+        type: float
+        min: 0.1
+        max: 0.95
+        decimal: 2
+        default: 0.65
+      DOCK_FOV_HARD:
+        description: {short: Hard FOV boundary as fraction of camera half-FOV}
+        type: float
+        min: 0.2
+        max: 0.99
+        decimal: 2
+        default: 0.85
+      DOCK_FOV_H_T:
+        description: {short: Hard FOV confirmation time}
+        type: float
+        min: 0
+        max: 1
+        decimal: 2
+        default: 0.15
+      DOCK_REC_T:
+        description: {short: Recovery alignment hold time}
+        type: float
+        min: 0.1
+        max: 5
+        decimal: 2
+        default: 1.0
+      DOCK_ALIGN_SPD:
+        description: {short: Maximum alignment translation speed}
+        type: float
+        min: 0.1
+        max: 5
+        decimal: 1
+        default: 1.0
+      DOCK_IMG_P:
+        description: {short: Image tracking proportional gain}
+        type: float
+        min: 0.05
+        max: 5
+        decimal: 2
+        default: 0.3
+      DOCK_IMG_VMAX:
+        description: {short: Maximum image tracking translation speed}
+        type: float
+        min: 0.1
+        max: 20
+        decimal: 1
+        default: 1.0
+      DOCK_IMG_FRAC:
+        description: {short: Maximum image-correction fraction}
+        type: float
+        min: 0.05
+        max: 0.8
+        decimal: 2
+        default: 0.40
+      DOCK_LEG_VMAX:
+        description: {short: Maximum angle-only approach speed}
+        type: float
+        min: 0.1
+        max: 20
+        decimal: 1
+        default: 5.0
+      DOCK_DYN_EN:
+        description: {short: Enable estimated moving-target following}
+        type: boolean
+        default: false
+      DOCK_TGT_W:
+        description: {short: Calibrated target projected width}
+        type: float
+        unit: m
+        min: 0
+        max: 100
+        default: 0.0
+      DOCK_TGT_H:
+        description: {short: Calibrated target projected height}
+        type: float
+        unit: m
+        min: 0
+        max: 100
+        default: 0.0
+      DOCK_SIZE_ERR:
+        description: {short: Target extent relative uncertainty}
+        type: float
+        min: 0.02
+        max: 0.5
+        default: 0.15
+      DOCK_EST_ACC:
+        description: {short: Target acceleration process noise}
+        type: float
+        min: 0.1
+        max: 30
+        default: 3.0
+      DOCK_EST_VMAX:
+        description: {short: Target estimate speed rejection limit}
+        type: float
+        unit: m/s
+        min: 1
+        max: 100
+        default: 60.0
+      DOCK_EST_VERR:
+        description: {short: Maximum target velocity estimation error}
+        type: float
+        unit: m/s
+        min: 0.1
+        max: 20
+        default: 3.0
+      DOCK_MATCH_ERR:
+        description: {short: Following velocity error before approach}
+        type: float
+        unit: m/s
+        min: 0.1
+        max: 10
+        default: 2.0
+      DOCK_REL_VMAX:
+        description: {short: Maximum relative approach speed}
+        type: float
+        unit: m/s
+        min: 0
+        max: 60
+        default: 10.0
+      DOCK_DYN_JERK:
+        description: {short: Dynamic velocity command jerk limit}
+        type: float
+        unit: m/s^3
+        min: 0.1
+        max: 100
+        default: 8.0
+      DOCK_PASS_ERR:
+        description: {short: Maximum predicted pass uncertainty and miss}
+        type: float
+        unit: m
+        min: 0.1
+        max: 20
+        default: 3.0
+      DOCK_PASS_DIST:
+        description: {short: Predicted distance beyond target plane}
+        type: float
+        unit: m
+        min: 0.1
+        max: 10
+        default: 2.0
+      DOCK_LEGACY_APP:
+        description: {short: Allow angle-only approach with legacy Viztra frames}
+        type: boolean
+        default: false
+      DOCK_TERM_EN:
+        description: {short: Enable maximum-speed terminal dash}
+        type: boolean
+        default: true
+      DOCK_TERM_DIST:
+        description: {short: Terminal-dash distance threshold}
+        type: float
+        unit: m
+        min: 0
+        max: 100
+        decimal: 1
+        default: 0.0
+      DOCK_TERM_SIZE:
+        description: {short: Terminal-dash target-size threshold}
+        type: float
+        min: 0.01
+        max: 1.0
+        decimal: 2
+        default: 0.10
+      DOCK_TERM_CFM:
+        description: {short: Terminal-dash entry confirmation time}
+        type: float
+        min: 0.02
+        max: 2.0
+        decimal: 2
+        default: 0.05
+      DOCK_TERM_BLIND:
+        description: {short: Terminal visual-loss hold time}
+        type: float
+        min: 0.05
+        max: 3.0
+        decimal: 2
+        default: 0.50
+      DOCK_TERM_MAX_T:
+        description: {short: Maximum terminal-dash duration}
+        type: float
+        min: 0.1
+        max: 10.0
+        decimal: 1
+        default: 1.5
+      DOCK_TERM_FILT:
+        description: {short: Terminal LOS filter cutoff}
+        type: float
+        min: 1.0
+        max: 30.0
+        decimal: 1
+        default: 10.0
+      DOCK_YAW_DB:
+        description: {short: Camera yaw-error deadband}
+        type: float
+        min: 0
+        max: 10
+        decimal: 1
+        default: 1.0
+      DOCK_YAW_RATE:
+        description: {short: Maximum yaw-setpoint slew rate}
+        type: float
+        min: 1
+        max: 90
+        decimal: 1
+        default: 10.0
+      DOCK_VIS_GRACE:
+        description: {short: Visual-loss grace period}
+        type: int32
+        min: 20
+        max: 2000
+        default: 300
+      DOCK_START_H:
+        description:
+          short: Dynamic Dock startup height gain
+          long: Climb above local height at airborne Dock engagement; zero disables the climb.
+        type: float
+        unit: m
+        min: 0
+        max: 100
+        decimal: 1
+        default: 10.0
+      DOCK_CAP_VMAX:
+        description: {short: Initial visual capture speed with uncertain target motion}
+        type: float
+        unit: m/s
+        min: 0
+        max: 10
+        decimal: 1
+        default: 3.0
+      DOCK_REL_TOUT:
+        description: {short: Relative-position timeout}
+        type: int32
+        min: 20
+        max: 2000
+        default: 200
