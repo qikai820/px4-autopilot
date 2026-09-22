@@ -1,6 +1,6 @@
 # Dock Guidance 代码逻辑流程图
 
-本页同时给出当前 `src/modules/dock_guidance` 实现和下一版最大速度终端冲刺设计。标记为“目标设计”的 `TERMINAL_DASH`、终端计时器和对接完成输入尚未写入源码。
+本页给出当前 `src/modules/dock_guidance` 实现。`TERMINAL_DASH`、终端计时器和有界盲飞已经写入源码；真实接触/对接完成输入仍为后续接口。
 
 ## 总体数据流
 
@@ -81,10 +81,11 @@ stateDiagram-v2
 | `TERMINAL_BRAKE` | 按剩余距离和 `DOCK_DEC_MAX` 生成制动速度包络 |
 | `RECOVERY` | 视场软边界或短时断流时将速度指令减到零 |
 | `EMERGENCY_RECOVERY` | 目标越过硬边界但仍可见时快速停止接近并继续跟踪，不触发 RTL |
+| `TERMINAL_DASH` | 锁存末段；保持最大三维速度预算，视觉有效时继续修正方向，短时丢失时冻结最后速度向量 |
 
-当前 `TERMINAL_BRAKE` 和视觉丢失零速度处理仍然存在；它们不满足“最后阶段保持最大速度”的新需求。
+`TERMINAL_BRAKE` 和普通视觉丢失减速仍用于终端提交之前；进入 `TERMINAL_DASH` 后不再应用这些减速逻辑。
 
-## 目标状态机：最大速度终端冲刺
+## 当前状态机：最大速度终端冲刺
 
 ```mermaid
 stateDiagram-v2
@@ -103,19 +104,16 @@ stateDiagram-v2
     RECOVERY --> ALIGN: 零接近速度且重新对准
     TERMINAL_DASH --> TERMINAL_DASH: 视觉有效时继续更新 LOS
     TERMINAL_DASH --> TERMINAL_DASH: 短时丢失时冻结最后有效 LOS
-    TERMINAL_DASH --> COMPLETE: 收到接触/对接完成信号
     TERMINAL_DASH --> FAULT: 盲飞或终端总时长超时
     ALIGN --> FAULT: 数据无效
     ACCELERATE --> FAULT: 数据无效
     MAX_SPEED_APPROACH --> FAULT: 数据无效
-    COMPLETE --> [*]
     FAULT --> [*]
 ```
 
 | 阶段 | 目标行为 |
 |---|---|
 | `TERMINAL_DASH` | 锁存终端状态；三维速度预算保持最大值，不进入距离制动或 FOV 降速 |
-| `COMPLETE` | 由真实接触开关或对接完成状态触发，交出控制权 |
 | `FAULT` | 本地控制状态失效、视觉盲飞超时或终端总时长超时 |
 
 目标框尺寸只负责触发终端提交：
@@ -175,11 +173,11 @@ d_acc = target_speed^2 / (2 * DOCK_ACC_MAX)
 
 ## 视觉丢失
 
-- 当前实现、终端提交前短时丢失：进入 `RECOVERY`，按 `DOCK_DEC_MAX` 降低三维速度指令。
-- 当前实现、超过 `max(DOCK_OBS_TOUT, DOCK_VIS_GRACE)`：设定值 invalid，持续发布零速度并锁存故障；必须先切离 Dock 才能重新进入。
-- 目标设计、`TERMINAL_DASH` 内短时丢失：冻结最后有效 LOS、图像修正和航向，保持最大三维速度。
-- 目标设计、丢失超过 `DOCK_TERM_BLIND` 或终端持续超过 `DOCK_TERM_MAX_T`：锁存故障并交给系统安全回退。
-- `TERMINAL_DASH` 的正常退出只能来自真实接触/对接完成信号，不能把计时结束当作对接成功。
+- 终端提交前短时丢失：进入 `RECOVERY`，按 `DOCK_DEC_MAX` 降低三维速度指令。
+- 终端提交前超过 `max(DOCK_OBS_TOUT, DOCK_VIS_GRACE)`：设定值 invalid，持续发布零速度并锁存故障；必须先切离 Dock 才能重新进入。
+- `TERMINAL_DASH` 内短时丢失：冻结最后有效速度向量和航向，保持最大三维速度。
+- 丢失超过 `DOCK_TERM_BLIND` 或终端持续超过 `DOCK_TERM_MAX_T`：锁存故障并交给系统安全回退。
+- 真实接触/对接完成输入尚未接入，不能把计时结束当作对接成功。
 - 相对 NED 位置无效：`DOCK_LEGACY_APP=1` 时允许角度跟踪高速接近，否则只能低速对准。
 - 本地速度无效：不允许进入/继续 Dock 模式。
 

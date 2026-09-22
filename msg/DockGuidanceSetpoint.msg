@@ -11,13 +11,16 @@ float32 relative_distance_m          # target slant range [m]
 float32 fov_ratio                    # largest normalized image offset; 1 is the image edge
 float32 fov_yaw_ratio                # normalized horizontal image offset
 float32 fov_pitch_ratio              # normalized vertical image offset
+float32 target_size_ratio            # largest target-box dimension divided by image size
+float32 terminal_time_s              # time since TERMINAL_DASH was committed [s]
+float32 terminal_blind_time_s        # time since vision was lost in TERMINAL_DASH [s]
 
 float32 camera_yaw_deg               # camera-frame yaw error [deg] (right-positive)
 float32 camera_pitch_deg             # camera-frame pitch error [deg] (up-positive)
 float32 camera_mount_pitch_deg       # commanded body-relative camera pitch [deg]
 float32 yaw_setpoint_deg             # slew-limited vehicle yaw setpoint [deg]
 
-uint8 stage                          # 0=NONE 1=ALIGN 2=ACCEL 3=MAX_SPEED 4=BRAKE 5=RECOVERY 6=EMERGENCY_RECOVERY
+uint8 stage                          # 0=NONE 1=ALIGN 2=ACCEL 3=MAX_SPEED 4=BRAKE 5=RECOVERY 6=EMERGENCY_RECOVERY 7=TERMINAL_DASH
 bool velocity_valid                  # fused local velocity is fresh and finite
 bool relative_position_valid         # fresh finite target-relative NED position is available
 bool camera_servo_enabled            # true when slow camera pitch-servo tracking is enabled

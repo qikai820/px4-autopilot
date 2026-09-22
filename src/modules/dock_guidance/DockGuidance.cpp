@@ -244,6 +244,11 @@ void DockGuidance::Run() {
 
   _last_valid_observation_us = sample_us;
   _vision_degraded = false;
+  const float image_width = math::max(_param_dock_res_x.get(), 1.0f);
+  const float image_height = math::max(_param_dock_res_y.get(), 1.0f);
+  _target_size_ratio = math::max(
+      static_cast<float>(obs.target_width_px) / image_width,
+      static_cast<float>(obs.target_height_px) / image_height);
   const Vector3f relative_position_ned(obs.relative_n_m, obs.relative_e_m,
                                        obs.relative_d_m);
   const uint64_t relative_timeout_us =
@@ -390,11 +395,16 @@ void DockGuidance::reset_tracking_state() {
   _fov_ratio = 0.0f;
   _fov_yaw_ratio = 0.0f;
   _fov_pitch_ratio = 0.0f;
+  _target_size_ratio = 0.0f;
   _stage = Stage::NONE;
   _aligned_since_us = 0;
   _hard_fov_since_us = 0;
   _recovery_stable_since_us = 0;
+  _terminal_candidate_since_us = 0;
+  _terminal_started_us = 0;
+  _terminal_blind_since_us = 0;
   _last_control_update_us = 0;
+  _terminal_velocity_ned.zero();
   _last_valid_observation_us = 0;
   _vision_degraded = false;
   _filt_initialized = false;
@@ -448,6 +458,37 @@ void DockGuidance::handle_visual_loss(hrt_abstime timestamp,
   if (!_dock_mode_active || !_setpoint_valid ||
       (_last_valid_observation_us == 0)) {
     invalidate_setpoint(timestamp, reason);
+    return;
+  }
+
+  if (_stage == Stage::TERMINAL_DASH && _terminal_started_us != 0) {
+    const uint64_t maximum_terminal_time_us = static_cast<uint64_t>(
+        math::constrain(_param_dock_terminal_max_time.get(), 0.1f, 10.0f) *
+        1e6f);
+
+    if (timestamp > _terminal_started_us &&
+        (timestamp - _terminal_started_us) > maximum_terminal_time_us) {
+      invalidate_setpoint(timestamp, "terminal dash time limit");
+      return;
+    }
+
+    if (_terminal_blind_since_us == 0) {
+      _terminal_blind_since_us = timestamp;
+      PX4_WARN("dock: %s, terminal blind hold", reason);
+    }
+
+    const uint64_t blind_limit_us = static_cast<uint64_t>(
+        math::constrain(_param_dock_terminal_blind.get(), 0.05f, 3.0f) *
+        1e6f);
+
+    if (timestamp >= _terminal_blind_since_us &&
+        (timestamp - _terminal_blind_since_us) <= blind_limit_us) {
+      _vision_degraded = true;
+      publish_terminal_dash_setpoint(timestamp);
+      return;
+    }
+
+    invalidate_setpoint(timestamp, "terminal blind time limit");
     return;
   }
 
@@ -599,6 +640,10 @@ void DockGuidance::update_mode_state() {
     _aligned_since_us = 0;
     _last_control_update_us = 0;
     _velocity_setpoint_ned.zero();
+    _terminal_candidate_since_us = 0;
+    _terminal_started_us = 0;
+    _terminal_blind_since_us = 0;
+    _terminal_velocity_ned.zero();
 
     // mc_pos_control requires a trajectory setpoint no older than the instant
     // position control becomes active. Start with a zero-velocity request.
@@ -610,6 +655,10 @@ void DockGuidance::update_mode_state() {
     _aligned_since_us = 0;
     _last_control_update_us = 0;
     _velocity_setpoint_ned.zero();
+    _terminal_candidate_since_us = 0;
+    _terminal_started_us = 0;
+    _terminal_blind_since_us = 0;
+    _terminal_velocity_ned.zero();
     set_stage(Stage::ALIGN);
   }
 
@@ -666,6 +715,36 @@ void DockGuidance::publish_degraded_setpoint(hrt_abstime timestamp) {
                             _yaw_setpoint_rad);
 }
 
+void DockGuidance::publish_terminal_dash_setpoint(hrt_abstime timestamp) {
+  vehicle_local_position_s lpos{};
+  const bool have_local_position = _local_pos_sub.copy(&lpos);
+  const bool velocity_fresh =
+      have_local_position && (lpos.timestamp > 0) &&
+      (timestamp >= lpos.timestamp) && ((timestamp - lpos.timestamp) < 500_ms);
+  const Vector3f velocity_ned(lpos.vx, lpos.vy, lpos.vz);
+
+  if (!velocity_fresh || !lpos.v_xy_valid || !lpos.v_z_valid ||
+      !velocity_ned.isAllFinite() ||
+      !_terminal_velocity_ned.isAllFinite() ||
+      (_terminal_velocity_ned.norm() < 0.1f)) {
+    invalidate_setpoint(timestamp, "terminal local velocity invalid");
+    return;
+  }
+
+  _velocity_ned = velocity_ned;
+  _velocity_valid = true;
+  _velocity_speed_ms = velocity_ned.norm();
+  _velocity_setpoint_ned = _terminal_velocity_ned;
+  _commanded_speed_ms = _terminal_velocity_ned.norm();
+  const Vector3f terminal_direction =
+      _terminal_velocity_ned / _commanded_speed_ms;
+  _closing_speed_ms = _velocity_ned * terminal_direction;
+  _last_control_update_us = timestamp;
+  publish_guidance_status(timestamp, true, true);
+  publish_velocity_setpoint(timestamp, _terminal_velocity_ned,
+                            _yaw_setpoint_rad);
+}
+
 void DockGuidance::publish_guidance_status(hrt_abstime timestamp, bool valid,
                                            bool degraded) {
   dock_guidance_setpoint_s status{};
@@ -679,6 +758,15 @@ void DockGuidance::publish_guidance_status(hrt_abstime timestamp, bool valid,
   status.fov_ratio = _fov_ratio;
   status.fov_yaw_ratio = _fov_yaw_ratio;
   status.fov_pitch_ratio = _fov_pitch_ratio;
+  status.target_size_ratio = _target_size_ratio;
+  status.terminal_time_s =
+      (_terminal_started_us != 0 && timestamp >= _terminal_started_us)
+          ? (timestamp - _terminal_started_us) * 1e-6f
+          : 0.0f;
+  status.terminal_blind_time_s =
+      (_terminal_blind_since_us != 0 && timestamp >= _terminal_blind_since_us)
+          ? (timestamp - _terminal_blind_since_us) * 1e-6f
+          : 0.0f;
   status.camera_yaw_deg = _los_c_deg(0);
   status.camera_pitch_deg = _los_c_deg(1);
   status.camera_mount_pitch_deg = _camera_mount_pitch_deg;
@@ -789,6 +877,10 @@ void DockGuidance::set_stage(Stage stage) {
 
   case Stage::EMERGENCY_RECOVERY:
     PX4_WARN("dock stage EMERGENCY_RECOVERY");
+    break;
+
+  case Stage::TERMINAL_DASH:
+    PX4_INFO("dock stage TERMINAL_DASH");
     break;
   }
 }
@@ -922,6 +1014,46 @@ DockGuidance::compose_tracked_velocity(const Vector3f &approach_direction,
   return result;
 }
 
+float DockGuidance::maximum_approach_speed(
+    const Vector3f &approach_direction,
+    bool legacy_approach_enabled) const {
+  float controller_limited_speed = 100.0f;
+  const float horizontal_direction =
+      Vector2f(approach_direction(0), approach_direction(1)).norm();
+
+  if (horizontal_direction > 0.01f) {
+    controller_limited_speed = math::min(
+        controller_limited_speed,
+        math::max(_param_mpc_xy_vel_max.get(), 0.0f) / horizontal_direction);
+  }
+
+  if (approach_direction(2) < -0.01f) {
+    controller_limited_speed =
+        math::min(controller_limited_speed,
+                  math::max(_param_mpc_z_vel_max_up.get(), 0.0f) /
+                      -approach_direction(2));
+
+  } else if (approach_direction(2) > 0.01f) {
+    controller_limited_speed =
+        math::min(controller_limited_speed,
+                  math::max(_param_mpc_z_vel_max_down.get(), 0.0f) /
+                      approach_direction(2));
+  }
+
+  float maximum_speed =
+      math::min(math::constrain(_param_dock_vel_max.get(), 0.0f, 100.0f),
+                controller_limited_speed);
+
+  if (!_relative_position_valid && legacy_approach_enabled) {
+    maximum_speed =
+        math::min(maximum_speed,
+                  math::constrain(_param_dock_legacy_vel_max.get(), 0.1f,
+                                  20.0f));
+  }
+
+  return maximum_speed;
+}
+
 void DockGuidance::constrain_velocity_setpoint(Vector3f &velocity_ned) const {
   // Apply all mc_pos_control component constraints with one common scale. This
   // preserves the image-tracking direction instead of clipping axes separately.
@@ -1010,7 +1142,22 @@ void DockGuidance::process_observation(float los_yaw_deg, float los_pitch_deg,
       atan2f(-_los_e_unit(2), Vector2f(_los_e_unit(0), _los_e_unit(1)).norm()));
 
   // 对单位视线向量低通滤波，而不是直接滤波欧拉角，避免角度跨 ±180° 时出现跳变。
-  const float filt_hz = math::constrain(_param_dock_filt_hz.get(), 0.1f, 20.0f);
+  // 目标进入末段后提高带宽，减小近距离高速 LOS 变化造成的方向滞后。
+  float filt_hz = math::constrain(_param_dock_filt_hz.get(), 0.1f, 20.0f);
+  const bool terminal_filter_active =
+      (_param_dock_terminal_enable.get() != 0) &&
+      ((_stage == Stage::TERMINAL_DASH) ||
+       (_target_size_ratio >=
+        math::constrain(_param_dock_terminal_size.get(), 0.01f, 1.0f)) ||
+       (_relative_position_valid &&
+        (_param_dock_terminal_distance.get() > 0.0f) &&
+        (_relative_distance_m <= _param_dock_terminal_distance.get())));
+
+  if (terminal_filter_active) {
+    filt_hz = math::max(
+        filt_hz,
+        math::constrain(_param_dock_terminal_filter.get(), 1.0f, 30.0f));
+  }
 
   if (!_filt_initialized) {
     _los_x_filt = _los_e_unit(0);
@@ -1255,6 +1402,67 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
     set_stage(Stage::ALIGN);
   }
 
+  const bool terminal_enabled = _param_dock_terminal_enable.get() != 0;
+
+  if (!terminal_enabled && _stage == Stage::TERMINAL_DASH) {
+    _terminal_candidate_since_us = 0;
+    _terminal_started_us = 0;
+    _terminal_blind_since_us = 0;
+    _terminal_velocity_ned.zero();
+    set_stage(Stage::RECOVERY);
+  }
+
+  if (terminal_enabled && _stage == Stage::TERMINAL_DASH) {
+    const uint64_t maximum_terminal_time_us = static_cast<uint64_t>(
+        math::constrain(_param_dock_terminal_max_time.get(), 0.1f, 10.0f) *
+        1e6f);
+
+    if (_terminal_started_us == 0 || now < _terminal_started_us ||
+        (now - _terminal_started_us) > maximum_terminal_time_us) {
+      invalidate_setpoint(now, "terminal dash time limit");
+      return;
+    }
+
+  } else if (terminal_enabled) {
+    const float terminal_distance = math::constrain(
+        _param_dock_terminal_distance.get(), 0.0f, 100.0f);
+    const float terminal_size = math::constrain(
+        _param_dock_terminal_size.get(), 0.01f, 1.0f);
+    const bool distance_candidate =
+        (terminal_distance > 0.0f) && _relative_position_valid &&
+        std::isfinite(_relative_distance_m) &&
+        (_relative_distance_m <= terminal_distance);
+    const bool size_candidate = _target_size_ratio >= terminal_size;
+    const bool approach_stage =
+        (_stage == Stage::ACCELERATE) ||
+        (_stage == Stage::MAX_SPEED_APPROACH) ||
+        (_stage == Stage::TERMINAL_BRAKE);
+
+    if (approach_stage && (distance_candidate || size_candidate)) {
+      if (_terminal_candidate_since_us == 0) {
+        _terminal_candidate_since_us = now;
+      }
+
+      const uint64_t confirmation_us = static_cast<uint64_t>(
+          math::constrain(_param_dock_terminal_confirm.get(), 0.02f, 2.0f) *
+          1e6f);
+
+      if ((now - _terminal_candidate_since_us) >= confirmation_us) {
+        _terminal_started_us = now;
+        _terminal_candidate_since_us = 0;
+        _terminal_blind_since_us = 0;
+        _terminal_velocity_ned = previous_velocity_setpoint_ned;
+        set_stage(Stage::TERMINAL_DASH);
+      }
+
+    } else {
+      _terminal_candidate_since_us = 0;
+    }
+
+  } else {
+    _terminal_candidate_since_us = 0;
+  }
+
   const bool camera_servo_enabled =
       _param_dock_cam_pitch_variable.get() != 0;
   const float servo_minimum_pitch =
@@ -1272,7 +1480,8 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
        ((_camera_mount_pitch_deg >= servo_maximum_pitch - 0.5f) &&
         (_los_c_deg(1) > servo_deadband)));
 
-  if (hard_fov_confirmed && (_stage != Stage::EMERGENCY_RECOVERY)) {
+  if ((_stage != Stage::TERMINAL_DASH) && hard_fov_confirmed &&
+      (_stage != Stage::EMERGENCY_RECOVERY)) {
     set_stage(Stage::EMERGENCY_RECOVERY);
     _aligned_since_us = 0;
     _recovery_stable_since_us = 0;
@@ -1283,6 +1492,7 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
     _recovery_stable_since_us = 0;
 
   } else if (((_fov_ratio >= soft_ratio) || servo_at_outward_limit) &&
+             (_stage != Stage::TERMINAL_DASH) &&
              (_stage != Stage::ALIGN) && (_stage != Stage::RECOVERY) &&
              (_stage != Stage::EMERGENCY_RECOVERY)) {
     set_stage(Stage::RECOVERY);
@@ -1295,7 +1505,8 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
   // When legacy approach is disabled, loss of range during an approach returns
   // to ALIGN. If it is enabled, angle tracking and FOV protection continue but
   // terminal distance braking remains unavailable until range returns.
-  if (!legacy_approach_enabled && !_relative_position_valid &&
+  if ((_stage != Stage::TERMINAL_DASH) && !legacy_approach_enabled &&
+      !_relative_position_valid &&
       (_stage != Stage::ALIGN) && (_stage != Stage::RECOVERY) &&
       (_stage != Stage::EMERGENCY_RECOVERY)) {
     set_stage(Stage::RECOVERY);
@@ -1343,6 +1554,16 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
     } else {
       _aligned_since_us = 0;
     }
+
+  } else if (_stage == Stage::TERMINAL_DASH) {
+    _recovery_stable_since_us = 0;
+    _terminal_blind_since_us = 0;
+    const float maximum_speed =
+        maximum_approach_speed(approach_direction, legacy_approach_enabled);
+    _commanded_speed_ms = maximum_speed;
+    _velocity_setpoint_ned = compose_tracked_velocity(
+        approach_direction, _tracking_velocity_ned, maximum_speed);
+    constrain_velocity_setpoint(_velocity_setpoint_ned);
 
   } else if (_stage == Stage::RECOVERY) {
     _commanded_speed_ms =
@@ -1412,42 +1633,10 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
 
   } else {
     _recovery_stable_since_us = 0;
-    // Respect mc_pos_control component limits before publishing the vector. If
-    // each component were clipped independently downstream, the velocity would
-    // no longer point along LOS and a fixed camera could lose the target.
-    float controller_limited_speed = 100.0f;
-    const float horizontal_direction =
-        Vector2f(approach_direction(0), approach_direction(1)).norm();
-
-    if (horizontal_direction > 0.01f) {
-      controller_limited_speed = math::min(
-          controller_limited_speed,
-          math::max(_param_mpc_xy_vel_max.get(), 0.0f) / horizontal_direction);
-    }
-
-    if (approach_direction(2) < -0.01f) {
-      controller_limited_speed =
-          math::min(controller_limited_speed,
-                    math::max(_param_mpc_z_vel_max_up.get(), 0.0f) /
-                        -approach_direction(2));
-
-    } else if (approach_direction(2) > 0.01f) {
-      controller_limited_speed =
-          math::min(controller_limited_speed,
-                    math::max(_param_mpc_z_vel_max_down.get(), 0.0f) /
-                        approach_direction(2));
-    }
-
-    float maximum_speed =
-        math::min(math::constrain(_param_dock_vel_max.get(), 0.0f, 100.0f),
-                  controller_limited_speed);
-
-    if (!_relative_position_valid && legacy_approach_enabled) {
-      maximum_speed =
-          math::min(maximum_speed,
-                    math::constrain(_param_dock_legacy_vel_max.get(), 0.1f,
-                                    20.0f));
-    }
+    // Apply one common speed limit so downstream per-axis clipping cannot
+    // rotate the approach direction.
+    const float maximum_speed =
+        maximum_approach_speed(approach_direction, legacy_approach_enabled);
 
     float desired_speed = maximum_speed;
 
@@ -1492,6 +1681,11 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
       previous_velocity_setpoint_ned, dt_s, acceleration, deceleration,
       _stage == Stage::EMERGENCY_RECOVERY);
   constrain_velocity_setpoint(_velocity_setpoint_ned);
+
+  if (_stage == Stage::TERMINAL_DASH) {
+    _terminal_velocity_ned = _velocity_setpoint_ned;
+  }
+
   _closing_speed_ms = _velocity_ned * approach_direction;
   _setpoint_valid = true;
   publish_guidance_status(now, true, false);

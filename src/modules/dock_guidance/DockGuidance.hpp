@@ -88,7 +88,8 @@ private:
     MAX_SPEED_APPROACH = 3,
     TERMINAL_BRAKE = 4,
     RECOVERY = 5,
-    EMERGENCY_RECOVERY = 6
+    EMERGENCY_RECOVERY = 6,
+    TERMINAL_DASH = 7
   };
 
   void Run() override;
@@ -106,6 +107,7 @@ private:
   void publish_safe_velocity_setpoint(hrt_abstime timestamp);
   void handle_visual_loss(hrt_abstime timestamp, const char *reason);
   void publish_degraded_setpoint(hrt_abstime timestamp);
+  void publish_terminal_dash_setpoint(hrt_abstime timestamp);
   void publish_guidance_status(hrt_abstime timestamp, bool valid,
                                bool degraded);
   void update_camera_pitch_servo(float camera_pitch_error_deg, float dt_s,
@@ -119,6 +121,9 @@ private:
   compose_tracked_velocity(const matrix::Vector3f &approach_direction,
                            const matrix::Vector3f &tracking_velocity,
                            float speed_budget) const;
+  float maximum_approach_speed(
+      const matrix::Vector3f &approach_direction,
+      bool legacy_approach_enabled) const;
   void constrain_velocity_setpoint(matrix::Vector3f &velocity_ned) const;
   void limit_velocity_setpoint_slew(
       const matrix::Vector3f &previous_velocity_ned, float dt_s,
@@ -239,12 +244,17 @@ private:
   float _fov_ratio{0.0f};
   float _fov_yaw_ratio{0.0f};
   float _fov_pitch_ratio{0.0f};
+  float _target_size_ratio{0.0f};
   float _camera_mount_pitch_deg{0.0f};
   bool _camera_pitch_initialized{false};
   hrt_abstime _aligned_since_us{0};
   hrt_abstime _hard_fov_since_us{0};
   hrt_abstime _recovery_stable_since_us{0};
+  hrt_abstime _terminal_candidate_since_us{0};
+  hrt_abstime _terminal_started_us{0};
+  hrt_abstime _terminal_blind_since_us{0};
   hrt_abstime _last_control_update_us{0};
+  matrix::Vector3f _terminal_velocity_ned{0.0f, 0.0f, 0.0f};
 
   DEFINE_PARAMETERS(
       (ParamInt<px4::params::DOCK_CAM_DLY>)_param_dock_cam_dly,
@@ -280,6 +290,13 @@ private:
       (ParamFloat<px4::params::DOCK_IMG_FRAC>)_param_dock_img_fraction,
       (ParamFloat<px4::params::DOCK_LEG_VMAX>)_param_dock_legacy_vel_max,
       (ParamInt<px4::params::DOCK_LEGACY_APP>)_param_dock_legacy_approach,
+      (ParamInt<px4::params::DOCK_TERM_EN>)_param_dock_terminal_enable,
+      (ParamFloat<px4::params::DOCK_TERM_DIST>)_param_dock_terminal_distance,
+      (ParamFloat<px4::params::DOCK_TERM_SIZE>)_param_dock_terminal_size,
+      (ParamFloat<px4::params::DOCK_TERM_CFM>)_param_dock_terminal_confirm,
+      (ParamFloat<px4::params::DOCK_TERM_BLIND>)_param_dock_terminal_blind,
+      (ParamFloat<px4::params::DOCK_TERM_MAX_T>)_param_dock_terminal_max_time,
+      (ParamFloat<px4::params::DOCK_TERM_FILT>)_param_dock_terminal_filter,
       (ParamFloat<px4::params::DOCK_YAW_DB>)_param_dock_yaw_deadband,
       (ParamFloat<px4::params::DOCK_YAW_RATE>)_param_dock_yaw_rate,
       (ParamInt<px4::params::DOCK_VIS_GRACE>)_param_dock_vis_grace,

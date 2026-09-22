@@ -381,6 +381,93 @@ PARAM_DEFINE_FLOAT(DOCK_LEG_VMAX, 5.0f);
 PARAM_DEFINE_INT32(DOCK_LEGACY_APP, 0);
 
 /**
+ * Enable maximum-speed terminal dash
+ *
+ * When enabled, a confirmed near-target condition commits the controller to
+ * maximum approach speed. Image tracking continues while vision is valid; a
+ * short final visual loss holds the last valid velocity direction.
+ *
+ * @boolean
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_INT32(DOCK_TERM_EN, 1);
+
+/**
+ * Terminal-dash distance threshold [m]
+ *
+ * A positive value enables range-based terminal entry when target-relative
+ * NED position is valid. Zero disables the distance trigger.
+ *
+ * @min 0
+ * @max 100
+ * @decimal 1
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_TERM_DIST, 0.0f);
+
+/**
+ * Terminal-dash target-size threshold
+ *
+ * Maximum of target width/image width and target height/image height. This is
+ * an entry trigger only and never reduces the commanded speed.
+ *
+ * @min 0.01
+ * @max 1.0
+ * @decimal 2
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_TERM_SIZE, 0.10f);
+
+/**
+ * Terminal-dash entry confirmation time [s]
+ *
+ * @min 0.02
+ * @max 2.0
+ * @decimal 2
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_TERM_CFM, 0.05f);
+
+/**
+ * Terminal visual-loss hold time [s]
+ *
+ * Maximum time to retain the last valid maximum-speed velocity after vision
+ * is lost in TERMINAL_DASH.
+ *
+ * @min 0.05
+ * @max 3.0
+ * @decimal 2
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_TERM_BLIND, 0.50f);
+
+/**
+ * Maximum terminal-dash duration [s]
+ *
+ * Safety bound for the complete terminal phase. Expiry is a fault boundary,
+ * not a docking-complete indication.
+ *
+ * @min 0.1
+ * @max 10.0
+ * @decimal 1
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_TERM_MAX_T, 1.5f);
+
+/**
+ * Terminal LOS filter cutoff [Hz]
+ *
+ * Higher bandwidth reduces LOS lag close to the target while retaining the
+ * normal DOCK_FILT_HZ setting for the rest of the approach.
+ *
+ * @min 1.0
+ * @max 30.0
+ * @decimal 1
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_TERM_FILT, 10.0f);
+
+/**
  * Camera yaw-error deadband [deg]
  *
  * Horizontal image error inside this band does not change the vehicle yaw
