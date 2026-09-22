@@ -116,6 +116,11 @@ void DockGuidance::Run() {
   update_mode_state();
   push_delay_history(now_us);
 
+  if (_dock_mode_active && _stage == Stage::PASS_PREDICTED) {
+    publish_predicted_pass(now_us);
+    return;
+  }
+
   viztra_observation_s obs;
 
   if (!_viztra_sub.update(&obs)) {
@@ -260,6 +265,7 @@ void DockGuidance::Run() {
   const bool relative_position_valid =
       obs.relative_position_valid && relative_position_ned.isAllFinite() &&
       (relative_position_ned.norm() > 0.05f) && relative_position_fresh;
+  update_target_motion(obs, att_deg, los_yaw_deg, los_pitch_deg, sample_us);
   process_observation(los_yaw_deg, los_pitch_deg, relative_position_ned,
                       relative_position_valid, att_deg, gyro_dps, run_dt_s,
                       sample_us);
@@ -288,6 +294,30 @@ void DockGuidance::push_delay_history(hrt_abstime timestamp) {
 
   _att_delay_buf[_delay_idx] = q.normalized();
   _gyro_delay_buf[_delay_idx] = gyro_dps;
+  vehicle_local_position_s lpos{};
+  const bool local_valid = _local_pos_sub.copy(&lpos) && lpos.xy_valid && lpos.z_valid
+                           && lpos.v_xy_valid && lpos.v_z_valid && lpos.timestamp <= timestamp
+                           && timestamp - lpos.timestamp < 100_ms
+                           && Vector3f(lpos.x,lpos.y,lpos.z).isAllFinite()
+                           && Vector3f(lpos.vx,lpos.vy,lpos.vz).isAllFinite();
+  if (local_valid && _position_seen && (lpos.xy_reset_counter != _xy_reset_counter
+      || lpos.z_reset_counter != _z_reset_counter)) {
+    _target_motion.reset();
+    _target_motion_valid = false;
+    _delay_count = 0;
+    _estimator_reset_reason = 4;
+    if (_param_dock_dyn_enable.get() && _dock_mode_active) {
+      invalidate_setpoint(timestamp, "dynamic local position reset");
+    }
+  }
+  if (local_valid) {
+    _position_seen = true;
+    _xy_reset_counter = lpos.xy_reset_counter;
+    _z_reset_counter = lpos.z_reset_counter;
+    _position_delay_buf[_delay_idx] = Vector3f(lpos.x,lpos.y,lpos.z)
+        + Vector3f(lpos.vx,lpos.vy,lpos.vz)*((timestamp-lpos.timestamp)*1e-6f);
+  }
+  _position_delay_valid[_delay_idx] = local_valid;
   _delay_time_buf[_delay_idx] = timestamp;
   _delay_idx = (_delay_idx + 1) % DELAY_BUF_SIZE;
   _delay_count = math::min(_delay_count + 1, DELAY_BUF_SIZE);
@@ -377,6 +407,31 @@ bool DockGuidance::get_delayed_state(hrt_abstime timestamp_sample,
 }
 
 void DockGuidance::reset_tracking_state() {
+  _capture_schedule.reset();
+  _startup_ray_time = 0;
+  _startup_ray_rate.zero();
+  _startup_climb = false;
+  _startup_height_reached = false;
+  _startup_height_hold = false;
+  _startup_settled_since = 0;
+  _following_command.zero();
+  _capture_command.zero();
+  _capture_speed_limit = 0.f;
+  _capture_evidence_valid = false;
+  _capture_acceleration_ready = false;
+  _desired_velocity.zero();
+  _velocity_limits_override = false;
+  _predicted_fov_ratio = NAN;
+  _startup_target_z = NAN;
+  _target_motion.reset();
+  _estimator_reset_reason = 0;
+  _target_motion_valid = false;
+  _dynamic_reachable = false;
+  _target_velocity.zero();
+  _estimated_relative.zero();
+  _dynamic_acceleration.zero();
+  _dynamic_closure = _dynamic_max_closure = 0.f;
+  _target_position_error = INFINITY;
   _los_c_deg.zero();
   _los_e_deg.zero();
   _los_e_unit.zero();
@@ -452,7 +507,12 @@ void DockGuidance::invalidate_setpoint(hrt_abstime timestamp,
 }
 
 void DockGuidance::handle_visual_loss(hrt_abstime timestamp,
-                                      const char *reason) {
+                                     const char *reason) {
+  _capture_schedule.reset();
+  if (_param_dock_dyn_enable.get() && _dock_mode_active && _stage == Stage::TERMINAL_DASH) {
+    dynamic_terminal(timestamp, true);
+    return;
+  }
   // Grace is only for an already-running Dock mode. While inactive, one bad
   // observation must immediately block a new mode entry.
   if (!_dock_mode_active || !_setpoint_valid ||
@@ -623,6 +683,11 @@ void DockGuidance::update_mode_state() {
 
   const bool active =
       (_mode_id >= 0) && (status.nav_state == static_cast<uint8_t>(_mode_id));
+  vehicle_land_detected_s land{};
+  const hrt_abstime now = hrt_absolute_time();
+  _airborne = _land_sub.copy(&land) && dock_motion::airborne_state(
+      status.arming_state == vehicle_status_s::ARMING_STATE_ARMED,
+      land.landed, land.timestamp, now);
 
   // A real visual failure is latched so a still-selected Dock switch cannot
   // bounce between Dock and RTL. The pilot clears the latch by deliberately
@@ -634,6 +699,14 @@ void DockGuidance::update_mode_state() {
   }
 
   if (active && !_dock_mode_active) {
+    _capture_schedule.reset();
+    _startup_ray_time = 0;
+    _startup_ray_rate.zero();
+    _startup_climb = _param_dock_dyn_enable.get() && _param_dock_start_height.get() > 0.f;
+    _startup_height_reached = false;
+    _startup_height_hold = _startup_climb;
+    _startup_settled_since = 0;
+    _startup_target_z = NAN;
     PX4_INFO("Dock mode active");
     set_stage(Stage::ALIGN);
     _commanded_speed_ms = 0.0f;
@@ -645,11 +718,39 @@ void DockGuidance::update_mode_state() {
     _terminal_blind_since_us = 0;
     _terminal_velocity_ned.zero();
 
+    if (_param_dock_dyn_enable.get()) {
+      _dynamic_closure = 0.f;
+      _dynamic_acceleration.zero();
+      vehicle_local_position_s local{};
+      if (_local_pos_sub.copy(&local) && local.v_xy_valid && local.v_z_valid
+          && now >= local.timestamp && now-local.timestamp < 500_ms
+          && Vector3f(local.vx,local.vy,local.vz).isAllFinite()) {
+        _velocity_setpoint_ned = Vector3f(local.vx,local.vy,local.vz);
+        if (_startup_climb) {
+          // Stop requesting descent immediately; actual braking remains with PX4.
+          _velocity_setpoint_ned(2) = math::min(0.f, local.vz);
+          if (_airborne && local.z_valid && std::isfinite(local.z)) {
+            _startup_target_z = local.z - math::constrain(_param_dock_start_height.get(), 0.f, 100.f);
+          }
+        }
+      }
+    }
+
     // mc_pos_control requires a trajectory setpoint no older than the instant
     // position control becomes active. Start with a zero-velocity request.
-    publish_safe_velocity_setpoint(hrt_absolute_time());
+    if (_param_dock_dyn_enable.get()) {
+      publish_velocity_setpoint(now, _velocity_setpoint_ned, _yaw_setpoint_rad);
+    } else {
+      publish_safe_velocity_setpoint(now);
+    }
 
   } else if (!active && _dock_mode_active) {
+    _capture_schedule.reset();
+    _startup_climb = false;
+    _startup_height_reached = false;
+    _startup_height_hold = false;
+    _startup_settled_since = 0;
+    _startup_target_z = NAN;
     PX4_INFO("Dock mode inactive");
     _commanded_speed_ms = 0.0f;
     _aligned_since_us = 0;
@@ -780,6 +881,35 @@ void DockGuidance::publish_guidance_status(hrt_abstime timestamp, bool valid,
   status.vision_degraded = degraded;
   status.fault_latched = _mode_fault_latched;
   status.valid = valid;
+  status.dynamic_enabled = _param_dock_dyn_enable.get() != 0;
+  status.target_motion_state = _target_motion.motion_state();
+  status.estimator_reset_count = _target_motion.resets();
+  status.estimator_reset_reason = _estimator_reset_reason;
+  status.estimator_updates = static_cast<uint16_t>(_target_motion.accepted_updates());
+  status.estimator_age_s = _target_motion.age(timestamp);
+  status.startup_height_hold = _startup_height_hold;
+  vehicle_local_position_s diagnostic_local{};
+  status.startup_remaining_m = _startup_height_hold && _local_pos_sub.copy(&diagnostic_local)
+                               ? diagnostic_local.z - _startup_target_z : NAN;
+  status.velocity_limits_override = _velocity_limits_override;
+  status.predicted_fov_ratio = _predicted_fov_ratio;
+  status.capture_speed_limit = _capture_speed_limit;
+  status.capture_evidence_valid = _capture_evidence_valid;
+  status.capture_acceleration_ready = _capture_acceleration_ready;
+  _following_command.copyTo(status.following_command_ned);
+  _capture_command.copyTo(status.capture_command_ned);
+  _desired_velocity.copyTo(status.desired_velocity_ned);
+  _dynamic_acceleration.copyTo(status.command_acceleration_ned);
+  status.target_motion_valid = _target_motion_valid;
+  status.dynamic_reachable = _dynamic_reachable;
+  status.pass_predicted = _stage == Stage::PASS_PREDICTED;
+  _target_velocity.copyTo(status.estimated_target_velocity_ned);
+  _estimated_relative.copyTo(status.estimated_relative_ned);
+  status.target_velocity_error = _target_motion.initialized() ? _target_motion.velocity_sigma() : NAN;
+  status.target_position_error = _target_position_error;
+  status.relative_closing_speed = _target_motion_valid ? (_velocity_ned-_target_velocity)*_los_e_unit : NAN;
+  status.commanded_relative_speed = _dynamic_closure;
+  status.available_relative_speed = _dynamic_max_closure;
   _setpoint_pub.publish(status);
 }
 
@@ -882,6 +1012,16 @@ void DockGuidance::set_stage(Stage stage) {
   case Stage::TERMINAL_DASH:
     PX4_INFO("dock stage TERMINAL_DASH");
     break;
+
+  case Stage::PASS_PREDICTED:
+    PX4_INFO("dock predicted pass; braking to hold (not contact confirmation)");
+    break;
+  case Stage::STARTUP_CLIMB:
+    PX4_INFO("dock stage STARTUP_CLIMB");
+    break;
+  case Stage::TRACK_CAPTURE:
+    PX4_INFO("dock stage TRACK_CAPTURE");
+    break;
   }
 }
 
@@ -911,9 +1051,12 @@ Vector3f DockGuidance::compute_image_tracking_velocity(
   const float gain = math::constrain(_param_dock_img_p.get(), 0.05f, 5.0f);
   Vector3f tracking_velocity{};
 
-  if (_relative_position_valid && std::isfinite(_relative_distance_m)) {
+  const float image_range = _param_dock_dyn_enable.get() && _target_motion_valid
+                              ? _estimated_relative.norm() : _relative_distance_m;
+  if ((_relative_position_valid || (_param_dock_dyn_enable.get() && _target_motion_valid))
+      && std::isfinite(image_range)) {
     tracking_velocity =
-        -math::max(_relative_distance_m, 0.0f) * gain * pointing_error;
+        -math::max(image_range, 0.0f) * gain * pointing_error;
 
   } else {
     // Legacy 21-byte Viztra frames contain a valid image angle but no target
@@ -1325,6 +1468,13 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
   }
 
   Vector3f approach_direction = _los_e_unit;
+  if (_param_dock_dyn_enable.get() && _target_motion_valid) {
+    approach_direction = _estimated_relative.normalized();
+  }
+  if (_param_dock_dyn_enable.get() && _stage == Stage::TERMINAL_DASH) {
+    // Do not turn back toward a target that has crossed the committed plane.
+    approach_direction = _terminal_direction;
+  }
 
   if (!approach_direction.isAllFinite() || approach_direction.norm() < 0.5f) {
     invalidate_setpoint(now, "invalid approach direction");
@@ -1400,6 +1550,12 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
 
   if (_stage == Stage::NONE) {
     set_stage(Stage::ALIGN);
+  }
+
+  if (_param_dock_dyn_enable.get()) {
+    compute_dynamic_control(approach_direction, previous_velocity_setpoint_ned, R_ned_cam, dt_s,
+                            align_ratio, soft_ratio, hard_fov_confirmed, now);
+    return;
   }
 
   const bool terminal_enabled = _param_dock_terminal_enable.get() != 0;
@@ -1736,7 +1892,45 @@ float DockGuidance::derivative_filter(const float *buf) const {
 void DockGuidance::update_parameters() {
   const bool camera_pitch_was_variable =
       _param_dock_cam_pitch_variable.get() != 0;
+  const bool dynamic_was_enabled = _param_dock_dyn_enable.get() != 0;
+  // A parameter_update notification is global and may carry no Dock changes.
+  // Preserve observer/controller history unless the observation model changes.
+  const float old_observation_config[] = {
+      _param_dock_cam_roll.get(), _param_dock_cam_pitch.get(), _param_dock_cam_yaw.get(),
+      float(_param_dock_cam_dly.get()), float(_param_dock_cam_pitch_variable.get()),
+      _param_dock_res_x.get(), _param_dock_res_y.get(),
+      _param_dock_fov_x.get(), _param_dock_fov_y.get(),
+      _param_dock_target_width.get(), _param_dock_target_height.get(), _param_dock_size_error.get()};
   updateParams();
+  const float observation_config[] = {
+      _param_dock_cam_roll.get(), _param_dock_cam_pitch.get(), _param_dock_cam_yaw.get(),
+      float(_param_dock_cam_dly.get()), float(_param_dock_cam_pitch_variable.get()),
+      _param_dock_res_x.get(), _param_dock_res_y.get(),
+      _param_dock_fov_x.get(), _param_dock_fov_y.get(),
+      _param_dock_target_width.get(), _param_dock_target_height.get(), _param_dock_size_error.get()};
+  bool observation_changed = false;
+  for (unsigned i = 0; i < sizeof(observation_config) / sizeof(observation_config[0]); ++i) {
+    observation_changed |= !(fabsf(old_observation_config[i] - observation_config[i]) <= 1e-6f);
+  }
+  const bool dynamic_changed = dynamic_was_enabled != (_param_dock_dyn_enable.get() != 0);
+  if (observation_changed || dynamic_changed) {
+    _capture_schedule.reset();
+    _target_motion.reset();
+    _target_motion_valid = false;
+    _estimator_reset_reason = observation_changed ? 1 : 2;
+    _startup_ray_time = 0;
+    _startup_ray_rate.zero();
+    if (_dock_mode_active && _stage != Stage::PASS_PREDICTED) {
+      // Switching sensor geometry/control law during terminal flight cannot
+      // silently restart capture. Preserve the existing fault handoff.
+      if (_stage == Stage::TERMINAL_DASH || dynamic_changed) {
+        invalidate_setpoint(hrt_absolute_time(), "dynamic observation configuration changed");
+      } else {
+        set_stage(_startup_climb ? Stage::STARTUP_CLIMB : Stage::ALIGN);
+        _aligned_since_us = _terminal_candidate_since_us = 0;
+      }
+    }
+  }
   const bool camera_pitch_is_variable =
       _param_dock_cam_pitch_variable.get() != 0;
   const float minimum_pitch = math::min(_param_dock_cam_pitch_min.get(),

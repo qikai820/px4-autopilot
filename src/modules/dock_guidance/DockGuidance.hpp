@@ -52,11 +52,13 @@
 #include <uORB/topics/vehicle_control_mode.h>
 #include <uORB/topics/vehicle_local_position.h>
 #include <uORB/topics/vehicle_status.h>
+#include <uORB/topics/vehicle_land_detected.h>
 #include <uORB/topics/viztra_observation.h>
 
 #include <matrix/matrix/math.hpp>
 
 #include <cmath>
+#include "TargetMotion.hpp"
 
 using namespace time_literals;
 
@@ -89,7 +91,10 @@ private:
     TERMINAL_BRAKE = 4,
     RECOVERY = 5,
     EMERGENCY_RECOVERY = 6,
-    TERMINAL_DASH = 7
+    TERMINAL_DASH = 7,
+    PASS_PREDICTED = 8,
+    STARTUP_CLIMB = 9,
+    TRACK_CAPTURE = 10
   };
 
   void Run() override;
@@ -145,6 +150,16 @@ private:
                            hrt_abstime timestamp_sample);
   void compute_control(const matrix::Vector3f &att_deg, float obs_dt_s,
                        hrt_abstime now);
+  void update_target_motion(const viztra_observation_s &obs,
+                            const matrix::Vector3f &att_deg,
+                            float yaw_deg, float pitch_deg, hrt_abstime sample);
+  bool delayed_position(hrt_abstime sample, matrix::Vector3f &position) const;
+  void compute_dynamic_control(const matrix::Vector3f &direction,
+                               const matrix::Vector3f &previous, const matrix::Dcmf &camera_to_ned, float dt,
+                               float align, float soft, bool hard, hrt_abstime now);
+  bool dynamic_terminal(hrt_abstime now, bool blind);
+  void publish_predicted_pass(hrt_abstime now);
+  dock_motion::Limits dynamic_limits() const;
 
   float low_pass_filter(float &state, float input, float cutoff_hz, float dt);
   float derivative_filter(const float *buf) const;
@@ -156,6 +171,7 @@ private:
   uORB::Subscription _gyro_sub{ORB_ID(vehicle_angular_velocity)};
   uORB::Subscription _local_pos_sub{ORB_ID(vehicle_local_position)};
   uORB::Subscription _vehicle_status_sub{ORB_ID(vehicle_status)};
+  uORB::Subscription _land_sub{ORB_ID(vehicle_land_detected)};
   uORB::Subscription _register_ext_component_reply_sub{
       ORB_ID(register_ext_component_reply)};
   uORB::Subscription _arming_check_request_sub{ORB_ID(arming_check_request)};
@@ -226,6 +242,10 @@ private:
   matrix::Quatf _att_delay_buf[DELAY_BUF_SIZE]{};
   matrix::Vector3f _gyro_delay_buf[DELAY_BUF_SIZE]{};
   hrt_abstime _delay_time_buf[DELAY_BUF_SIZE]{};
+  matrix::Vector3f _position_delay_buf[DELAY_BUF_SIZE]{};
+  bool _position_delay_valid[DELAY_BUF_SIZE]{};
+  uint8_t _xy_reset_counter{0}, _z_reset_counter{0};
+  bool _position_seen{false};
   int _delay_idx{0};
   int _delay_count{0};
 
@@ -255,8 +275,46 @@ private:
   hrt_abstime _terminal_blind_since_us{0};
   hrt_abstime _last_control_update_us{0};
   matrix::Vector3f _terminal_velocity_ned{0.0f, 0.0f, 0.0f};
+  dock_motion::TargetMotion _target_motion;
+  matrix::Vector3f _target_velocity{}, _estimated_relative{}, _terminal_direction{};
+  matrix::Vector3f _dynamic_acceleration{};
+  float _dynamic_closure{0.f};
+  float _dynamic_max_closure{0.f};
+  float _target_position_error{INFINITY};
+  bool _target_motion_valid{false};
+  bool _dynamic_reachable{false};
+  bool _airborne{false};
+  bool _startup_climb{false};
+  bool _startup_height_reached{false};
+  bool _startup_height_hold{false};
+  dock_motion::CaptureSchedule _capture_schedule{};
+  hrt_abstime _startup_settled_since{0};
+  uint8_t _estimator_reset_reason{0};
+  matrix::Vector3f _following_command{}, _capture_command{}, _desired_velocity{};
+  float _capture_speed_limit{0.f};
+  bool _capture_evidence_valid{false};
+  bool _capture_acceleration_ready{false};
+  bool _velocity_limits_override{false};
+  float _predicted_fov_ratio{0.f};
+  float _startup_target_z{NAN};
+  matrix::Vector3f _startup_previous_ray{}, _startup_ray_rate{};
+  hrt_abstime _startup_ray_time{0};
 
   DEFINE_PARAMETERS(
+      (ParamInt<px4::params::DOCK_DYN_EN>)_param_dock_dyn_enable,
+      (ParamFloat<px4::params::DOCK_START_H>)_param_dock_start_height,
+      (ParamFloat<px4::params::DOCK_CAP_VMAX>)_param_dock_capture_speed,
+      (ParamFloat<px4::params::DOCK_TGT_W>)_param_dock_target_width,
+      (ParamFloat<px4::params::DOCK_TGT_H>)_param_dock_target_height,
+      (ParamFloat<px4::params::DOCK_SIZE_ERR>)_param_dock_size_error,
+      (ParamFloat<px4::params::DOCK_EST_ACC>)_param_dock_est_accel,
+      (ParamFloat<px4::params::DOCK_EST_VMAX>)_param_dock_est_max_speed,
+      (ParamFloat<px4::params::DOCK_EST_VERR>)_param_dock_est_velocity_error,
+      (ParamFloat<px4::params::DOCK_MATCH_ERR>)_param_dock_match_error,
+      (ParamFloat<px4::params::DOCK_REL_VMAX>)_param_dock_relative_speed,
+      (ParamFloat<px4::params::DOCK_DYN_JERK>)_param_dock_dynamic_jerk,
+      (ParamFloat<px4::params::DOCK_PASS_ERR>)_param_dock_pass_error,
+      (ParamFloat<px4::params::DOCK_PASS_DIST>)_param_dock_pass_distance,
       (ParamInt<px4::params::DOCK_CAM_DLY>)_param_dock_cam_dly,
       (ParamInt<px4::params::DOCK_OBS_TOUT>)_param_dock_obs_tout,
       (ParamFloat<px4::params::DOCK_CAM_ROLL>)_param_dock_cam_roll,

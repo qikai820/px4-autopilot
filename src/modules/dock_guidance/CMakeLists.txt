@@ -10,6 +10,7 @@ px4_add_module(
 	SRCS
 		dock_guidance_main.cpp
 		DockGuidance.cpp
+		DockGuidanceDynamic.cpp
 		DockGuidance.hpp
 	DEPENDS
 		mathlib

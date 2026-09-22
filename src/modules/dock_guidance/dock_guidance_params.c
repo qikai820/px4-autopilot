@@ -368,6 +368,135 @@ PARAM_DEFINE_FLOAT(DOCK_IMG_FRAC, 0.40f);
 PARAM_DEFINE_FLOAT(DOCK_LEG_VMAX, 5.0f);
 
 /**
+ * Enable estimated moving-target following
+ *
+ * Keeps the legacy Viztra frame unchanged. Metric following requires calibrated
+ * target extent (DOCK_TGT_W/H) or a measured relative position. Without scale
+ * or a converged estimate, only bounded image alignment is allowed. No target
+ * speed or heading is assumed. Legacy behavior is retained when disabled.
+ * @boolean
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_INT32(DOCK_DYN_EN, 0);
+
+/**
+ * Calibrated target projected width
+ *
+ * Zero means unknown. A changing target aspect invalidates this approximation;
+ * do not enter a nominal physical size unless it represents projected extent.
+ * @unit m
+ * @min 0
+ * @max 100
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_TGT_W, 0.0f);
+
+/**
+ * Calibrated target projected height
+ *
+ * Zero means unknown. Width and height estimates must agree when both used.
+ * @unit m
+ * @min 0
+ * @max 100
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_TGT_H, 0.0f);
+
+/**
+ * Target extent relative uncertainty
+ *
+ * Retained as a systematic position-error floor; not averaged away by filtering.
+ * @min 0.02
+ * @max 0.5
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_SIZE_ERR, 0.15f);
+
+/**
+ * Target acceleration process noise
+ *
+ * Larger values follow maneuvers faster but increase velocity uncertainty.
+ * @min 0.1
+ * @max 30
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_EST_ACC, 3.0f);
+
+/**
+ * Target estimate speed rejection limit
+ *
+ * Reject implausible estimates; never clamp a measurement to a presumed speed.
+ * @unit m/s
+ * @min 1
+ * @max 100
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_EST_VMAX, 60.0f);
+
+/**
+ * Maximum target velocity estimation error
+ *
+ * Combined standard deviation required before metric following is enabled.
+ * @unit m/s
+ * @min 0.1
+ * @max 20
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_EST_VERR, 3.0f);
+
+/**
+ * Following velocity error before approach
+ * @unit m/s
+ * @min 0.1
+ * @max 10
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_MATCH_ERR, 2.0f);
+
+/**
+ * Maximum relative approach speed
+ *
+ * With DOCK_TERM_EN=0 this caps the extra closure added to estimated target
+ * motion. With terminal pass-through enabled, pursuit uses the feasible
+ * DOCK_VEL_MAX budget so this parameter does not impose a hidden low-speed cap.
+ * Does not increase the configured vehicle speed capability.
+ * @unit m/s
+ * @min 0
+ * @max 60
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_REL_VMAX, 10.0f);
+
+/**
+ * Dynamic velocity command jerk limit
+ * @unit m/s^3
+ * @min 0.1
+ * @max 100
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_DYN_JERK, 8.0f);
+
+/**
+ * Maximum predicted pass uncertainty and miss
+ *
+ * Includes two times estimated position error. Not a contact confirmation.
+ * @unit m
+ * @min 0.1
+ * @max 20
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_PASS_ERR, 3.0f);
+
+/**
+ * Predicted distance beyond target plane
+ * @unit m
+ * @min 0.1
+ * @max 10
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_PASS_DIST, 2.0f);
+
+/**
  * Allow angle-only approach with legacy Viztra frames
  *
  * When enabled, a valid 21-byte Viztra frame may enter acceleration and
@@ -504,6 +633,38 @@ PARAM_DEFINE_FLOAT(DOCK_YAW_RATE, 10.0f);
  * @group Dock Guidance
  */
 PARAM_DEFINE_INT32(DOCK_VIS_GRACE, 300);
+
+/**
+ * Dynamic Dock startup height gain
+ *
+ * Climb this distance above the local height at airborne Dock engagement,
+ * while matching horizontal target motion. Startup rejects downward commands.
+ * Zero disables the startup climb. Latched on mode entry; not an AGL height.
+ *
+ * @unit m
+ * @min 0
+ * @max 100
+ * @decimal 1
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_START_H, 10.0f);
+
+/**
+ * Initial visual capture speed with uncertain target motion
+ *
+ * Initial bounded approach while acquiring target motion. Sustained centered
+ * bearing and fresh range evidence allow acceleration up to the feasible
+ * DOCK_VEL_MAX budget, additionally bounded by conservative range, stopping,
+ * axis velocity limits and velocity uncertainty.
+ * Zero disables both initial and accelerated capture (image alignment only).
+ *
+ * @unit m/s
+ * @min 0
+ * @max 10
+ * @decimal 1
+ * @group Dock Guidance
+ */
+PARAM_DEFINE_FLOAT(DOCK_CAP_VMAX, 3.0f);
 
 /**
  * Relative-position timeout [ms]

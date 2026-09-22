@@ -20,10 +20,39 @@ float32 camera_pitch_deg             # camera-frame pitch error [deg] (up-positi
 float32 camera_mount_pitch_deg       # commanded body-relative camera pitch [deg]
 float32 yaw_setpoint_deg             # slew-limited vehicle yaw setpoint [deg]
 
-uint8 stage                          # 0=NONE 1=ALIGN 2=ACCEL 3=MAX_SPEED 4=BRAKE 5=RECOVERY 6=EMERGENCY_RECOVERY 7=TERMINAL_DASH
+uint8 stage                          # 0=NONE 1=ALIGN 2=ACCEL 3=MAX_SPEED 4=BRAKE 5=RECOVERY 6=EMERGENCY_RECOVERY 7=TERMINAL_DASH 8=PASS_PREDICTED 9=STARTUP_CLIMB 10=TRACK_CAPTURE
 bool velocity_valid                  # fused local velocity is fresh and finite
 bool relative_position_valid         # fresh finite target-relative NED position is available
 bool camera_servo_enabled            # true when slow camera pitch-servo tracking is enabled
 bool vision_degraded                 # bridging a short visual dropout
 bool fault_latched                   # requires pilot mode deselection before Dock can run again
 bool valid                           # true while the module has a usable target
+
+# Dynamic-target diagnostics; these do not change the Viztra wire protocol.
+bool dynamic_enabled
+bool target_motion_valid             # metric scale and velocity estimate are usable
+bool dynamic_reachable               # estimated following plus positive closure fits limits
+bool pass_predicted                  # prediction only, NOT contact/docking confirmation
+float32[3] estimated_target_velocity_ned # target ground velocity, not approach command [m/s]
+float32[3] estimated_relative_ned     # distinct from measured relative_position_ned_m [m]
+float32 target_velocity_error        # combined velocity standard deviation [m/s]
+float32 target_position_error        # position error floor including scale uncertainty [m]
+float32 relative_closing_speed       # (own velocity - estimated target velocity) dot LOS [m/s]
+float32 commanded_relative_speed     # scheduled LOS closure [m/s]
+float32 available_relative_speed     # feasible LOS closure after following allocation [m/s]
+uint8 target_motion_state            # 0 unknown, 1 stationary evidence, 2 moving evidence
+uint32 estimator_reset_count
+uint8 estimator_reset_reason         # 0 lifecycle, 1 calibration, 2 mode configuration, 3 estimator gap/state, 4 local reset
+uint16 estimator_updates
+float32 estimator_age_s
+float32 startup_remaining_m          # NAN when height reference is not active
+bool startup_height_hold
+bool velocity_limits_override        # speed/Z boundary prevented satisfying accel/jerk simultaneously
+float32 predicted_fov_ratio
+float32 capture_speed_limit          # active capture limit before final vehicle/FOV constraints
+bool capture_evidence_valid          # current frame satisfies image/range/LOS evidence gate
+bool capture_acceleration_ready      # continuous evidence confirmation completed
+float32[3] following_command_ned
+float32[3] capture_command_ned
+float32[3] desired_velocity_ned       # before final acceleration/FOV planning
+float32[3] command_acceleration_ned   # difference of actual published velocity commands
