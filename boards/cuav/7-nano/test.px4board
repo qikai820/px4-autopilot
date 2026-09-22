@@ -1,5 +1,8 @@
 CONFIG_BOARD_TOOLCHAIN="arm-none-eabi"
 CONFIG_BOARD_ARCHITECTURE="cortex-m7"
+# This target contains custom DockGuidance parameters. Embed their metadata so
+# QGC obtains descriptions and limits from this firmware via MAVLink FTP.
+CONFIG_BOARD_EMBEDDED_METADATA=y
 CONFIG_BOARD_ETHERNET=y
 CONFIG_BOARD_SERIAL_GPS1="/dev/ttyS0"
 CONFIG_BOARD_SERIAL_GPS2="/dev/ttyS6"

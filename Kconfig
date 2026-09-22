@@ -105,6 +105,13 @@ menu "Toolchain"
         help
             flag to exclude metadata to reduce flash
 
+    config BOARD_EMBEDDED_METADATA
+        bool "Embed component metadata in ROMFS"
+        help
+            Include parameter, event, and actuator metadata in the firmware
+            ROMFS. Ground stations can then retrieve metadata for custom
+            firmware through MAVLink FTP instead of using published metadata.
+
     config BOARD_LINKER_PREFIX
         string "linker prefix"
         help
