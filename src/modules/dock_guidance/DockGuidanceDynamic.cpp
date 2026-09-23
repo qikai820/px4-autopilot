@@ -396,26 +396,62 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
   }
   desired = dock_motion::constrained(desired, limits);
   // 在最终速度规划前修正预测的三维穿越误差；视场/居中约束仍具有优先权。
-  // 不可信的捕获不会被提升为米制引导，已锁定的末段平面方向也不改变。
+  // 完整三维速度仍按原门槛标记；捕获时仅允许短时、低横向方差的穿越修正。
   const bool approach_stage = _stage == Stage::ACCELERATE ||
       _stage == Stage::MAX_SPEED_APPROACH || _stage == Stage::TERMINAL_BRAKE ||
       _stage == Stage::TERMINAL_DASH;
-  if (_param_dock_pred_enable.get() && trusted && approach_stage &&
+  const bool capture_prediction = _stage == Stage::TRACK_CAPTURE &&
+      _capture_schedule.ready() && _capture_evidence_valid;
+  _prediction_ready = false;
+  _prediction_cross_sigma = _prediction_cross_velocity_sigma = INFINITY;
+  _prediction_reject = !_param_dock_pred_enable.get()
+      ? dock_motion::PredictionReject::Disabled : dock_motion::PredictionReject::NoScale;
+  if (_param_dock_pred_enable.get() && _airborne &&
+      (capture_prediction || (trusted && approach_stage)) &&
       !_startup_height_hold && !hard && _fov_ratio < soft && _camera_time_aligned) {
     _miss_correction = dock_motion::correct_predicted_miss(_estimated_relative,
         _velocity_ned, _target_velocity, desired, direction,
         math::constrain(_param_dock_pred_response.get(), .05f, 2.f),
-        math::constrain(_param_dock_pred_time.get(), .2f, 10.f),
+        capture_prediction ? math::constrain(_param_dock_capture_predict_time.get(), .2f, 5.f)
+                           : math::constrain(_param_dock_pred_time.get(), .2f, 10.f),
         math::radians(math::constrain(_param_dock_pred_angle.get(), 1.f, 30.f)), acceleration);
     if (_miss_correction.valid) {
-      const Vector3f nominal = desired;
-      const Vector3f limited = dock_motion::constrained(_miss_correction.velocity, limits);
-      // 分轴限速可能把修正后的整条速度缩至低于目标速度；若因此失去闭合能力，
-      // 保留原先可行的指令。
-      if ((limited - _target_velocity) * direction > .5f) { desired = limited; }
-      _miss_correction.velocity = desired;
-      _miss_correction.correction = desired - nominal;
+      const auto evidence = dock_motion::assess_prediction(_target_motion, now, direction,
+          _velocity_ned, _target_velocity, _miss_correction,
+          capture_prediction ? math::constrain(_param_dock_capture_predict_time.get(), .2f, 5.f)
+                             : math::constrain(_param_dock_pred_time.get(), .2f, 10.f),
+          math::max(.2f, _param_dock_pass_error.get()),
+          math::max(.2f, _param_dock_est_velocity_error.get()));
+      _prediction_cross_sigma = evidence.transverse_sigma;
+      _prediction_cross_velocity_sigma = evidence.transverse_velocity_sigma;
+      _prediction_reject = evidence.reject;
+      if (evidence.usable) {
+        const Vector3f nominal = desired;
+        const Vector3f limited = dock_motion::constrained(_miss_correction.velocity, limits);
+        if ((limited - _target_velocity) * direction > .5f) {
+          desired = limited;
+          _miss_correction.velocity = desired;
+          _miss_correction.correction = desired - nominal;
+          _prediction_ready = true;
+        } else {
+          _prediction_reject = dock_motion::PredictionReject::Unreachable;
+        }
+      }
     }
+    if (!_prediction_ready) { _miss_correction.valid = false; }
+    if (!_miss_correction.valid && _prediction_reject == dock_motion::PredictionReject::NoScale) {
+      _prediction_reject = dock_motion::PredictionReject::NoCrossing;
+    }
+  } else if (_param_dock_pred_enable.get()) {
+    _prediction_reject = !_target_motion.initialized()
+        ? dock_motion::PredictionReject::NoScale
+        : (!_target_motion.fresh_range(now)
+            ? dock_motion::PredictionReject::Stale
+            : (!_target_motion.motion_state()
+                ? dock_motion::PredictionReject::NoMotionEvidence
+                : ((hard || _fov_ratio >= soft)
+                    ? dock_motion::PredictionReject::ImageEdge
+                    : dock_motion::PredictionReject::NotEligible)));
   }
   _desired_velocity = desired;
   const float max_accel = desired.norm() < previous.norm() ? rate : acceleration;
@@ -446,6 +482,60 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
     _dynamic_acceleration = plan.acceleration;
     _velocity_limits_override = plan.limits_override;
     _predicted_fov_ratio = plan.predicted_fov;
+  }
+  // Planner 的视场/动态限幅可能挡住修正；只有实际发布的速度朝修正方向变化
+  // 才把 prediction_valid 计为真，且需要新观测持续确认。
+  if (_prediction_ready) {
+    const float applied = (_velocity_setpoint_ned - previous) * _miss_correction.correction;
+    if (applied <= .001f || _predicted_fov_ratio >= soft) {
+      _prediction_ready = false;
+      _miss_correction.valid = false;
+      _prediction_reject = _predicted_fov_ratio >= soft
+          ? dock_motion::PredictionReject::ImageEdge
+          : dock_motion::PredictionReject::PlannerLimited;
+    }
+  }
+  if (_prediction_ready) {
+    if (!_prediction_candidate_since) {
+      _prediction_candidate_since = now;
+      _prediction_start_updates = _target_motion.accepted_updates();
+    }
+    if (now - _prediction_candidate_since <
+            static_cast<uint64_t>(math::constrain(_param_dock_prediction_confirm.get(), .1f, 1.f) * 1e6f) ||
+        _target_motion.accepted_updates() < _prediction_start_updates + 2) {
+      _prediction_reject = dock_motion::PredictionReject::Confirming;
+    }
+  } else {
+    _prediction_candidate_since = 0;
+  }
+  const float pass_error = math::max(.2f, _param_dock_pass_error.get());
+  const float predicted_miss = _miss_correction.valid
+      ? (_miss_correction.miss - direction * (_miss_correction.miss * direction)).norm()
+      : INFINITY;
+  const bool commit_capture_plan = capture_prediction && _prediction_ready &&
+      _prediction_reject == dock_motion::PredictionReject::Ready &&
+      _param_dock_terminal_enable.get() && !_startup_height_hold &&
+      _miss_correction.time_to_plane <= math::constrain(_param_dock_blind_tgo.get(), .1f, .5f) &&
+      predicted_miss + 2.f * _prediction_cross_sigma < pass_error &&
+      _bbox_edge_ratio < soft && _predicted_fov_ratio < soft &&
+      (_param_dock_terminal_distance.get() <= 0.f ||
+       _estimated_relative.norm() <= _param_dock_terminal_distance.get());
+  if (commit_capture_plan) {
+    if (!_capture_terminal_candidate_since) { _capture_terminal_candidate_since = now; }
+    if (now - _capture_terminal_candidate_since >=
+        static_cast<uint64_t>(math::constrain(_param_dock_terminal_confirm.get(), .02f, 2.f) * 1e6f)) {
+      _capture_terminal_plan = _terminal_ready = true;
+      _terminal_direction = direction;
+      _terminal_started_us = now;
+      _terminal_blind_since_us = 0;
+      _terminal_velocity_ned = _velocity_setpoint_ned;
+      const float duration = math::min(_param_dock_terminal_blind.get(),
+          _miss_correction.time_to_plane + .1f);
+      _terminal_plan_deadline = now + static_cast<uint64_t>(math::max(.05f, duration) * 1e6f);
+      set_stage(Stage::TERMINAL_DASH);
+    }
+  } else {
+    _capture_terminal_candidate_since = 0;
   }
   _commanded_speed_ms = _velocity_setpoint_ned.norm();
   // 地速与相对目标的闭合速度分别记录，避免把两者混作同一个性能指标。
@@ -482,6 +572,43 @@ bool DockGuidance::dynamic_terminal(hrt_abstime now, bool blind) {
   }
   _estimated_relative = _target_motion.relative(now, own);
   _target_position_error = _target_motion.position_sigma(_target_motion.age(now));
+  if (_capture_terminal_plan) {
+    if (!_param_dock_pred_enable.get() || !_param_dock_terminal_enable.get()) {
+      invalidate_setpoint(now, "capture terminal disabled after commit");
+      return false;
+    }
+    // 仅凭入末段前锁定的相机估计延拓；不把仿真目标真值接进控制。
+    // 穿越判定分别检查平面内误差和沿程误差，均有有限截止时间。
+    const float age = _target_motion.age(now);
+    const float along = _estimated_relative * _terminal_direction;
+    const float across = (_estimated_relative - _terminal_direction * along).norm();
+    const float cross_error = _target_motion.transverse_position_sigma(_terminal_direction, age);
+    if (now > _terminal_plan_deadline ||
+        age > math::constrain(_param_dock_terminal_blind.get(), .05f, 3.f) ||
+        !std::isfinite(along + across + cross_error + _target_position_error) ||
+        across + 2.f * cross_error > _param_dock_pass_error.get()) {
+      invalidate_setpoint(now, "capture terminal plan expired/uncertain");
+      return false;
+    }
+    if (along + 2.f * _target_position_error < -_param_dock_pass_distance.get()) {
+      _capture_terminal_plan = false;
+      _terminal_ready = false;
+      set_stage(Stage::PASS_PREDICTED);
+      publish_predicted_pass(now);
+      return false;
+    }
+    _prediction_ready = false;
+    _prediction_reject = blind ? dock_motion::PredictionReject::Lost
+                               : dock_motion::PredictionReject::Ready;
+    _miss_correction = {};
+    _vision_degraded = blind;
+    if (blind && !_terminal_blind_since_us) { _terminal_blind_since_us = now; }
+    _velocity_setpoint_ned = dock_motion::constrained(_terminal_velocity_ned, dynamic_limits());
+    _last_control_update_us = now;
+    publish_guidance_status(now, true, blind);
+    publish_velocity_setpoint(now, _velocity_setpoint_ned, _yaw_setpoint_rad);
+    return false;
+  }
   const auto pass =
       dock_motion::classify_pass(_estimated_relative, _terminal_direction, _target_position_error,
                                  _param_dock_pass_distance.get(), _param_dock_pass_error.get());

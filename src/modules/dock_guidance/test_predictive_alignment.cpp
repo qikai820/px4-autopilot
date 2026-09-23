@@ -1,5 +1,6 @@
 // Standalone deterministic regression tests; see docs/DockGuidance_dynamic.md.
 #include "CameraHistory.hpp"
+#include "ImageTracking.hpp"
 #include "PredictiveCorrection.hpp"
 #include <cassert>
 #include <cstdio>
@@ -135,6 +136,41 @@ static void test_predictive_geometry() {
   assert(!correct_predicted_miss(relative, own, target, nominal, axis, .5f,5,0,8).valid);
 }
 
+static void test_dynamic_image_translation() {
+  const Vector3f forward(1.f, 0.f, 0.f);
+  const Vector3f right = Vector3f(10.f, 1.f, 0.f).normalized();
+  const Vector3f left = Vector3f(10.f, -1.f, 0.f).normalized();
+  const Vector3f static_error = image_pointing_error(right, forward, false);
+  const Vector3f dynamic_right = image_pointing_error(right, forward, true);
+  const Vector3f dynamic_left = image_pointing_error(left, forward, true);
+  assert(static_error.norm() < 1e-5f);
+  assert(dynamic_right(1) < -.09f && dynamic_left(1) > .09f);
+  // Velocity correction is opposite the pointing error: right target -> east.
+  const Vector3f east_velocity = -dynamic_right;
+  assert(east_velocity(1) > .09f);
+  const Vector3f camera_right(0.f, 1.f, 0.f);
+  assert((image_pitch_assist(east_velocity, right, camera_right, 0.f) - east_velocity).norm() < 1e-5f);
+
+  const Vector3f above = Vector3f(10.f, 0.f, -1.f).normalized();
+  const Vector3f pitch_velocity = -image_pointing_error(above, forward, true);
+  assert(pitch_velocity(2) < -.09f);
+  assert(image_pitch_assist(pitch_velocity, above, camera_right, 0.f).norm() < 1e-5f);
+  assert((image_pitch_assist(pitch_velocity, above, camera_right, 1.f) - pitch_velocity).norm() < 1e-5f);
+  // Image-right remains well-defined with an upward-facing camera.
+  const Vector3f upward_forward(.07f, 0.f, -.99755f);
+  const Vector3f near_zenith_target = Vector3f(.07f, .035f, -.99694f).normalized();
+  const Vector3f upward_correction = -image_pointing_error(near_zenith_target, upward_forward, true);
+  const Vector3f kept = image_pitch_assist(upward_correction, near_zenith_target, camera_right, 0.f);
+  assert(kept(1) > .02f);
+  const Vector3f mixed(0.f, 2.f, -6.f);
+  const Vector3f pitch_first = limit_image_velocity(
+      image_pitch_assist(mixed, forward, camera_right, 0.f), 1.f);
+  const Vector3f cap_first = image_pitch_assist(
+      limit_image_velocity(mixed, 1.f), forward, camera_right, 0.f);
+  assert(fabsf(pitch_first(1) - 1.f) < 1e-5f);
+  assert(cap_first(1) < .32f);
+}
+
 // Separate plant: held velocity command followed by first-order vehicle response.
 // Use the production accel/jerk planner and continuous segment closest approach;
 // no collision, perfect target state, or camera dynamics are asserted for HIL.
@@ -181,6 +217,7 @@ int main() {
   test_camera_history();
   test_delayed_rotating_camera();
   test_predictive_geometry();
+  test_dynamic_image_translation();
   for (float tau : {.2f, .4f, .7f}) {
     const Vector3f relative(150, 20, -70), target(10, 4, 0), own(38, 3, -8);
     const float baseline = run_approach(false, tau, relative, target, own);

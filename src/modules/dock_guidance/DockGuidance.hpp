@@ -41,6 +41,7 @@
 #include <uORB/topics/arming_check_reply.h>
 #include <uORB/topics/arming_check_request.h>
 #include <uORB/topics/dock_guidance_setpoint.h>
+#include <uORB/topics/dock_guidance_prediction.h>
 #include <uORB/topics/gimbal_controls.h>
 #include <uORB/topics/parameter_update.h>
 #include <uORB/topics/register_ext_component_reply.h>
@@ -201,6 +202,8 @@ private:
   // Dock 调试状态与交给 mc_pos_control 的三维速度设定值。
   uORB::Publication<dock_guidance_setpoint_s> _setpoint_pub{
       ORB_ID(dock_guidance_setpoint)};
+  uORB::Publication<dock_guidance_prediction_s> _prediction_pub{
+      ORB_ID(dock_guidance_prediction)};
   uORB::Publication<gimbal_controls_s> _gimbal_controls_pub{
       ORB_ID(gimbal_controls)};
   uORB::Publication<trajectory_setpoint_s> _trajectory_setpoint_pub{
@@ -282,6 +285,7 @@ private:
   float _fov_yaw_ratio{0.0f};
   float _fov_pitch_ratio{0.0f};
   float _target_size_ratio{0.0f};
+  float _bbox_edge_ratio{0.0f};
   float _camera_mount_pitch_deg{0.0f};
   bool _camera_pitch_initialized{false};
   hrt_abstime _last_camera_pitch_publish_us{0};
@@ -302,6 +306,16 @@ private:
   matrix::Vector3f _target_velocity{}, _estimated_relative{}, _terminal_direction{};
   matrix::Vector3f _dynamic_acceleration{};
   dock_motion::MissCorrection _miss_correction{};
+  bool _prediction_ready{false};
+  bool _terminal_ready{false};
+  bool _capture_terminal_plan{false};
+  dock_motion::PredictionReject _prediction_reject{dock_motion::PredictionReject::NoScale};
+  float _prediction_cross_sigma{INFINITY};
+  float _prediction_cross_velocity_sigma{INFINITY};
+  hrt_abstime _prediction_candidate_since{0};
+  hrt_abstime _capture_terminal_candidate_since{0};
+  int _prediction_start_updates{0};
+  hrt_abstime _terminal_plan_deadline{0};
   float _dynamic_closure{0.f};
   float _dynamic_max_closure{0.f};
   float _target_position_error{INFINITY};
@@ -330,6 +344,9 @@ private:
       (ParamFloat<px4::params::DOCK_PRED_TAU>)_param_dock_pred_response,
       (ParamFloat<px4::params::DOCK_PRED_TMAX>)_param_dock_pred_time,
       (ParamFloat<px4::params::DOCK_PRED_ANG>)_param_dock_pred_angle,
+      (ParamFloat<px4::params::DOCK_CAP_PRED_T>)_param_dock_capture_predict_time,
+      (ParamFloat<px4::params::DOCK_PRED_CFM>)_param_dock_prediction_confirm,
+      (ParamFloat<px4::params::DOCK_BLIND_TGO>)_param_dock_blind_tgo,
       (ParamFloat<px4::params::DOCK_START_H>)_param_dock_start_height,
       (ParamFloat<px4::params::DOCK_CAP_VMAX>)_param_dock_capture_speed,
       (ParamFloat<px4::params::DOCK_TGT_W>)_param_dock_target_width,

@@ -1,5 +1,6 @@
 // Standalone deterministic tests. See docs/DockGuidance_dynamic.md for command.
 #include "TargetMotion.hpp"
+#include "PredictiveCorrection.hpp"
 #include <cassert>
 #include <cstdio>
 #include <random>
@@ -187,6 +188,22 @@ static void test_quantized_boxes() {
   assert(!tracker.valid(time, tracker.velocity_sigma() * .9f));
   assert(tracker.valid(time, tracker.velocity_sigma() * 1.1f));
   assert(tracker.position_sigma() >= 5.f);
+  // A depth-dominated box estimate may fail the full velocity gate while a
+  // short crossing-plane estimate remains bounded. Never relabel full 3-D
+  // target_motion_valid merely to activate this correction.
+  const Vector3f relative(50,20,-10), axis = relative.normalized();
+  const Vector3f own_velocity = tracker.velocity() + axis * 40.f;
+  const auto candidate = correct_predicted_miss(relative, own_velocity, tracker.velocity(),
+      own_velocity, axis, .5f, 2.f, .261799f, 8.f);
+  assert(candidate.valid && !tracker.valid(time, 3.f));
+  const auto cross = assess_prediction(tracker, time, axis, own_velocity,
+      tracker.velocity(), candidate, 2.f, 100.f, 3.f);
+  assert(cross.usable && cross.reject == PredictionReject::Ready);
+  assert(cross.transverse_velocity_sigma < tracker.velocity_sigma());
+  assert(assess_prediction(tracker, time, axis, own_velocity, tracker.velocity(),
+      candidate, 2.f, .1f, 3.f).reject == PredictionReject::Uncertain);
+  assert(assess_prediction(tracker, time + 300000, axis, own_velocity, tracker.velocity(),
+      candidate, 2.f, 100.f, 3.f).reject == PredictionReject::Stale);
 }
 
 static void test_small_box_following(float speed, float yaw) {

@@ -150,6 +150,38 @@ public:
     }
     return sqrtf(max(0.f, variance));
   }
+  // 不把深度方向的大方差直接加到穿越平面的两个横向分量上。
+  // 目标尺寸误差是随视线方向共同变化的尺度误差，不能靠多帧平均消掉。
+  float transverse_position_sigma(const Vector3f &plane_normal, float horizon) const {
+    if (!initialized() || !plane_normal.isAllFinite() ||
+        fabsf(plane_normal.norm() - 1.f) > .01f || !std::isfinite(horizon) ||
+        horizon < 0.f) {
+      return INFINITY;
+    }
+    float variance = 0.f;
+    for (int i = 0; i < 3; ++i) {
+      for (int j = 0; j < 3; ++j) {
+        const float projection = (i == j ? 1.f : 0.f) - plane_normal(i) * plane_normal(j);
+        const float predicted_covariance = _p(i, j) +
+            horizon * (_p(i, j + 3) + _p(i + 3, j)) +
+            horizon * horizon * _p(i + 3, j + 3);
+        variance += projection * predicted_covariance;
+      }
+    }
+    const float scale_projection = sqrtf(max(0.f, 1.f -
+        (_last_los * plane_normal) * (_last_los * plane_normal)));
+    return max(sqrtf(max(0.f, variance)), _scale_floor * scale_projection) +
+        .5f * _accel * horizon * horizon;
+  }
+  float transverse_velocity_sigma(const Vector3f &plane_normal) const {
+    if (!initialized() || !plane_normal.isAllFinite() ||
+        fabsf(plane_normal.norm() - 1.f) > .01f) {
+      return INFINITY;
+    }
+    return sqrtf(max(0.f, velocity_sigma() * velocity_sigma() -
+        directional_velocity_sigma(plane_normal) *
+        directional_velocity_sigma(plane_normal)));
+  }
   Vector3f following_velocity(uint64_t now, float max_error) const {
     Vector3f result;
     // 在视线/切平面坐标中评估误差，不直接逐个 NED 轴评估；

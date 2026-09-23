@@ -31,6 +31,7 @@
  ****************************************************************************/
 
 #include "DockGuidance.hpp"
+#include "ImageTracking.hpp"
 
 #include <drivers/drv_hrt.h>
 #include <mathlib/math/Functions.hpp>
@@ -268,6 +269,19 @@ void DockGuidance::Run() {
   _target_size_ratio = math::max(
       static_cast<float>(obs.target_width_px) / image_width,
       static_cast<float>(obs.target_height_px) / image_height);
+  const float focal_x = image_width /
+      (2.f * tanf(math::radians(_param_dock_fov_x.get()) * .5f));
+  const float focal_y = image_height /
+      (2.f * tanf(math::radians(_param_dock_fov_y.get()) * .5f));
+  const float offset_x_px = obs.offsets_are_angles
+      ? focal_x * tanf(math::radians(obs.offset_x)) : obs.offset_x;
+  const float offset_y_px = obs.offsets_are_angles
+      ? focal_y * tanf(math::radians(obs.offset_y)) : obs.offset_y;
+  _bbox_edge_ratio = std::isfinite(offset_x_px + offset_y_px) &&
+                     obs.target_width_px < 65535 && obs.target_height_px < 65535
+      ? math::max((fabsf(offset_x_px) + .5f * obs.target_width_px) / (.5f * image_width),
+                  (fabsf(offset_y_px) + .5f * obs.target_height_px) / (.5f * image_height))
+      : 0.f;
   const Vector3f relative_position_ned(obs.relative_n_m, obs.relative_e_m,
                                        obs.relative_d_m);
   const uint64_t relative_timeout_us =
@@ -424,6 +438,11 @@ bool DockGuidance::get_delayed_state(hrt_abstime target_us,
 void DockGuidance::reset_tracking_state() {
   // 清理观测、滤波、捕获和末段状态；模式注册及故障锁存由调用方单独管理。
   _miss_correction = {};
+  _prediction_ready = _terminal_ready = _capture_terminal_plan = false;
+  _prediction_reject = dock_motion::PredictionReject::NoScale;
+  _prediction_cross_sigma = _prediction_cross_velocity_sigma = INFINITY;
+  _prediction_candidate_since = _capture_terminal_candidate_since = _terminal_plan_deadline = 0;
+  _prediction_start_updates = 0;
   _observation_exposure_us = 0;
   _sample_camera_pitch_deg = NAN;
   _camera_time_aligned = false;
@@ -471,6 +490,7 @@ void DockGuidance::reset_tracking_state() {
   _fov_yaw_ratio = 0.0f;
   _fov_pitch_ratio = 0.0f;
   _target_size_ratio = 0.0f;
+  _bbox_edge_ratio = 0.0f;
   _stage = Stage::NONE;
   _aligned_since_us = 0;
   _hard_fov_since_us = 0;
@@ -499,6 +519,15 @@ void DockGuidance::invalidate_setpoint(hrt_abstime timestamp,
   if (was_active) {
     _mode_fault_latched = true;
   }
+
+  dock_guidance_prediction_s prediction{};
+  prediction.timestamp = timestamp;
+  prediction.bbox_edge_ratio = _bbox_edge_ratio;
+  prediction.cross_sigma_m = _prediction_cross_sigma;
+  prediction.cross_velocity_sigma_m_s = _prediction_cross_velocity_sigma;
+  prediction.tgo_s = _miss_correction.time_to_plane;
+  prediction.reject_reason = static_cast<uint8_t>(dock_motion::PredictionReject::Fault);
+  _prediction_pub.publish(prediction);
 
   reset_tracking_state();
 
@@ -724,6 +753,8 @@ void DockGuidance::update_mode_state() {
   }
 
   if (active && !_dock_mode_active) {
+    _prediction_ready = _terminal_ready = _capture_terminal_plan = false;
+    _prediction_candidate_since = _capture_terminal_candidate_since = _terminal_plan_deadline = 0;
     // 入模时重置捕获计时；动态路径从当前实测速度过渡，起飞爬升期间禁止要求下降。
     _capture_schedule.reset();
     _startup_ray_time = 0;
@@ -771,6 +802,8 @@ void DockGuidance::update_mode_state() {
     }
 
   } else if (!active && _dock_mode_active) {
+    _prediction_ready = _terminal_ready = _capture_terminal_plan = false;
+    _prediction_candidate_since = _capture_terminal_candidate_since = _terminal_plan_deadline = 0;
     _capture_schedule.reset();
     _startup_climb = false;
     _startup_height_reached = false;
@@ -905,8 +938,19 @@ void DockGuidance::publish_guidance_status(hrt_abstime timestamp, bool valid,
   status.exposure_timestamp = _observation_exposure_us;
   status.sample_mount_pitch_deg = _sample_camera_pitch_deg;
   status.camera_time_aligned = _camera_time_aligned && !degraded;
-  status.prediction_valid = _miss_correction.valid && !degraded;
+  status.prediction_valid = _miss_correction.valid && valid && !degraded;
   status.prediction_tgo_s = _miss_correction.time_to_plane;
+  dock_guidance_prediction_s prediction{};
+  prediction.timestamp = timestamp;
+  prediction.bbox_edge_ratio = _bbox_edge_ratio;
+  prediction.cross_sigma_m = _prediction_cross_sigma;
+  prediction.cross_velocity_sigma_m_s = _prediction_cross_velocity_sigma;
+  prediction.tgo_s = _miss_correction.time_to_plane;
+  prediction.prediction_ready = _prediction_ready && valid &&
+      _prediction_reject == dock_motion::PredictionReject::Ready && !degraded;
+  prediction.terminal_ready = _terminal_ready;
+  prediction.reject_reason = static_cast<uint8_t>(_prediction_reject);
+  _prediction_pub.publish(prediction);
   _miss_correction.miss.copyTo(status.prediction_miss_ned);
   _miss_correction.correction.copyTo(status.prediction_dv_ned);
   status.yaw_setpoint_deg = std::isfinite(_yaw_setpoint_rad)
@@ -1070,21 +1114,10 @@ Vector3f DockGuidance::compute_image_tracking_velocity(
     const Vector3f &approach_direction,
     const Vector3f &camera_forward_ned) const {
   // 单纯沿视线飞行虽能保持地理系 LOS，机体加速倾斜却会让固定相机内的目标偏移。
-  // 因此增加垂直 LOS 的平移纠偏；水平可由机头偏航修正的分量先剔除，
-  // 剩余图像误差（通常为俯仰方向）才占用平移速度预算。
-  Vector3f pointing_error =
-      camera_forward_ned -
-      approach_direction * (approach_direction * camera_forward_ned);
-  const Vector3f ned_down(0.0f, 0.0f, 1.0f);
-  Vector3f yaw_correctable = ned_down % camera_forward_ned;
-  yaw_correctable -=
-      approach_direction * (approach_direction * yaw_correctable);
-  const float yaw_correctable_norm = yaw_correctable.norm();
-
-  if (yaw_correctable_norm > 0.01f) {
-    yaw_correctable /= yaw_correctable_norm;
-    pointing_error -= yaw_correctable * (yaw_correctable * pointing_error);
-  }
+  // 静态路径延续偏航居中、俯仰平移纠偏；动态目标还需要水平平移，
+  // 否则偏航虽能让目标居中，飞机与目标的横向位置仍可能持续分离。
+  const Vector3f pointing_error = dock_motion::image_pointing_error(
+      approach_direction, camera_forward_ned, _param_dock_dyn_enable.get());
 
   const float gain = math::constrain(_param_dock_img_p.get(), 0.05f, 5.0f);
   Vector3f tracking_velocity{};
@@ -1134,15 +1167,13 @@ Vector3f DockGuidance::compute_image_tracking_velocity(
 
   tracking_velocity -=
       approach_direction * (approach_direction * tracking_velocity);
-  const float tracking_speed = tracking_velocity.norm();
   const float tracking_limit =
       math::constrain(_param_dock_img_vmax.get(), 0.1f, 20.0f);
-
-  if (tracking_speed > tracking_limit) {
-    tracking_velocity *= tracking_limit / tracking_speed;
+  if (_param_dock_dyn_enable.get() && _param_dock_cam_pitch_variable.get() != 0) {
+    // 动态目标由舵机消除的俯仰分量不应提前占满横向平移预算。
+    return tracking_velocity.isAllFinite() ? tracking_velocity : Vector3f{};
   }
-
-  return tracking_velocity.isAllFinite() ? tracking_velocity : Vector3f{};
+  return dock_motion::limit_image_velocity(tracking_velocity, tracking_limit);
 }
 
 Vector3f
@@ -1465,6 +1496,9 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
   _fov_yaw_ratio = fabsf(_los_c_deg(0)) / half_fov_x;
   _fov_pitch_ratio = fabsf(_los_c_deg(1)) / half_fov_y;
   _fov_ratio = math::max(_fov_yaw_ratio, _fov_pitch_ratio);
+  if (_param_dock_dyn_enable.get() && !_terminal_ready) {
+    _fov_ratio = math::max(_fov_ratio, _bbox_edge_ratio);
+  }
 
   const float hard_ratio =
       math::constrain(_param_dock_fov_hard.get(), 0.30f, 0.99f);
@@ -1525,16 +1559,24 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
 
   approach_direction.normalize();
   const Vector3f camera_forward_ned = R_ned_cam * Vector3f(1.0f, 0.0f, 0.0f);
+  const Vector3f camera_right_ned = R_ned_cam * Vector3f(0.0f, 1.0f, 0.0f);
 
   _tracking_velocity_ned =
       compute_image_tracking_velocity(approach_direction, camera_forward_ned);
   if (_param_dock_cam_pitch_variable.get() != 0) {
-    // 俯仰舵机先处理小误差；接近软视场边界时逐步加入机体平移，
-    // 以应对舵机速度不足或到达行程端，不能完全丢弃图像纠偏。
     const float assist_start = .5f * align_ratio;
     const float assist = math::constrain((_fov_pitch_ratio - assist_start) /
         math::max(soft_ratio - assist_start, .05f), 0.f, 1.f);
-    _tracking_velocity_ned *= assist;
+    if (_param_dock_dyn_enable.get()) {
+      // 动态目标横向误差必须靠飞机平移，舵机只替代俯仰平移。
+      _tracking_velocity_ned = dock_motion::image_pitch_assist(
+          _tracking_velocity_ned, approach_direction, camera_right_ned, assist);
+      _tracking_velocity_ned = dock_motion::limit_image_velocity(
+          _tracking_velocity_ned, math::constrain(_param_dock_img_vmax.get(), .1f, 20.f));
+    } else {
+      // 保留静态路径原有的俯仰舵机辅助比例与限幅顺序。
+      _tracking_velocity_ned *= assist;
+    }
   }
   const float horizontal_los =
       Vector2f(approach_direction(0), approach_direction(1)).norm();

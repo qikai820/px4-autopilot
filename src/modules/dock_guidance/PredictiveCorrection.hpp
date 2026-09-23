@@ -12,6 +12,78 @@ struct MissCorrection {
   bool valid{false};
 };
 
+enum class PredictionReject : uint8_t {
+  Ready = 0,
+  Disabled = 1,
+  NoScale = 2,
+  Stale = 3,
+  NoMotionEvidence = 4,
+  NoCrossing = 5,
+  Uncertain = 6,
+  ImageEdge = 7,
+  Unreachable = 8,
+  Confirming = 9,
+  Lost = 10,
+  NotEligible = 11,
+  PlannerLimited = 12,
+  Fault = 13
+};
+
+struct PredictionEvidence {
+  float transverse_sigma{INFINITY};
+  float transverse_velocity_sigma{INFINITY};
+  PredictionReject reject{PredictionReject::NoScale};
+  bool usable{false};
+};
+
+// Full 3-D velocity uncertainty may be dominated by optical depth. Test the
+// predicted miss IN the crossing plane, including the uncertainty in when the
+// target reaches that plane. This does not certify full target velocity.
+inline PredictionEvidence assess_prediction(const TargetMotion &motion, uint64_t now,
+    const Vector3f &axis, const Vector3f &own_velocity, const Vector3f &target_velocity,
+    const MissCorrection &candidate, float max_time, float max_cross_sigma,
+    float max_cross_velocity_sigma) {
+  PredictionEvidence result;
+  if (!motion.initialized()) { return result; }
+  if (!motion.fresh_range(now)) {
+    result.reject = PredictionReject::Stale;
+    return result;
+  }
+  if (!motion.motion_state()) {
+    result.reject = PredictionReject::NoMotionEvidence;
+    return result;
+  }
+  if (!candidate.valid || !std::isfinite(candidate.time_to_plane) ||
+      candidate.time_to_plane <= 0.f || candidate.time_to_plane > max_time ||
+      !axis.isAllFinite() || fabsf(axis.norm() - 1.f) > .01f) {
+    result.reject = PredictionReject::NoCrossing;
+    return result;
+  }
+  const Vector3f relative_velocity = own_velocity - target_velocity;
+  const float closing = relative_velocity * axis;
+  const float radial_sigma = motion.directional_velocity_sigma(axis);
+  const float transverse_speed = (relative_velocity - axis * closing).norm();
+  if (!std::isfinite(closing + radial_sigma + transverse_speed) ||
+      closing - 2.f * radial_sigma <= .5f) {
+    result.reject = PredictionReject::Uncertain;
+    return result;
+  }
+  result.transverse_velocity_sigma = motion.transverse_velocity_sigma(axis);
+  const float arrival_error = candidate.time_to_plane * radial_sigma /
+                              (closing - 2.f * radial_sigma);
+  result.transverse_sigma = motion.transverse_position_sigma(axis, candidate.time_to_plane) +
+                            transverse_speed * arrival_error;
+  if (!std::isfinite(result.transverse_sigma) ||
+      result.transverse_sigma > max_cross_sigma ||
+      result.transverse_velocity_sigma > max_cross_velocity_sigma) {
+    result.reject = PredictionReject::Uncertain;
+    return result;
+  }
+  result.reject = PredictionReject::Ready;
+  result.usable = true;
+  return result;
+}
+
 // 假设短时目标匀速、本机速度对固定命令呈一阶响应，求到达目标平面时的横向残差。
 // 调用方提供新鲜可信的状态，并在本函数后继续执行视场、加速度和加加速度规划。
 inline MissCorrection correct_predicted_miss(const Vector3f &relative,

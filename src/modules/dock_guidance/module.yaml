@@ -250,6 +250,30 @@ parameters:
         max: 30.0
         decimal: 1
         default: 15.0
+      DOCK_CAP_PRED_T:
+        description: {short: Maximum capture prediction time to target plane}
+        type: float
+        unit: s
+        min: 0.2
+        max: 5.0
+        decimal: 1
+        default: 2.0
+      DOCK_PRED_CFM:
+        description: {short: Continuous capture prediction confirmation time}
+        type: float
+        unit: s
+        min: 0.1
+        max: 1.0
+        decimal: 2
+        default: 0.2
+      DOCK_BLIND_TGO:
+        description: {short: Maximum predicted time to plane when entering blind dash}
+        type: float
+        unit: s
+        min: 0.1
+        max: 0.5
+        decimal: 2
+        default: 0.35
       DOCK_TGT_W:
         description: {short: Calibrated target projected width}
         type: float

@@ -8,7 +8,7 @@ float32[3] velocity_setpoint_ned_m_s # NED velocity setpoint sent to mc_pos_cont
 float32[3] tracking_velocity_ned_m_s # image-servo correction perpendicular to target LOS [m/s]
 float32[3] relative_position_ned_m   # target position relative to vehicle in NED [m]
 float32 relative_distance_m          # target slant range [m]
-float32 fov_ratio                    # largest normalized image offset; 1 is the image edge
+float32 fov_ratio                    # normalized center or full-box edge used by guidance; 1 is the image edge
 float32 fov_yaw_ratio                # normalized horizontal image offset
 float32 fov_pitch_ratio              # normalized vertical image offset
 float32 target_size_ratio            # largest target-box dimension divided by image size

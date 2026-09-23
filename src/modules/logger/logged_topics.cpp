@@ -62,6 +62,7 @@ void LoggedTopics::add_default_topics()
 	// Dock mode diagnostics: record both the raw visual input and the final
 	// rate/throttle command so visual, speed and actuator behavior can be aligned.
 	add_topic("dock_guidance_setpoint", 20);
+	add_topic("dock_guidance_prediction", 20);
 	add_topic_multi("dronecan_node_status", 250);
 	add_optional_topic("external_ins_attitude");
 	add_optional_topic("external_ins_global_position");

@@ -67,6 +67,7 @@ set(msg_files
 	DistanceSensor.msg
 	DistanceSensorModeChangeRequest.msg
 	DockGuidanceSetpoint.msg
+	DockGuidancePrediction.msg
 	DronecanNodeStatus.msg
 	Ekf2Timestamps.msg
 	EscReport.msg
