@@ -5,16 +5,15 @@
 
 namespace dock_motion {
 struct MissCorrection {
-  Vector3f velocity{};               // desired command, before the final planner
-  Vector3f miss{};                   // NED residual predicted with nominal command
-  Vector3f correction{};             // change in desired velocity, not acceleration
+  Vector3f velocity{};               // 最终规划前的期望速度。
+  Vector3f miss{};                   // 按原速度指令预测的 NED 穿越残差。
+  Vector3f correction{};             // 期望速度的改变量，不是加速度。
   float time_to_plane{NAN};
   bool valid{false};
 };
 
-// Constant target velocity and first-order own velocity response to a held
-// command. Solve the transverse residual before reaching the approach plane.
-// The caller supplies fresh, trusted state and retains FOV/accel/jerk planning.
+// 假设短时目标匀速、本机速度对固定命令呈一阶响应，求到达目标平面时的横向残差。
+// 调用方提供新鲜可信的状态，并在本函数后继续执行视场、加速度和加加速度规划。
 inline MissCorrection correct_predicted_miss(const Vector3f &relative,
     const Vector3f &own_velocity, const Vector3f &target_velocity,
     const Vector3f &nominal, const Vector3f &approach_axis, float response_time,
@@ -35,7 +34,7 @@ inline MissCorrection correct_predicted_miss(const Vector3f &relative,
   const float speed = nominal.norm();
   if (remaining <= 0.f || closing <= .5f || speed < .5f ||
       commanded_closing <= .5f) {
-    return result; // no turn-back after crossing or correction while receding
+    return result; // 越过平面或正在远离目标时，不做回头式修正。
   }
   const auto response_integral = [response_time](float time) {
     return clamp(time + response_time * expm1f(-time / response_time), 0.f, time);
@@ -43,14 +42,13 @@ inline MissCorrection correct_predicted_miss(const Vector3f &relative,
   const auto distance = [&](float time) {
     return closing * time + (commanded_closing - closing) * response_integral(time);
   };
-  // Estimate arrival with the SAME response model as the residual. A time based
-  // only on current speed would invent radial misses during speed changes and
-  // could delay correction even when the requested speed reaches the plane soon.
+  // 到达时间和残差都使用相同的一阶速度响应模型；若只按当前速度估计时间，
+  // 加减速期间会产生虚假的径向误差，甚至错过需要提前修正的时机。
   if (distance(max_time) < remaining) { return result; }
   float time = remaining / closing;
   if (fabsf(commanded_closing - closing) > 1e-5f) {
     float lo = 0.f, hi = max_time;
-    // Both endpoint closing speeds are positive, so distance is monotonic.
+    // 两端的闭合速度均为正，距离单调，故可以二分求到达时刻。
     for (int i = 0; i < 18; ++i) {
       const float mid = .5f * (lo + hi);
       if (distance(mid) < remaining) { lo = mid; } else { hi = mid; }
@@ -58,8 +56,8 @@ inline MissCorrection correct_predicted_miss(const Vector3f &relative,
     time = .5f * (lo + hi);
   }
   if (!std::isfinite(time) || time <= 0.f) { return result; }
-  // Integral of a first-order velocity step, in seconds. The denominator floor
-  // and reachable lateral-speed cap avoid the near-zero time-to-plane singularity.
+  // 一阶速度阶跃的积分给出实际可实现的位移；到达时间趋近零时，
+  // 分母下限与横向速度上限防止数值发散或要求不可达的大幅转向。
   const float response = response_integral(time);
   result.time_to_plane = time;
   result.miss = relative - relative_velocity * time - (nominal - own_velocity) * response;
@@ -70,8 +68,8 @@ inline MissCorrection correct_predicted_miss(const Vector3f &relative,
   if (correction.norm() > cap && correction.norm() > .001f) {
     correction *= cap / correction.norm();
   }
-  // Rotate the requested ground-speed vector without adding terminal braking.
-  // Final speed/axis constraints and the existing image planner still apply.
+  // 保持原地速模长，仅旋转速度方向以减小横向误差；不额外引入末段制动。
+  // 最终总速、分轴速度和图像视场仍由调用方检查。
   const Vector3f candidate = (nominal + correction).normalized() * speed;
   if (!candidate.isAllFinite() || (candidate - target_velocity) * approach_axis <= .5f) {
     return result;

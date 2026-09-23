@@ -94,9 +94,8 @@ void DockGuidance::Run() {
 
   const uint64_t now_us = hrt_absolute_time();
 
-  // Keep the current camera command alive even before the first valid image.
-  // HIL and physical output providers can start after DockGuidance and would
-  // otherwise miss the single command published during initialization.
+  // 首帧到达前也定期重发相机俯仰命令：HIL 或实体输出设备可能晚于模块启动，
+  // 仅在初始化时发送一次会使后来接入的设备错过当前角度。
   if ((_param_dock_cam_pitch_variable.get() != 0) &&
       ((_last_camera_pitch_publish_us == 0) ||
        (now_us - _last_camera_pitch_publish_us >= CAMERA_SERVO_PUBLISH_INTERVAL_US))) {
@@ -143,15 +142,12 @@ void DockGuidance::Run() {
       handle_visual_loss(now_us, "vision timeout");
 
     } else if (_dock_mode_active && !_setpoint_valid) {
-      // Commander may need more than one work-queue cycle to leave the external
-      // mode. Keep refreshing a zero-velocity request until control ownership
-      // changes.
+      // Commander 退出外部模式可能跨多个工作队列周期；在控制权移交完成前持续请求零速度。
       publish_safe_velocity_setpoint(now_us);
 
     } else if (_dock_mode_active && _setpoint_valid) {
-      // Keep mc_pos_control supplied between camera frames. The visual watchdog
-      // above prevents a stale direction from being held after the configured
-      // timeout.
+      // 两帧之间刷新 mc_pos_control 的速度设定值；超过观测超时后，上面的看门狗
+      // 会转入视觉丢失处理，避免无限期沿旧方向飞行。
       publish_velocity_setpoint(now_us, _velocity_setpoint_ned,
                                 _yaw_setpoint_rad);
     }
@@ -192,16 +188,17 @@ void DockGuidance::Run() {
   _last_sample_us = sample_us;
   _last_observation_us = sample_us;
 
-  // 无目标或输入非法时，清空内部状态并明确发布 invalid，
-  // 使下游控制器可以立即放弃视觉引导。
+  // 无目标或输入非法时进入统一的视觉丢失处理：已运行的 Dock 可在宽限期内减速，
+  // 未入模或超过宽限期则明确发布 invalid，让 Commander 放弃视觉引导。
   if (!obs.valid || !std::isfinite(obs.offset_x) ||
       !std::isfinite(obs.offset_y)) {
     handle_visual_loss(now_us, "invalid observation");
     return;
   }
 
-  // One exposure timestamp for body attitude, own position AND mount command.
-  // Viztra timestamp_sample is reception time; DOCK_CAM_DLY is subtracted once.
+  // 同一个曝光时刻同时查询机体姿态、本机位置和云台命令历史。
+  // Viztra 的 timestamp_sample 表示接收时刻，只减一次 DOCK_CAM_DLY；
+  // 任一历史缺失就不以不同时刻的数据拼接出控制指令。
   Vector3f att_deg;
   Vector3f gyro_dps;
   _camera_time_aligned = false;
@@ -282,6 +279,8 @@ void DockGuidance::Run() {
   const bool relative_position_valid =
       obs.relative_position_valid && relative_position_ned.isAllFinite() &&
       (relative_position_ned.norm() > 0.05f) && relative_position_fresh;
+  // 可选的米制相对位置另验时效和数值；动态目标估计可使用经过标定的目标框尺寸，
+  // 但不会把只有角度的老版 Viztra 帧解释成已知距离。
   update_target_motion(obs, att_deg, los_yaw_deg, los_pitch_deg, _observation_exposure_us,
                        sample_camera_to_body);
   process_observation(los_yaw_deg, los_pitch_deg, relative_position_ned,
@@ -292,8 +291,8 @@ void DockGuidance::Run() {
 // ---------- 姿态/角速度延时缓冲 ----------
 
 void DockGuidance::push_delay_history(hrt_abstime timestamp) {
-  // Retain at most 100 Hz, but always refresh the newest state: a zero-delay
-  // image must not use the previous callback's attitude while the body turns.
+  // 历史采样率最多 100 Hz，但每次回调仍刷新最新槽位：零延迟图像必须能读取
+  // 当前姿态，不能在机体转动时误用前一次回调的姿态。
   vehicle_attitude_s att{};
   vehicle_angular_velocity_s av{};
 
@@ -321,6 +320,7 @@ void DockGuidance::push_delay_history(hrt_abstime timestamp) {
                            && Vector3f(lpos.vx,lpos.vy,lpos.vz).isAllFinite();
   if (local_valid && _position_seen && (lpos.xy_reset_counter != _xy_reset_counter
       || lpos.z_reset_counter != _z_reset_counter)) {
+    // EKF 原点重置会使历史位置与新坐标系不连续；清空动态目标估计和延时历史。
     _target_motion.reset();
     _target_motion_valid = false;
     _state_history.reset();
@@ -422,6 +422,7 @@ bool DockGuidance::get_delayed_state(hrt_abstime target_us,
 }
 
 void DockGuidance::reset_tracking_state() {
+  // 清理观测、滤波、捕获和末段状态；模式注册及故障锁存由调用方单独管理。
   _miss_correction = {};
   _observation_exposure_us = 0;
   _sample_camera_pitch_deg = NAN;
@@ -501,9 +502,8 @@ void DockGuidance::invalidate_setpoint(hrt_abstime timestamp,
 
   reset_tracking_state();
 
-  // Hold the last finite heading while publishing the final zero-velocity
-  // setpoint. Releasing yaw at the same instant as a mode failure creates an
-  // unnecessary heading step before Commander completes the fallback.
+  // 失效时先沿用最后一个有限的航向并发布零速度。若与模式故障同时释放航向，
+  // Commander 接管前可能额外产生一次机头跳变。
   _yaw_setpoint_rad = last_yaw_setpoint_rad;
   _setpoint_valid = false;
 
@@ -527,6 +527,7 @@ void DockGuidance::invalidate_setpoint(hrt_abstime timestamp,
 
 void DockGuidance::handle_visual_loss(hrt_abstime timestamp,
                                      const char *reason) {
+  // 动态末段先走自身的目标穿越和盲飞时限判定；静态末段沿用已缓存的整条 NED 速度向量。
   _miss_correction = {};
   _camera_time_aligned = false;
   _capture_schedule.reset();
@@ -534,8 +535,7 @@ void DockGuidance::handle_visual_loss(hrt_abstime timestamp,
     dynamic_terminal(timestamp, true);
     return;
   }
-  // Grace is only for an already-running Dock mode. While inactive, one bad
-  // observation must immediately block a new mode entry.
+  // 短暂宽限仅适用于已经运行的 Dock 模式；未入模时的坏帧必须立即阻止进入模式。
   if (!_dock_mode_active || !_setpoint_valid ||
       (_last_valid_observation_us == 0)) {
     invalidate_setpoint(timestamp, reason);
@@ -543,6 +543,7 @@ void DockGuidance::handle_visual_loss(hrt_abstime timestamp,
   }
 
   if (_stage == Stage::TERMINAL_DASH && _terminal_started_us != 0) {
+    // 末段短时失明只在总时长和盲飞时长均未超限时保留原速度；超限即锁存故障。
     const uint64_t maximum_terminal_time_us = static_cast<uint64_t>(
         math::constrain(_param_dock_terminal_max_time.get(), 0.1f, 10.0f) *
         1e6f);
@@ -588,6 +589,7 @@ void DockGuidance::handle_visual_loss(hrt_abstime timestamp,
                               : 0;
 
   if (age_us <= grace_us) {
+    // 普通视觉丢失期间逐步减速并保留日志有效标志；超过宽限期再宣告失效。
     if (!_vision_degraded) {
       PX4_WARN("dock: %s, grace period", reason);
     }
@@ -604,6 +606,7 @@ void DockGuidance::handle_visual_loss(hrt_abstime timestamp,
 }
 
 void DockGuidance::register_dock_mode(hrt_abstime now) {
+  // 向 Commander 注册外部 Dock 模式及其入模检查；request_id 用于匹配异步回复。
   register_ext_component_request_s request{};
   request.timestamp = now;
   request.request_id = _mode_request_id;
@@ -640,6 +643,7 @@ void DockGuidance::check_mode_registration() {
 }
 
 void DockGuidance::configure_dock_mode(hrt_abstime now) {
+  // 声明本模式使用速度、姿态和分配控制链，使 Commander 启用对应控制器。
   if (_mode_id < 0) {
     return;
   }
@@ -676,6 +680,7 @@ void DockGuidance::unregister_dock_mode() {
 
 void DockGuidance::reply_to_arming_check(
     const arming_check_request_s &request) {
+  // 只有当前视觉引导有效且没有锁存故障时，才允许进入/运行 Dock 模式。
   if (_arming_check_id < 0) {
     return;
   }
@@ -710,9 +715,8 @@ void DockGuidance::update_mode_state() {
       status.arming_state == vehicle_status_s::ARMING_STATE_ARMED,
       land.landed, land.timestamp, now);
 
-  // A real visual failure is latched so a still-selected Dock switch cannot
-  // bounce between Dock and RTL. The pilot clears the latch by deliberately
-  // selecting another mode before requesting Dock again.
+  // 真实视觉故障锁存后，保持选中 Dock 的开关不能让 Dock 与 RTL 来回切换；
+  // 驾驶员明确切换到其他模式后，才清除锁存并允许再次请求 Dock。
   if (_mode_fault_latched && (_mode_id >= 0) &&
       (status.nav_state_user_intention != static_cast<uint8_t>(_mode_id))) {
     _mode_fault_latched = false;
@@ -720,6 +724,7 @@ void DockGuidance::update_mode_state() {
   }
 
   if (active && !_dock_mode_active) {
+    // 入模时重置捕获计时；动态路径从当前实测速度过渡，起飞爬升期间禁止要求下降。
     _capture_schedule.reset();
     _startup_ray_time = 0;
     _startup_ray_rate.zero();
@@ -748,7 +753,7 @@ void DockGuidance::update_mode_state() {
           && Vector3f(local.vx,local.vy,local.vz).isAllFinite()) {
         _velocity_setpoint_ned = Vector3f(local.vx,local.vy,local.vz);
         if (_startup_climb) {
-          // Stop requesting descent immediately; actual braking remains with PX4.
+          // 立即停止请求下降；真实速度的制动仍由 PX4 下层控制完成。
           _velocity_setpoint_ned(2) = math::min(0.f, local.vz);
           if (_airborne && local.z_valid && std::isfinite(local.z)) {
             _startup_target_z = local.z - math::constrain(_param_dock_start_height.get(), 0.f, 100.f);
@@ -757,8 +762,8 @@ void DockGuidance::update_mode_state() {
       }
     }
 
-    // mc_pos_control requires a trajectory setpoint no older than the instant
-    // position control becomes active. Start with a zero-velocity request.
+    // mc_pos_control 需要不早于位置控制启用时刻的轨迹设定值。
+    // 静态路径以零速度起步，动态路径先沿用测得的本机速度以避免设定值阶跃。
     if (_param_dock_dyn_enable.get()) {
       publish_velocity_setpoint(now, _velocity_setpoint_ned, _yaw_setpoint_rad);
     } else {
@@ -790,6 +795,7 @@ void DockGuidance::update_mode_state() {
 void DockGuidance::publish_velocity_setpoint(hrt_abstime timestamp,
                                              const Vector3f &velocity_ned,
                                              float yaw_setpoint_rad) {
+  // 仅指定三维速度和航向；位置、加速度、加加速度留为 NAN，交给位置控制器处理。
   trajectory_setpoint_s trajectory{};
   trajectory.timestamp = timestamp;
 
@@ -812,6 +818,7 @@ void DockGuidance::publish_safe_velocity_setpoint(hrt_abstime timestamp) {
 }
 
 void DockGuidance::publish_degraded_setpoint(hrt_abstime timestamp) {
+  // 视觉宽限期按配置减速度缩短上一条速度向量，不再沿失去的目标重新规划方向。
   const float dt_s =
       (_last_control_update_us > 0 && timestamp > _last_control_update_us)
           ? math::constrain((timestamp - _last_control_update_us) * 1e-6f,
@@ -838,6 +845,7 @@ void DockGuidance::publish_degraded_setpoint(hrt_abstime timestamp) {
 }
 
 void DockGuidance::publish_terminal_dash_setpoint(hrt_abstime timestamp) {
+  // 静态末段盲飞保持此前缓存的整条 NED 命令；本机速度失效时不能继续盲飞。
   vehicle_local_position_s lpos{};
   const bool have_local_position = _local_pos_sub.copy(&lpos);
   const bool velocity_fresh =
@@ -869,6 +877,8 @@ void DockGuidance::publish_terminal_dash_setpoint(hrt_abstime timestamp) {
 
 void DockGuidance::publish_guidance_status(hrt_abstime timestamp, bool valid,
                                            bool degraded) {
+  // 将控制阶段、几何观测、预测误差和约束结果统一写入日志话题。
+  // valid/degraded 描述当前指令可用性，prediction_valid 只描述穿越预测的可信度。
   dock_guidance_setpoint_s status{};
   status.timestamp = timestamp;
   status.closing_speed_m_s = _closing_speed_ms;
@@ -967,9 +977,8 @@ void DockGuidance::update_camera_pitch_servo(float camera_pitch_error_deg,
     effective_error = camera_pitch_error_deg + deadband;
   }
 
-  // This is intentionally a slow body-relative pointing adjustment. It uses
-  // only sustained image error; vehicle attitude and angular rate are not fed
-  // back to the servo, so the position servo is never used as a stabilizer.
+  // 相机俯仰只按持续图像误差做慢速机体相对调整；这里不反馈机体姿态/角速度，
+  // 因而不能把位置舵机误用为稳定云台。
   const float pitch_rate_deg_s = math::constrain(
       effective_error / time_constant, -maximum_rate, maximum_rate);
   _camera_mount_pitch_deg =
@@ -999,12 +1008,13 @@ void DockGuidance::publish_camera_pitch_servo(hrt_abstime timestamp_sample) {
   controls.control[gimbal_controls_s::INDEX_YAW] = NAN;
   _gimbal_controls_pub.publish(controls);
   _last_camera_pitch_publish_us = controls.timestamp;
-  // Record when the command was actually issued, never backdate it to the
-  // image which caused it. Hardware transit/mechanical lag is not feedback.
+  // 历史记录采用命令实际发布时刻，不回填到触发命令的图像时刻；
+  // 硬件传输和机械滞后没有反馈，不能在历史中假装已补偿。
   _camera_history.record(controls.timestamp, _camera_mount_pitch_deg);
 }
 
 void DockGuidance::set_stage(Stage stage) {
+  // 仅在阶段变化时打日志，避免每帧重复输出，同时保留 ULog 可对照的阶段值。
   if (_stage == stage) {
     return;
   }
@@ -1059,12 +1069,9 @@ void DockGuidance::set_stage(Stage stage) {
 Vector3f DockGuidance::compute_image_tracking_velocity(
     const Vector3f &approach_direction,
     const Vector3f &camera_forward_ned) const {
-  // Moving exactly along LOS preserves the earth-frame LOS, but mc_pos_control
-  // must tilt the fixed camera while accelerating. Translate perpendicular to
-  // LOS so the target bearing follows that camera motion instead of walking out
-  // of the image. Body yaw already aligns the horizontal camera bearing, so
-  // remove the error component that yaw can correct and leave translation to
-  // handle the remaining (normally vertical) image error.
+  // 单纯沿视线飞行虽能保持地理系 LOS，机体加速倾斜却会让固定相机内的目标偏移。
+  // 因此增加垂直 LOS 的平移纠偏；水平可由机头偏航修正的分量先剔除，
+  // 剩余图像误差（通常为俯仰方向）才占用平移速度预算。
   Vector3f pointing_error =
       camera_forward_ned -
       approach_direction * (approach_direction * camera_forward_ned);
@@ -1082,9 +1089,8 @@ Vector3f DockGuidance::compute_image_tracking_velocity(
   const float gain = math::constrain(_param_dock_img_p.get(), 0.05f, 5.0f);
   Vector3f tracking_velocity{};
 
-  // A calibrated, uncropped target box gives a conservative range even while
-  // target velocity is still uncertain. This is sensor-derived geometry, not
-  // the optional relative-position extension of the Viztra frame.
+  // 经标定且未裁剪的目标框可给出保守距离，即使目标速度尚未收敛也可用于图像纠偏。
+  // 这是传感器几何估计，不能当作 Viztra 可选米制相对位置字段本身。
   const bool box_range_available = _param_dock_dyn_enable.get() &&
                                    _target_motion.fresh_range(hrt_absolute_time()) &&
                                    _estimated_relative.isAllFinite() &&
@@ -1097,9 +1103,8 @@ Vector3f DockGuidance::compute_image_tracking_velocity(
         -math::max(image_range, 0.0f) * gain * pointing_error;
 
   } else {
-    // Legacy 21-byte Viztra frames contain a valid image angle but no target
-    // range. Keep image tracking available so Dock mode can be entered and the
-    // target can be centered, but use a bounded angular-only correction.
+    // 老版 21 字节 Viztra 帧只有图像角度而没有目标距离：仍允许入模并居中，
+    // 但纠偏只能用受限的角度模型，不能假定真实平移距离。
     const float pointing_error_norm = pointing_error.norm();
 
     if (pointing_error_norm > 0.001f) {
@@ -1150,9 +1155,8 @@ DockGuidance::compose_tracked_velocity(const Vector3f &approach_direction,
     return Vector3f{};
   }
 
-  // The correction is perpendicular to LOS. Reserve part of the existing
-  // speed budget for image tracking, so MAX_SPEED still means the magnitude of
-  // the final 3-D velocity vector and not LOS speed plus an unbounded addition.
+  // 图像纠偏垂直于 LOS，并占用同一个总速度预算。
+  // 因此 MAX_SPEED 指最终三维速度模长，而不是 LOS 速度再叠加不限幅的纠偏。
   Vector3f correction =
       tracking_velocity -
       approach_direction * (approach_direction * tracking_velocity);
@@ -1172,11 +1176,8 @@ DockGuidance::compose_tracked_velocity(const Vector3f &approach_direction,
                       0.0f));
   Vector3f result = approach_direction * closing_speed + correction;
 
-  // A transverse correction around a steep LOS can otherwise reverse the
-  // horizontal component even though the 3-D dot product remains positive.
-  // Losing horizontal closing direction caused the large +/- pitch commands
-  // seen in flight. Retain cross-track correction but never command motion
-  // backwards along the horizontal target bearing.
+  // LOS 较陡时，横向纠偏可能在三维点积仍为正的情况下反转水平接近分量，
+  // 曾导致大幅正负俯仰命令。保留横向纠偏，但不能沿目标水平朝向倒飞。
   Vector2f horizontal_approach(approach_direction(0), approach_direction(1));
   const float horizontal_norm = horizontal_approach.norm();
 
@@ -1198,6 +1199,8 @@ DockGuidance::compose_tracked_velocity(const Vector3f &approach_direction,
 float DockGuidance::maximum_approach_speed(
     const Vector3f &approach_direction,
     bool legacy_approach_enabled) const {
+  // 把总速度、水平速度、上升/下降速度上限投影到本次接近方向；
+  // 无米制距离的旧帧如被允许运行，还要施加单独的保守速度上限。
   float controller_limited_speed = 100.0f;
   const float horizontal_direction =
       Vector2f(approach_direction(0), approach_direction(1)).norm();
@@ -1236,8 +1239,8 @@ float DockGuidance::maximum_approach_speed(
 }
 
 void DockGuidance::constrain_velocity_setpoint(Vector3f &velocity_ned) const {
-  // Apply all mc_pos_control component constraints with one common scale. This
-  // preserves the image-tracking direction instead of clipping axes separately.
+  // 所有 mc_pos_control 分量约束共用一个缩放比例，保持图像纠偏后的方向；
+  // 若逐轴截断，最终飞行方向可能偏离目标。
   float scale = 1.0f;
   const float horizontal_speed =
       Vector2f(velocity_ned(0), velocity_ned(1)).norm();
@@ -1262,6 +1265,7 @@ void DockGuidance::constrain_velocity_setpoint(Vector3f &velocity_ned) const {
 void DockGuidance::limit_velocity_setpoint_slew(
     const Vector3f &previous_velocity_ned, float dt_s, float acceleration,
     float deceleration, bool emergency_recovery) {
+  // 限制相邻速度设定值的向量差；减速/反向使用减速度，紧急视场恢复允许更快制动。
   if (!previous_velocity_ned.isAllFinite() ||
       !_velocity_setpoint_ned.isAllFinite()) {
     _velocity_setpoint_ned.zero();
@@ -1444,8 +1448,8 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
   _miss_correction = {};
   const Vector3f previous_velocity_setpoint_ned = _velocity_setpoint_ned;
 
-  // The camera-frame errors define image safety, while the filtered NED LOS
-  // defines the direction of the velocity vector sent to mc_pos_control.
+  // 相机系误差用于判断图像边界是否安全；滤波后的 NED 视线决定交给
+  // mc_pos_control 的速度方向，两个坐标系的作用不能混用。
   const Dcmf R_ned_body(Eulerf(math::radians(att_deg(0)),
                                math::radians(att_deg(1)),
                                math::radians(att_deg(2))));
@@ -1468,6 +1472,7 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
       math::constrain(_param_dock_fov_soft.get(), 0.15f, hard_ratio - 0.05f);
   const float align_ratio =
       math::constrain(_param_dock_fov_align.get(), 0.05f, soft_ratio - 0.05f);
+  // 视场阈值强制满足 ALIGN < SOFT < HARD：先减速，再进入恢复，硬边界持续超时触发紧急恢复。
   const float dt_s =
       (_last_control_update_us > 0 && now > _last_control_update_us)
           ? math::constrain((now - _last_control_update_us) * 1e-6f, 0.002f,
@@ -1509,7 +1514,7 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
     approach_direction = _estimated_relative.normalized();
   }
   if (_param_dock_dyn_enable.get() && _stage == Stage::TERMINAL_DASH) {
-    // Do not turn back toward a target that has crossed the committed plane.
+    // 末段已锁定穿越平面，目标越过平面后不能反向掉头追赶。
     approach_direction = _terminal_direction;
   }
 
@@ -1524,9 +1529,8 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
   _tracking_velocity_ned =
       compute_image_tracking_velocity(approach_direction, camera_forward_ned);
   if (_param_dock_cam_pitch_variable.get() != 0) {
-    // The mount handles small pitch errors. As the target approaches the soft
-    // image boundary, add bounded aircraft translation: the mount may be too
-    // slow or at its travel limit. Do not discard image correction altogether.
+    // 俯仰舵机先处理小误差；接近软视场边界时逐步加入机体平移，
+    // 以应对舵机速度不足或到达行程端，不能完全丢弃图像纠偏。
     const float assist_start = .5f * align_ratio;
     const float assist = math::constrain((_fov_pitch_ratio - assist_start) /
         math::max(soft_ratio - assist_start, .05f), 0.f, 1.f);
@@ -1569,9 +1573,8 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
       -maximum_yaw_delta, maximum_yaw_delta);
   _yaw_setpoint_rad = matrix::wrap_pi(previous_yaw_setpoint + yaw_delta);
 
-  // Before the external mode owns control, only validate and publish status.
-  // Starting the acceleration timer while another mode is active would create
-  // an immediate high-speed setpoint on mode entry.
+  // 外部模式尚未取得控制权时只验证观测并发布状态，不启动加速计时；
+  // 否则入模瞬间可能直接给出已累计的高速设定值。
   if (!_dock_mode_active) {
     set_stage(Stage::ALIGN);
     _commanded_speed_ms = 0.0f;
@@ -1607,6 +1610,7 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
   }
 
   if (terminal_enabled && _stage == Stage::TERMINAL_DASH) {
+    // 静态目标末段不能无限延续：即使一直看到目标，也必须满足总时长上限。
     const uint64_t maximum_terminal_time_us = static_cast<uint64_t>(
         math::constrain(_param_dock_terminal_max_time.get(), 0.1f, 10.0f) *
         1e6f);
@@ -1618,6 +1622,8 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
     }
 
   } else if (terminal_enabled) {
+    // 距离或图像目标尺寸满足条件并持续一段确认时间后，才缓存速度进入末段。
+    // 图像尺寸是近距离候选信号，本身不提供米制相对位置。
     const float terminal_distance = math::constrain(
         _param_dock_terminal_distance.get(), 0.0f, 100.0f);
     const float terminal_size = math::constrain(
@@ -1696,9 +1702,8 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
 
   const bool legacy_approach_enabled = _param_dock_legacy_approach.get() != 0;
 
-  // When legacy approach is disabled, loss of range during an approach returns
-  // to ALIGN. If it is enabled, angle tracking and FOV protection continue but
-  // terminal distance braking remains unavailable until range returns.
+  // 未开启旧帧接近时，接近途中丢失距离就先退回恢复/对准；开启后仍维持
+  // 角度跟踪和视场保护，但距离恢复前无法使用按距离计算的末段制动。
   if ((_stage != Stage::TERMINAL_DASH) && !legacy_approach_enabled &&
       !_relative_position_valid &&
       (_stage != Stage::ALIGN) && (_stage != Stage::RECOVERY) &&
@@ -1718,6 +1723,7 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
        (fabsf(_los_c_deg(1)) <= math::max(servo_deadband, 1.0f)));
 
   if (_stage == Stage::ALIGN) {
+    // 对准阶段只做限速图像纠偏，距离/旧帧许可与视场、舵机条件持续成立后再加速。
     _commanded_speed_ms = 0.0f;
     _velocity_setpoint_ned = _tracking_velocity_ned;
     const float alignment_speed =
@@ -1760,6 +1766,7 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
     constrain_velocity_setpoint(_velocity_setpoint_ned);
 
   } else if (_stage == Stage::RECOVERY) {
+    // 软边界恢复：先衰减接近速度；速度接近零且图像稳定后回到对准阶段。
     _commanded_speed_ms =
         math::max(_commanded_speed_ms - deceleration * dt_s, 0.0f);
 
@@ -1802,6 +1809,7 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
     }
 
   } else if (_stage == Stage::EMERGENCY_RECOVERY) {
+    // 硬边界恢复使用双倍减速度；不在视场未恢复时重新加速。
     const float emergency_deceleration = 2.0f * deceleration;
     _commanded_speed_ms = math::max(
         _commanded_speed_ms - emergency_deceleration * dt_s, 0.0f);
@@ -1827,15 +1835,13 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
 
   } else {
     _recovery_stable_since_us = 0;
-    // Apply one common speed limit so downstream per-axis clipping cannot
-    // rotate the approach direction.
+    // 接近速度先受统一上限约束，避免下层逐轴裁剪后旋转飞行方向。
     const float maximum_speed =
         maximum_approach_speed(approach_direction, legacy_approach_enabled);
 
     float desired_speed = maximum_speed;
 
-    // Reduce approach speed continuously as the target consumes the remaining
-    // image margin. This prevents the old accelerate/recovery limit cycle.
+    // 目标占用的图像余量越少，接近速度越连续下降，避免加速与恢复阶段来回振荡。
     if (_fov_ratio > align_ratio) {
       const float fov_speed_scale = math::constrain(
           (soft_ratio - _fov_ratio) / (soft_ratio - align_ratio), 0.0f, 1.0f);
@@ -1931,8 +1937,8 @@ void DockGuidance::update_parameters() {
   const bool camera_pitch_was_variable =
       _param_dock_cam_pitch_variable.get() != 0;
   const bool dynamic_was_enabled = _param_dock_dyn_enable.get() != 0;
-  // A parameter_update notification is global and may carry no Dock changes.
-  // Preserve observer/controller history unless the observation model changes.
+  // parameter_update 是全局通知，不一定涉及 Dock 参数；只有观测几何或控制路径
+  // 真的变化才重置滤波和捕获历史，避免无关参数更新打断引导。
   const float old_observation_config[] = {
       _param_dock_cam_roll.get(), _param_dock_cam_pitch.get(), _param_dock_cam_yaw.get(),
       float(_param_dock_cam_dly.get()), float(_param_dock_cam_pitch_variable.get()),
@@ -1971,8 +1977,8 @@ void DockGuidance::update_parameters() {
     _startup_ray_time = 0;
     _startup_ray_rate.zero();
     if (_dock_mode_active && _stage != Stage::PASS_PREDICTED) {
-      // Switching sensor geometry/control law during terminal flight cannot
-      // silently restart capture. Preserve the existing fault handoff.
+      // 末段飞行中切换传感器几何或控制律不能静默重启捕获；
+      // 保持原有故障移交路径，要求重新入模。
       if (_stage == Stage::TERMINAL_DASH || dynamic_changed) {
         invalidate_setpoint(hrt_absolute_time(), "dynamic observation configuration changed");
       } else {
@@ -1989,8 +1995,7 @@ void DockGuidance::update_parameters() {
                                         _param_dock_cam_pitch_max.get());
 
   if (!camera_pitch_is_variable) {
-    // Preserve the original fixed-camera behavior exactly, including mounts
-    // whose static pitch lies outside the servo-only limits.
+    // 固定相机沿用配置角度；舵机专用的行程上下限不能截断固定安装角。
     _camera_mount_pitch_deg = _param_dock_cam_pitch.get();
     _camera_pitch_initialized = true;
 
@@ -2005,8 +2010,7 @@ void DockGuidance::update_parameters() {
   }
 
   if (camera_pitch_is_variable || camera_pitch_was_variable) {
-    // When disabling at runtime, send the configured fixed angle once so the
-    // physical camera and the fixed-camera transform remain consistent.
+    // 运行中关闭俯仰舵机时再发布一次固定安装角，保持实体相机与坐标变换一致。
     publish_camera_pitch_servo(hrt_absolute_time());
   }
   if (!camera_pitch_is_variable) {

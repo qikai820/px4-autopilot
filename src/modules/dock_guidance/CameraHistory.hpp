@@ -6,9 +6,8 @@
 
 namespace dock_motion {
 
-// Bound retained history rate without making the latest state stale. Callers
-// refresh all state fields at the returned slot on EVERY callback. Between
-// retained samples the newest slot is replaced, not silently skipped.
+// 延时状态历史的槽位索引：保留采样率受 interval 限制，但每次回调仍刷新最新槽位。
+// 间隔未满时覆盖最新槽位，避免零延迟观测读到旧姿态；时间倒退则清空历史。
 template<int Capacity> class SampleHistoryIndex {
 public:
   explicit SampleHistoryIndex(uint64_t interval) : _interval(interval) {}
@@ -33,9 +32,9 @@ private:
   int _next{0}, _count{0};
 };
 
-// Command history, NOT servo feedback. A published command applies from its
-// publication time until the next command; never interpolate a future command
-// backwards into an older image. Unchanged keepalives do not consume history.
+// 保存相机俯仰命令历史，不代表舵机真实反馈。命令从发布时刻持续有效直到下一条命令，
+// 查询旧图像只能读当时已发布的命令，不能把未来命令反向插值到曝光时刻。
+// 角度未变化的保活命令不额外占用历史槽位。
 template<int Capacity> class CameraHistory {
 public:
   void reset() { _next = _count = 0; }
@@ -75,6 +74,7 @@ private:
 };
 
 inline bool exposure_time(uint64_t received, uint64_t delay, uint64_t &exposure) {
+  // Viztra 时间戳为接收时刻；仅在可减去标定延迟时给出合法曝光时刻。
   if (!received || received <= delay) { return false; }
   exposure = received - delay;
   return true;

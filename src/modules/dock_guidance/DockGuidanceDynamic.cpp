@@ -7,6 +7,8 @@ using matrix::Eulerf;
 using matrix::Vector3f;
 
 bool DockGuidance::delayed_position(hrt_abstime target, Vector3f &position) const {
+  // 在曝光时刻插值本机 NED 位置；目标运动估计必须使用与图像同一时刻的机位。
+  // 历史未覆盖、定位无效或相邻采样间隔过大时拒绝插值。
   if (!target || _state_history.count() == 0) {
     return false;
   }
@@ -38,6 +40,9 @@ bool DockGuidance::delayed_position(hrt_abstime target, Vector3f &position) cons
 void DockGuidance::update_target_motion(const viztra_observation_s &obs, const Vector3f &att_deg,
                                         float yaw_deg, float pitch_deg, hrt_abstime exposure,
                                         const Dcmf &sample_camera_to_body) {
+  // 动态估计先把相机视线转到 NED，再选取可用的米制量测：
+  // 优先采用帧内相对位置；否则仅用已标定实际尺寸且未被画面裁剪的目标框推算距离。
+  // 只有角度时可更新已初始化滤波器的横向信息，但不能凭角度初始化距离。
   if (!_param_dock_dyn_enable.get()) {
     return;
   }
@@ -72,10 +77,12 @@ void DockGuidance::update_target_motion(const viztra_observation_s &obs, const V
   const float fy =
       ry / (2.f * tanf(math::radians(math::constrain(_param_dock_fov_y.get(), 10.f, 80.f)) * .5f));
   if (metric) {
+    // 相对位置为真正的米制观测；其长度与方向同时覆盖图像视线近似。
     range = measured_relative.norm();
     los = measured_relative / range;
     sigma = math::max(.2f, range * .02f);
   } else {
+    // 框碰到图像边缘会低估可见尺寸并高估距离，故必须检查四边均未裁剪。
     const bool uncropped =
         camera_los(0) > .2f &&
         fabsf(fx * camera_los(1) / camera_los(0)) + .5f * obs.target_width_px < .5f * rx - 2.f &&
@@ -86,7 +93,8 @@ void DockGuidance::update_target_motion(const viztra_observation_s &obs, const V
                               fy, camera_los(0), _param_dock_size_error.get(), range, sigma);
   }
   if (exposure) {
-    // Local-position noise must not masquerade as target motion.
+    // 本机位置噪声会直接进入目标位置差分；量测方差必须纳入 EKF 位置误差，
+    // 避免把本机定位抖动识别为目标运动。
     const float own_error = std::isfinite(local.eph) && std::isfinite(local.epv)
                                 ? math::max(.1f, math::max(local.eph, local.epv))
                                 : 5.f;
@@ -98,7 +106,7 @@ void DockGuidance::update_target_motion(const viztra_observation_s &obs, const V
                           _param_dock_est_accel.get(),
                           math::constrain(_param_dock_est_max_speed.get(), 1.f, 100.f));
     if (_target_motion.resets() != resets_before) {
-      _estimator_reset_reason = 3; // observation gap or implausible state
+      _estimator_reset_reason = 3; // 观测间断或估计状态不合理。
     }
   }
   if (_target_motion.initialized()) {
@@ -111,6 +119,7 @@ void DockGuidance::update_target_motion(const viztra_observation_s &obs, const V
 }
 
 dock_motion::Limits DockGuidance::dynamic_limits() const {
+  // 同时传入总速、水平、上升和下降上限，后续按最终三维速度组合检查可行性。
   return {math::constrain(_param_dock_vel_max.get(), 0.f, 100.f),
           math::max(_param_mpc_xy_vel_max.get(), 0.f),
           math::max(_param_mpc_z_vel_max_up.get(), 0.f),
@@ -120,6 +129,9 @@ dock_motion::Limits DockGuidance::dynamic_limits() const {
 void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vector3f &previous,
                                            const Dcmf &camera_to_ned, float dt, float align, float soft, bool hard,
                                            hrt_abstime now) {
+  // 动态路径将目标速度跟随、图像纠偏、沿目标视线的闭合速度叠加，
+  // 最后统一经过速度/加速度/加加速度和预测视场约束。
+  // trusted 需要新鲜的米制目标状态；部分速度跟随可更早启用，但不能提前放行高速闭合。
   if (_stage == Stage::TERMINAL_DASH) {
     if (!dynamic_terminal(now, false)) {
       return;
@@ -144,8 +156,8 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
   if (correction.norm() > correction_cap && correction.norm() > .001f) {
     correction *= correction_cap / correction.norm();
   }
-  // Partial following is allowed while metric velocity converges. Uncertain
-  // components fade to zero; active closure still needs the full estimate.
+  // 米制速度尚在收敛时允许有限跟随：不确定分量逐渐衰减；
+  // 主动向目标闭合仍必须等待完整目标状态可信。
   Vector3f following =
       _airborne ? _target_motion.following_velocity(now, _param_dock_est_velocity_error.get())
                 : Vector3f{};
@@ -154,6 +166,8 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
     correction(2) = 0.f;
   }
   const Vector3f base = following + correction;
+  // 以完整的 base + 闭合速度求交可行域；跟随的竖直分量可能被闭合分量抵消，
+  // 不能先单独裁剪 base 再算剩余预算。
   _dynamic_max_closure = trusted ? dock_motion::closing_budget(
                                        base, direction, limits,
                                        pursuit_limit)
@@ -178,8 +192,8 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
                                  : dock_motion::clamp((soft - _fov_ratio) / (soft - align), 0.f, 1.f);
     startup_vz = dock_motion::height_capture_velocity(remaining, local.vz, limits.up,
         deceleration, _param_dock_dynamic_jerk.get(), fov_scale);
-    // Height completion is independent of target observability and image
-    // alignment. Once complete, the next stage may still be bounded capture.
+    // 起始高度完成只取决于高度和爬升速度；目标可观测性与图像对准另行判定。
+    // 完成爬升后仍可能先进入受限捕获，而不是立即高速追踪。
     if (_startup_climb) {
       if (_startup_height_reached && fabsf(local.vz) <= .5f) {
         if (!_startup_settled_since) { _startup_settled_since = now; }
@@ -203,6 +217,8 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
     _dynamic_closure = _dynamic_max_closure = 0.f;
     _dynamic_reachable = false;
   } else if (_stage != Stage::TERMINAL_DASH) {
+    // 视场越界优先恢复；目标速度不可信时保留 TRACK_CAPTURE，
+    // 只有目标跟随误差、LOS 角速度和对准时间共同满足条件才放行加速。
     if (hard) {
       set_stage(Stage::EMERGENCY_RECOVERY);
       _aligned_since_us = 0;
@@ -216,8 +232,7 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
       const Vector3f relative_tracking = _velocity_ned - base;
       const float along = relative_tracking * direction;
       const float across = (relative_tracking - direction * along).norm();
-      // A capture already closing along LOS need not brake to zero merely
-      // because metric velocity confidence has just become available.
+      // 捕获阶段若已经稳定沿 LOS 闭合，目标速度刚达到可信阈值时无需先刹停再加速。
       if (_capture_schedule.ready() && _fov_ratio <= align && along > .1f &&
           across <= _param_dock_match_error.get() &&
           _los_e_dot.norm() < math::radians(5.f)) {
@@ -262,6 +277,8 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
       const float pass_time =
           ttc + _param_dock_pass_distance.get() / math::max(actual_closure, .5f);
       const float miss = (_estimated_relative - relative_velocity * ttc).norm();
+      // 穿越许可同时检查：接近时间、预测横向误差加两倍位置不确定度、
+      // 当前视场与距离，并要求这些条件持续满足确认时间。
       const bool candidate =
           _param_dock_terminal_enable.get() && _fov_ratio <= align && std::isfinite(ttc) &&
           pass_time < .8f * _param_dock_terminal_max_time.get() &&
@@ -320,10 +337,8 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
       const float range_lower = _estimated_relative.norm() - 2.f * _target_position_error;
       const bool pass_through_latched = _param_dock_terminal_enable.get() &&
                                         _capture_schedule.ready();
-      // A terminal pass-through is expressly a pursuit maneuver: start at
-      // the available closing-speed limit while the metric target filter is
-      // still maturing. FOV prediction, vehicle-axis limits, acceleration and
-      // jerk are applied below before the velocity is published.
+      // 末段穿越属于追击动作：米制目标速度尚未完全收敛时，可用已确认的
+      // 几何和图像证据争取可用闭合速度；发布前仍会检查视场、分轴速度、加速度和加加速度。
       const float initial_capture_limit = _param_dock_terminal_enable.get()
                                           ? pursuit_limit
                                           : _param_dock_capture_speed.get();
@@ -346,16 +361,15 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
       _capture_speed_limit = capture_limit;
       const float capture_scale = hard ? 0.f : dock_motion::clamp(
           (soft - _fov_ratio) / (soft - align), 0.f, 1.f);
-      // Allocate against the actual sum before any uniform speed scaling. A
-      // climbing capture can cancel a downward partial-following component.
+      // 在完整目标速度和纠偏合成向量上分配闭合预算，再统一缩放速度；
+      // 爬升捕获可能抵消部分向下的目标跟随分量。
       const float budget = dock_motion::closing_budget(desired, capture_direction, limits,
           capture_limit);
       _capture_command = capture_direction * (budget * capture_scale);
       desired += _capture_command;
-      // The 10 m startup height is an initial acquisition target, not a
-      // permanent 1 m/s vertical approach limit. Release only after altitude
-      // capture and sustained, fresh geometric/image evidence. Velocity
-      // confidence still independently gates target feedforward/terminal entry.
+      // 起始高度只是初次捕获目标，不是永久的竖直速度限制。
+      // 高度捕获且几何/图像证据持续新鲜后解除高度保持；目标速度可信度仍单独
+      // 决定速度前馈和末段穿越能否启用。
       if (!_startup_climb && _capture_schedule.ready()) {
         _startup_height_hold = false;
       }
@@ -368,9 +382,8 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
   if (_startup_climb && _airborne) {
     desired(2) = startup_vz;
   } else if (_startup_height_hold && _airborne) {
-    // After startup, bounded vertical tracking advances a position reference.
-    // A zero requested vertical speed now actually holds altitude, including
-    // slow local-position drift. Limit accumulated lag to avoid windup.
+    // 起始爬升结束后，有限的竖直速度前馈逐步移动高度参考点。
+    // 当前馈为零时仍能抵消缓慢位置漂移；参考点与当前位置距离限幅以防积分积累。
     const float vertical_feedforward = math::constrain(desired(2), -1.f, 1.f);
     _startup_target_z = math::constrain(_startup_target_z + vertical_feedforward * dt,
         height_local.z - 2.f, height_local.z + 2.f);
@@ -382,9 +395,8 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
     }
   }
   desired = dock_motion::constrained(desired, limits);
-  // Correct the predicted three-dimensional miss before the existing planner.
-  // Camera centering/FOV retain priority, and uncertain capture is not promoted
-  // to metric guidance. The committed terminal plane remains unchanged.
+  // 在最终速度规划前修正预测的三维穿越误差；视场/居中约束仍具有优先权。
+  // 不可信的捕获不会被提升为米制引导，已锁定的末段平面方向也不改变。
   const bool approach_stage = _stage == Stage::ACCELERATE ||
       _stage == Stage::MAX_SPEED_APPROACH || _stage == Stage::TERMINAL_BRAKE ||
       _stage == Stage::TERMINAL_DASH;
@@ -398,8 +410,8 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
     if (_miss_correction.valid) {
       const Vector3f nominal = desired;
       const Vector3f limited = dock_motion::constrained(_miss_correction.velocity, limits);
-      // An axis limit can scale the whole vector below the target's speed.
-      // Keep the feasible nominal command if this correction would stop closure.
+      // 分轴限速可能把修正后的整条速度缩至低于目标速度；若因此失去闭合能力，
+      // 保留原先可行的指令。
       if ((limited - _target_velocity) * direction > .5f) { desired = limited; }
       _miss_correction.velocity = desired;
       _miss_correction.correction = desired - nominal;
@@ -421,8 +433,7 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
     }
     _startup_previous_ray = ray;
     _startup_ray_time = now;
-    // Conservative depth affects only the short-horizon translation prediction;
-    // image drift and camera-tilt prediction do not require metric target validity.
+    // 保守距离只影响短时平移预测；图像漂移和机体倾斜预测不依赖可信米制距离。
     const float range = _target_motion.initialized() && _estimated_relative.isAllFinite()
                           && std::isfinite(_target_position_error)
                         ? math::max(5.f, _estimated_relative.norm() - 2.f * _target_position_error) : 5.f;
@@ -437,7 +448,7 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
     _predicted_fov_ratio = plan.predicted_fov;
   }
   _commanded_speed_ms = _velocity_setpoint_ned.norm();
-  // Preserve the existing ground-speed diagnostic; relative speed has its own field.
+  // 地速与相对目标的闭合速度分别记录，避免把两者混作同一个性能指标。
   _closing_speed_ms = _velocity_ned * direction;
   if (_stage == Stage::TERMINAL_DASH) {
     _terminal_velocity_ned = _velocity_setpoint_ned;
@@ -448,6 +459,8 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
 }
 
 bool DockGuidance::dynamic_terminal(hrt_abstime now, bool blind) {
+  // 动态末段每次都重验本机定位、目标估计、穿越平面和总时长。
+  // blind 为真时只允许在观测年龄限制内沿最后的末段速度继续，不能凭旧目标状态无限追踪。
   if (blind) { _miss_correction = {}; }
   vehicle_local_position_s local{};
   if (!_airborne || !_target_motion.initialized() || !_local_pos_sub.copy(&local) ||
@@ -480,7 +493,7 @@ bool DockGuidance::dynamic_terminal(hrt_abstime now, bool blind) {
     if (!_terminal_blind_since_us) {
       _terminal_blind_since_us = now;
     }
-    // Bound the actual age of supporting data, not only time since watchdog firing.
+    // 限制支撑估计的真实观测年龄，而不是只计算看门狗第一次触发后的经过时间。
     if (_target_motion.age(now) > math::constrain(_param_dock_terminal_blind.get(), .05f, 3.f)) {
       invalidate_setpoint(now, "dynamic terminal observation age limit");
       return false;
@@ -490,6 +503,7 @@ bool DockGuidance::dynamic_terminal(hrt_abstime now, bool blind) {
     return false;
   }
   if (pass == dock_motion::PassState::Predicted) {
+    // 已预测越过锁定平面时转入减速保持；这只是几何判定，并非实体接触确认。
     set_stage(Stage::PASS_PREDICTED);
     publish_predicted_pass(now);
     return false;
@@ -507,6 +521,7 @@ bool DockGuidance::dynamic_terminal(hrt_abstime now, bool blind) {
 }
 
 void DockGuidance::publish_predicted_pass(hrt_abstime now) {
+  // 预测越过后逐步衰减当前速度设定值；继续刷新轨迹话题，等待其他模式接管。
   vehicle_local_position_s local{};
   if (!_local_pos_sub.copy(&local) || !local.v_xy_valid || !local.v_z_valid ||
       now < local.timestamp || now - local.timestamp > 500_ms ||

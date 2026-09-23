@@ -64,6 +64,9 @@
 
 using namespace time_literals;
 
+// Dock 模式的视觉引导入口：以曝光时刻对齐的 Viztra 观测估计目标方位，
+// 再向 mc_pos_control 发布 NED 速度和机头航向设定值。
+// 动态目标估计/捕获规划放在 DockGuidanceDynamic.cpp；这里同时保留静态目标路径。
 class DockGuidance : public ModuleBase<DockGuidance>,
                      public ModuleParams,
                      public px4::ScheduledWorkItem {
@@ -86,6 +89,10 @@ private:
   static constexpr uint32_t WATCHDOG_INTERVAL_US = 10_ms;
   static constexpr uint32_t CAMERA_SERVO_PUBLISH_INTERVAL_US = 50_ms;
 
+  // 阶段值也写入 dock_guidance_setpoint，供日志和地面站定位控制分支。
+  // ALIGN 先居中，ACCELERATE/MAX_SPEED_APPROACH 接近，TERMINAL_BRAKE 按距离或视场减速；
+  // RECOVERY/EMERGENCY_RECOVERY 用于视场保护，TERMINAL_DASH 是有时限的末段穿越。
+  // 动态目标另外使用 STARTUP_CLIMB、TRACK_CAPTURE 和 PASS_PREDICTED。
   enum class Stage : uint8_t {
     NONE = 0,
     ALIGN = 1,
@@ -100,14 +107,19 @@ private:
     TRACK_CAPTURE = 10
   };
 
+  // 调度入口：处理注册、模式状态、看门狗和新视觉帧；新轨迹通常由有效帧计算，
+  // 视觉丢失和已预测穿越期间还会独立刷新减速/保持命令。
   void Run() override;
   void update_parameters();
+  // 对 Commander 注册外部模式并保持配置；是否真正取得控制权以 nav_state 为准。
   void register_dock_mode(hrt_abstime now);
   void check_mode_registration();
   void configure_dock_mode(hrt_abstime now);
   void unregister_dock_mode();
   void reply_to_arming_check(const arming_check_request_s &request);
   void update_mode_state();
+  // 向位置控制器发布 NED 速度和航向；安全输出为零速度并保留当前航向。
+  // 失效状态另通过 dock_guidance_setpoint 告知下游。
   void publish_velocity_setpoint(hrt_abstime timestamp,
                                  const matrix::Vector3f &velocity_ned,
                                  float yaw_setpoint_rad);
@@ -121,6 +133,7 @@ private:
                                  hrt_abstime timestamp_sample);
   void publish_camera_pitch_servo(hrt_abstime timestamp_sample);
   void set_stage(Stage stage);
+  // 图像纠偏速度垂直于视线；与沿视线的接近速度合成后共用三维速度预算。
   matrix::Vector3f compute_image_tracking_velocity(
       const matrix::Vector3f &approach_direction,
       const matrix::Vector3f &camera_forward_ned) const;
@@ -144,6 +157,7 @@ private:
   void invalidate_setpoint(hrt_abstime timestamp, const char *reason);
   void reset_tracking_state();
 
+  // 曝光时刻的相机视线转至 NED，滤波并估计视线角速度，再选择静态/动态控制路径。
   void process_observation(float los_yaw_deg, float los_pitch_deg,
                            const matrix::Vector3f &relative_position_ned,
                            bool relative_position_valid,
@@ -153,6 +167,8 @@ private:
                            const matrix::Dcmf &sample_camera_to_body);
   void compute_control(const matrix::Vector3f &att_deg, float obs_dt_s,
                        hrt_abstime now, const matrix::Dcmf &sample_camera_to_body);
+  // 动态目标路径：只有可信的尺度/相对位置才能初始化米制状态估计。
+  // 图像角度仍可用于居中和视场保护，目标速度可信度单独决定追踪/穿越许可。
   void update_target_motion(const viztra_observation_s &obs,
                             const matrix::Vector3f &att_deg,
                             float yaw_deg, float pitch_deg, hrt_abstime exposure,
@@ -248,6 +264,8 @@ private:
   bool _position_seen{false};
   dock_motion::SampleHistoryIndex<DELAY_BUF_SIZE> _state_history{WATCHDOG_INTERVAL_US};
 
+  // _velocity_ned 是 EKF 估计的本机速度；_velocity_setpoint_ned 是本模块输出。
+  // _relative_position_* 只代表观测帧明确给出的相对位置，不能把像素框直接当作距离。
   matrix::Vector3f _velocity_ned{0.0f, 0.0f, 0.0f};
   float _velocity_speed_ms{0.0f};
   float _closing_speed_ms{0.0f};
@@ -279,6 +297,7 @@ private:
   hrt_abstime _terminal_blind_since_us{0};
   hrt_abstime _last_control_update_us{0};
   matrix::Vector3f _terminal_velocity_ned{0.0f, 0.0f, 0.0f};
+  // 动态目标状态、捕获证据与末段预测彼此独立：某一证据有效不自动放行另一阶段。
   dock_motion::TargetMotion _target_motion;
   matrix::Vector3f _target_velocity{}, _estimated_relative{}, _terminal_direction{};
   matrix::Vector3f _dynamic_acceleration{};
