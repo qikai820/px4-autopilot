@@ -59,6 +59,8 @@
 
 #include <cmath>
 #include "TargetMotion.hpp"
+#include "CameraHistory.hpp"
+#include "PredictiveCorrection.hpp"
 
 using namespace time_literals;
 
@@ -82,6 +84,7 @@ private:
   static constexpr int DERIV_SIZE = 7;
   static constexpr float LOOP_DT = 0.01f;
   static constexpr uint32_t WATCHDOG_INTERVAL_US = 10_ms;
+  static constexpr uint32_t CAMERA_SERVO_PUBLISH_INTERVAL_US = 50_ms;
 
   enum class Stage : uint8_t {
     NONE = 0,
@@ -99,7 +102,6 @@ private:
 
   void Run() override;
   void update_parameters();
-  void update_camera_rotation();
   void register_dock_mode(hrt_abstime now);
   void check_mode_registration();
   void configure_dock_mode(hrt_abstime now);
@@ -136,7 +138,7 @@ private:
 
   // 保存并读取与相机画面时间对齐的飞行器状态。
   void push_delay_history(hrt_abstime timestamp);
-  bool get_delayed_state(hrt_abstime timestamp_sample,
+  bool get_delayed_state(hrt_abstime exposure,
                          matrix::Vector3f &att_deg,
                          matrix::Vector3f &gyro_dps) const;
   void invalidate_setpoint(hrt_abstime timestamp, const char *reason);
@@ -147,13 +149,15 @@ private:
                            bool relative_position_valid,
                            const matrix::Vector3f &att_deg,
                            const matrix::Vector3f &gyro_dps, float dt_s,
-                           hrt_abstime timestamp_sample);
+                           hrt_abstime timestamp_sample,
+                           const matrix::Dcmf &sample_camera_to_body);
   void compute_control(const matrix::Vector3f &att_deg, float obs_dt_s,
-                       hrt_abstime now);
+                       hrt_abstime now, const matrix::Dcmf &sample_camera_to_body);
   void update_target_motion(const viztra_observation_s &obs,
                             const matrix::Vector3f &att_deg,
-                            float yaw_deg, float pitch_deg, hrt_abstime sample);
-  bool delayed_position(hrt_abstime sample, matrix::Vector3f &position) const;
+                            float yaw_deg, float pitch_deg, hrt_abstime exposure,
+                            const matrix::Dcmf &sample_camera_to_body);
+  bool delayed_position(hrt_abstime exposure, matrix::Vector3f &position) const;
   void compute_dynamic_control(const matrix::Vector3f &direction,
                                const matrix::Vector3f &previous, const matrix::Dcmf &camera_to_ned, float dt,
                                float align, float soft, bool hard, hrt_abstime now);
@@ -194,10 +198,6 @@ private:
       ORB_ID(config_control_setpoints)};
   uORB::Publication<arming_check_reply_s> _arming_check_reply_pub{
       ORB_ID(arming_check_reply)};
-
-  // 相机系与 PX4 机体系（FRD）之间的可配置安装旋转矩阵。
-  matrix::Matrix3f _rot_body_to_cam;
-  matrix::Matrix3f _rot_cam_to_body;
 
   // LOS 分别在相机系（c）和地理 NED 系（e）中的方向、导数与角速度。
   matrix::Vector3f _los_c_deg{0.0f, 0.0f, 0.0f};
@@ -246,8 +246,7 @@ private:
   bool _position_delay_valid[DELAY_BUF_SIZE]{};
   uint8_t _xy_reset_counter{0}, _z_reset_counter{0};
   bool _position_seen{false};
-  int _delay_idx{0};
-  int _delay_count{0};
+  dock_motion::SampleHistoryIndex<DELAY_BUF_SIZE> _state_history{WATCHDOG_INTERVAL_US};
 
   matrix::Vector3f _velocity_ned{0.0f, 0.0f, 0.0f};
   float _velocity_speed_ms{0.0f};
@@ -267,6 +266,11 @@ private:
   float _target_size_ratio{0.0f};
   float _camera_mount_pitch_deg{0.0f};
   bool _camera_pitch_initialized{false};
+  hrt_abstime _last_camera_pitch_publish_us{0};
+  dock_motion::CameraHistory<1024> _camera_history;
+  hrt_abstime _observation_exposure_us{0};
+  float _sample_camera_pitch_deg{NAN};
+  bool _camera_time_aligned{false};
   hrt_abstime _aligned_since_us{0};
   hrt_abstime _hard_fov_since_us{0};
   hrt_abstime _recovery_stable_since_us{0};
@@ -278,6 +282,7 @@ private:
   dock_motion::TargetMotion _target_motion;
   matrix::Vector3f _target_velocity{}, _estimated_relative{}, _terminal_direction{};
   matrix::Vector3f _dynamic_acceleration{};
+  dock_motion::MissCorrection _miss_correction{};
   float _dynamic_closure{0.f};
   float _dynamic_max_closure{0.f};
   float _target_position_error{INFINITY};
@@ -302,6 +307,10 @@ private:
 
   DEFINE_PARAMETERS(
       (ParamInt<px4::params::DOCK_DYN_EN>)_param_dock_dyn_enable,
+      (ParamInt<px4::params::DOCK_PRED_EN>)_param_dock_pred_enable,
+      (ParamFloat<px4::params::DOCK_PRED_TAU>)_param_dock_pred_response,
+      (ParamFloat<px4::params::DOCK_PRED_TMAX>)_param_dock_pred_time,
+      (ParamFloat<px4::params::DOCK_PRED_ANG>)_param_dock_pred_angle,
       (ParamFloat<px4::params::DOCK_START_H>)_param_dock_start_height,
       (ParamFloat<px4::params::DOCK_CAP_VMAX>)_param_dock_capture_speed,
       (ParamFloat<px4::params::DOCK_TGT_W>)_param_dock_target_width,

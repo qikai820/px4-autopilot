@@ -1,0 +1,201 @@
+// Standalone deterministic regression tests; see docs/DockGuidance_dynamic.md.
+#include "CameraHistory.hpp"
+#include "PredictiveCorrection.hpp"
+#include <cassert>
+#include <cstdio>
+#include <initializer_list>
+
+using namespace dock_motion;
+using matrix::Dcmf;
+using matrix::Eulerf;
+
+static void test_fresh_state_history() {
+  SampleHistoryIndex<601> history(10000);
+  uint64_t stamps[601]{};
+  float attitude[601]{};
+  // Alternating timer/camera callbacks, including pairs less than 10 ms apart.
+  // The old early return used a stale attitude on every intermediate callback.
+  for (uint64_t now=1000000; now<9000000; now+=4000) {
+    const int slot = history.write(now);
+    stamps[slot] = now;
+    attitude[slot] = float(now-1000000)*1e-6f*.5f;
+    assert(stamps[history.newest()] == now);
+    assert(fabsf(attitude[history.newest()] - float(now-1000000)*1e-6f*.5f) < 1e-7f);
+    if (now >= 8500000) {
+      assert(history.count() == 601);
+      assert(now-stamps[history.oldest()] >= 5000000);
+      for (int n=1; n<history.count(); ++n) {
+        assert(stamps[(history.oldest()+n-1)%601] < stamps[(history.oldest()+n)%601]);
+      }
+    }
+  }
+  history.write(500000); // time reset
+  assert(history.count() == 1);
+  history.reset();
+  assert(history.count() == 0);
+  history.write(1000000);
+  assert(history.write(1001000) == history.newest() && history.count() == 1);
+  puts("state history: every callback fresh; five-second coverage retained");
+}
+
+static void test_camera_history() {
+  CameraHistory<3> history;
+  float pitch = NAN;
+  assert(!history.at(100, pitch));
+  history.record(100, 10);
+  history.record(200, 20);
+  history.record(300, 30);
+  assert(!history.at(99, pitch));
+  assert(history.at(199, pitch) && pitch == 10); // no future-angle interpolation
+  assert(history.at(200, pitch) && pitch == 20);
+  history.record(400, 30); // unchanged keepalive must retain early history
+  assert(history.at(100, pitch) && pitch == 10);
+  history.record(500, 40);
+  assert(!history.at(199, pitch)); // oldest sample evicted
+  assert(history.at(499, pitch) && pitch == 30);
+  history.record(500, 45);
+  assert(history.at(500, pitch) && pitch == 45);
+  history.record(600, NAN);
+  assert(history.at(10000, pitch) && pitch == 45); // command held until replaced
+  history.record(50, 5); // clock reset invalidates old domain
+  assert(!history.at(49, pitch));
+  assert(history.at(100, pitch) && pitch == 5);
+  history.reset();
+  assert(!history.at(100, pitch));
+  uint64_t exposure = 0;
+  assert(!exposure_time(0, 0, exposure));
+  assert(!exposure_time(80000, 80000, exposure));
+  assert(!exposure_time(50000, 80000, exposure));
+  assert(exposure_time(180000, 80000, exposure) && exposure == 100000);
+}
+
+static void test_delayed_rotating_camera() {
+  CameraHistory<1024> history;
+  const Vector3f target(150, 30, -100);
+  float wrong_max = 0.f, aligned_max = 0.f;
+  for (int i = 0; i < 500; ++i) {
+    const uint64_t now = 1000000 + uint64_t(i) * 10000;
+    const float current_pitch = .5f + .4f * sinf(i * .015f);
+    history.record(now, current_pitch); // radians in this generic history test
+    if (i < 8) { continue; }
+    uint64_t exposure;
+    assert(exposure_time(now, 80000, exposure));
+    float old_pitch;
+    assert(history.at(exposure, old_pitch));
+    const float t = (exposure - 1000000) * 1e-6f;
+    const Vector3f own(12.f * t, -4.f * t, -2.f * t);
+    const Dcmf body(Eulerf(.1f * sinf(t), -.2f, .15f * t));
+    const Dcmf mount(Eulerf(.1f, old_pitch, -.05f));
+    const Vector3f ray = (body * mount).transpose() * (target - own).normalized();
+    const float range = (target - own).norm();
+    const Vector3f aligned = own + body * mount * ray * range;
+    const Vector3f wrong = own + body * Dcmf(Eulerf(.1f, current_pitch, -.05f)) * ray * range;
+    aligned_max = max(aligned_max, (aligned - target).norm());
+    wrong_max = max(wrong_max, (wrong - target).norm());
+  }
+  assert(aligned_max < .0001f && wrong_max > 3.f);
+  printf("camera 80 ms delay, moving body/mount: reconstruction max aligned %.6f m, current-angle %.3f m\n",
+      double(aligned_max), double(wrong_max));
+}
+
+static void test_predictive_geometry() {
+  const Vector3f axis(1, 0, 0), own(40, 0, 0), target(10, 0, 0), nominal(40, 0, 0);
+  const Vector3f relative(90, 5, -4);
+  const auto plan = correct_predicted_miss(relative, own, target, nominal, axis, .5f, 5, .26f, 8);
+  assert(plan.valid && fabsf(plan.time_to_plane - 3.f) < 1e-6f);
+  assert(plan.correction(1) > 0 && plan.correction(2) < 0);
+  assert(fabsf(plan.velocity.norm() - nominal.norm()) < 1e-4f);
+  const auto straight = correct_predicted_miss(Vector3f(90,0,0), own, target, nominal, axis, .5f, 5, .26f, 8);
+  assert(straight.valid && straight.correction.norm() < 1e-5f);
+  for (float speed : {25.f, 55.f}) {
+    const auto changing_speed = correct_predicted_miss(relative, own, target,
+        Vector3f(speed,0,0), axis, .5f, 10, .26f, 8);
+    assert(changing_speed.valid);
+    assert(fabsf(changing_speed.miss * axis) < .002f); // model arrival reaches plane
+    assert(speed > 40 ? changing_speed.time_to_plane < 3 : changing_speed.time_to_plane > 3);
+  }
+  const Dcmf rotation(Eulerf(.5f, -.4f, .7f));
+  const auto rotated = correct_predicted_miss(rotation * relative, rotation * own, rotation * target,
+      rotation * nominal, rotation * axis, .5f, 5, .26f, 8);
+  assert(rotated.valid && (rotated.velocity - rotation * plan.velocity).norm() < .0001f);
+  const auto bounded = correct_predicted_miss(Vector3f(3,100,-100), own, target, nominal, axis, .5f, 5, .26f, 8);
+  assert(bounded.valid && bounded.velocity.isAllFinite());
+  assert(bounded.correction.norm() <= 8.f * bounded.time_to_plane + 1e-4f);
+  assert(acosf(clamp(bounded.velocity.normalized() * axis, -1, 1)) < .26f + 1e-4f);
+  const auto tiny = correct_predicted_miss(Vector3f(.00001f,1,-1), own, target, nominal, axis, .5f, 5, .26f, 8);
+  assert(tiny.valid && tiny.velocity.isAllFinite() && tiny.correction.norm() < .0001f);
+  for (const Vector3f &bad : {Vector3f(-1,0,0), Vector3f(0,0,0), Vector3f(151,1,0), Vector3f(NAN,0,0)}) {
+    const auto p = correct_predicted_miss(bad, own, target, nominal, axis, .5f, 5, .26f, 8);
+    assert(!p.valid && (p.velocity - nominal).norm() < 1e-6f);
+  }
+  assert(!correct_predicted_miss(relative, Vector3f(9,0,0), target, nominal, axis, .5f,5,.26f,8).valid);
+  assert(!correct_predicted_miss(relative, own, target, nominal, axis, NAN,5,.26f,8).valid);
+  assert(!correct_predicted_miss(relative, own, target, Vector3f{}, axis, .5f,5,.26f,8).valid);
+  assert(!correct_predicted_miss(relative, own, target, nominal, Vector3f(2,0,0), .5f,5,.26f,8).valid);
+  assert(!correct_predicted_miss(relative, own, target, nominal, axis, .5f,5,0,8).valid);
+}
+
+// Separate plant: held velocity command followed by first-order vehicle response.
+// Use the production accel/jerk planner and continuous segment closest approach;
+// no collision, perfect target state, or camera dynamics are asserted for HIL.
+static float run_approach(bool predictive, float plant_tau, const Vector3f &initial_relative,
+    const Vector3f &target_velocity, const Vector3f &initial_velocity, float response_tau = .5f,
+    bool committed_plane = false) {
+  Vector3f relative = initial_relative, velocity = initial_velocity;
+  Vector3f command = initial_velocity, accel;
+  const Limits limits{45,45,25,25};
+  const Dcmf camera(Eulerf(0,0,0));
+  float minimum = relative.norm();
+  int corrected = 0;
+  for (int i=0; i<1600; ++i) {
+    const Vector3f axis = committed_plane ? initial_relative.normalized() : relative.normalized();
+    const float budget = closing_budget(target_velocity, axis, limits, 60);
+    Vector3f nominal = constrained(target_velocity + axis * budget, limits);
+    if (predictive) {
+      const auto correction = correct_predicted_miss(relative, velocity, target_velocity,
+          nominal, axis, response_tau, 5, .261799f, 8);
+      if (correction.valid) { nominal = constrained(correction.velocity, limits); ++corrected; }
+    }
+    const auto plan = plan_velocity(nominal, command, accel, limits, .01f, 8, 8,
+        Vector3f(1,0,0), Vector3f{}, camera, 1000, .5f,.4f,.65f,false,false);
+    assert(feasible(plan.velocity, limits));
+    if (!plan.limits_override) {
+      assert((plan.velocity-command).norm() <= .0801f);
+      assert((plan.acceleration-accel).norm() <= .0821f); // planner float tolerance
+    }
+    command = plan.velocity; accel = plan.acceleration;
+    velocity += (command - velocity) * (1.f - expf(-.01f / plant_tau));
+    const Vector3f step = (target_velocity - velocity) * .01f;
+    const float fraction = clamp(-(relative * step) / max(step.norm_squared(),1e-8f), 0, 1);
+    minimum = min(minimum, (relative + step * fraction).norm());
+    relative += step;
+    // Evaluate only the first approach, without allowing a second loop around.
+    if (i > 20 && relative * (velocity-target_velocity) < 0) { break; }
+  }
+  if (predictive) { assert(corrected > 0); }
+  return minimum;
+}
+
+int main() {
+  test_fresh_state_history();
+  test_camera_history();
+  test_delayed_rotating_camera();
+  test_predictive_geometry();
+  for (float tau : {.2f, .4f, .7f}) {
+    const Vector3f relative(150, 20, -70), target(10, 4, 0), own(38, 3, -8);
+    const float baseline = run_approach(false, tau, relative, target, own);
+    const float corrected = run_approach(true, tau, relative, target, own);
+    const float fitted = run_approach(true, tau, relative, target, own, .5f + tau);
+    printf("3D lagged approach, plant tau %.1f s: baseline %.4f m, default prediction %.4f m, matched response %.4f m\n",
+        double(tau), double(baseline), double(corrected), double(fitted));
+    assert(corrected < baseline);
+    assert(fitted < baseline);
+  }
+  const Vector3f relative(80,10,-40), target(10,4,0), own(38,3,-8);
+  const float terminal_before = run_approach(false, .4f, relative, target, own, .5f, true);
+  const float terminal_after = run_approach(true, .4f, relative, target, own, .5f, true);
+  printf("fixed terminal plane: baseline %.4f m, predictive %.4f m\n",
+      double(terminal_before), double(terminal_after));
+  assert(terminal_after < terminal_before);
+  puts("Predictive correction and camera alignment tests passed");
+}

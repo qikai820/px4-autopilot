@@ -6,16 +6,12 @@ using matrix::Dcmf;
 using matrix::Eulerf;
 using matrix::Vector3f;
 
-bool DockGuidance::delayed_position(hrt_abstime sample, Vector3f &position) const {
-  const uint64_t delay =
-      static_cast<uint64_t>(math::constrain(_param_dock_cam_dly.get(), int32_t{0}, int32_t{5000})) *
-      1000;
-  if (sample < delay || _delay_count == 0) {
+bool DockGuidance::delayed_position(hrt_abstime target, Vector3f &position) const {
+  if (!target || _state_history.count() == 0) {
     return false;
   }
-  const uint64_t target = sample - delay;
-  const int oldest = (_delay_idx - _delay_count + DELAY_BUF_SIZE) % DELAY_BUF_SIZE;
-  const int newest = (_delay_idx - 1 + DELAY_BUF_SIZE) % DELAY_BUF_SIZE;
+  const int oldest = _state_history.oldest();
+  const int newest = _state_history.newest();
   if (target < _delay_time_buf[oldest]) {
     return false;
   }
@@ -23,7 +19,7 @@ bool DockGuidance::delayed_position(hrt_abstime sample, Vector3f &position) cons
     position = _position_delay_buf[newest];
     return _position_delay_valid[newest] && target - _delay_time_buf[newest] < 20_ms;
   }
-  for (int n = 1; n < _delay_count; ++n) {
+  for (int n = 1; n < _state_history.count(); ++n) {
     const int a = (oldest + n - 1) % DELAY_BUF_SIZE, b = (oldest + n) % DELAY_BUF_SIZE;
     if (target <= _delay_time_buf[b]) {
       if (!_position_delay_valid[a] || !_position_delay_valid[b] ||
@@ -40,7 +36,8 @@ bool DockGuidance::delayed_position(hrt_abstime sample, Vector3f &position) cons
 }
 
 void DockGuidance::update_target_motion(const viztra_observation_s &obs, const Vector3f &att_deg,
-                                        float yaw_deg, float pitch_deg, hrt_abstime sample) {
+                                        float yaw_deg, float pitch_deg, hrt_abstime exposure,
+                                        const Dcmf &sample_camera_to_body) {
   if (!_param_dock_dyn_enable.get()) {
     return;
   }
@@ -48,7 +45,7 @@ void DockGuidance::update_target_motion(const viztra_observation_s &obs, const V
   Vector3f own;
   vehicle_local_position_s local{};
   const hrt_abstime now = hrt_absolute_time();
-  if (!delayed_position(sample, own) || !_local_pos_sub.copy(&local) || !local.xy_valid ||
+  if (!delayed_position(exposure, own) || !_local_pos_sub.copy(&local) || !local.xy_valid ||
       !local.z_valid || !local.v_xy_valid || !local.v_z_valid ||
       now < local.timestamp || now - local.timestamp > 100_ms) {
     return;
@@ -63,7 +60,7 @@ void DockGuidance::update_target_motion(const viztra_observation_s &obs, const V
   const Vector3f camera_los(cosf(pitch) * cosf(yaw), cosf(pitch) * sinf(yaw), -sinf(pitch));
   const Dcmf rotation(
       Eulerf(math::radians(att_deg(0)), math::radians(att_deg(1)), math::radians(att_deg(2))));
-  Vector3f los = rotation * _rot_cam_to_body * camera_los;
+  Vector3f los = rotation * sample_camera_to_body * camera_los;
   float range = NAN, sigma = NAN;
   const Vector3f measured_relative(obs.relative_n_m, obs.relative_e_m, obs.relative_d_m);
   bool metric = obs.relative_position_valid && measured_relative.isAllFinite() &&
@@ -88,17 +85,14 @@ void DockGuidance::update_target_motion(const viztra_observation_s &obs, const V
                               _param_dock_target_width.get(), _param_dock_target_height.get(), fx,
                               fy, camera_los(0), _param_dock_size_error.get(), range, sigma);
   }
-  const uint64_t delay =
-      static_cast<uint64_t>(math::constrain(_param_dock_cam_dly.get(), int32_t{0}, int32_t{5000})) *
-      1000;
-  if (sample > delay) {
+  if (exposure) {
     // Local-position noise must not masquerade as target motion.
     const float own_error = std::isfinite(local.eph) && std::isfinite(local.epv)
                                 ? math::max(.1f, math::max(local.eph, local.epv))
                                 : 5.f;
     const uint32_t resets_before = _target_motion.resets();
     const float bearing_range = metric ? range : math::max(5.f, _estimated_relative.norm());
-    _target_motion.update(sample - delay, own, los, metric ? range : NAN,
+    _target_motion.update(exposure, own, los, metric ? range : NAN,
                           metric ? hypotf(sigma, own_error) : NAN,
                           math::max(2.f / math::min(fx, fy), own_error / bearing_range),
                           _param_dock_est_accel.get(),
@@ -309,7 +303,7 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
   _dynamic_closure +=
       dock_motion::clamp(wanted_closure - _dynamic_closure, -rate * dt, acceleration * dt);
   Vector3f desired =
-      _airborne ? dock_motion::constrained(base + direction * _dynamic_closure, limits)
+      _airborne ? base + direction * _dynamic_closure
                 : Vector3f{};
   _following_command = following;
   _capture_command.zero();
@@ -326,6 +320,13 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
       const float range_lower = _estimated_relative.norm() - 2.f * _target_position_error;
       const bool pass_through_latched = _param_dock_terminal_enable.get() &&
                                         _capture_schedule.ready();
+      // A terminal pass-through is expressly a pursuit maneuver: start at
+      // the available closing-speed limit while the metric target filter is
+      // still maturing. FOV prediction, vehicle-axis limits, acceleration and
+      // jerk are applied below before the velocity is published.
+      const float initial_capture_limit = _param_dock_terminal_enable.get()
+                                          ? pursuit_limit
+                                          : _param_dock_capture_speed.get();
       const bool common_capture_evidence = _target_motion.fresh_range(now) &&
           std::isfinite(range_lower) && dock_motion::capture_image_evidence(
               hard, _fov_ratio, align, soft, _los_e_dot.norm(),
@@ -337,7 +338,7 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
       const float closing_bias = (base - _target_velocity) * capture_direction +
           2.f * _target_motion.directional_velocity_sigma(capture_direction);
       const float capture_limit = _capture_schedule.update(now, capture_evidence,
-          _param_dock_align_t.get(), _param_dock_capture_speed.get(),
+          _param_dock_align_t.get(), initial_capture_limit,
           pursuit_limit, _param_dock_terminal_enable.get(), range_lower, closing_bias,
           _param_dock_stop_dist.get(), deceleration, _param_dock_dynamic_jerk.get());
       _capture_evidence_valid = capture_evidence;
@@ -345,7 +346,9 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
       _capture_speed_limit = capture_limit;
       const float capture_scale = hard ? 0.f : dock_motion::clamp(
           (soft - _fov_ratio) / (soft - align), 0.f, 1.f);
-      const float budget = dock_motion::closing_budget(base, capture_direction, limits,
+      // Allocate against the actual sum before any uniform speed scaling. A
+      // climbing capture can cancel a downward partial-following component.
+      const float budget = dock_motion::closing_budget(desired, capture_direction, limits,
           capture_limit);
       _capture_command = capture_direction * (budget * capture_scale);
       desired += _capture_command;
@@ -379,6 +382,29 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
     }
   }
   desired = dock_motion::constrained(desired, limits);
+  // Correct the predicted three-dimensional miss before the existing planner.
+  // Camera centering/FOV retain priority, and uncertain capture is not promoted
+  // to metric guidance. The committed terminal plane remains unchanged.
+  const bool approach_stage = _stage == Stage::ACCELERATE ||
+      _stage == Stage::MAX_SPEED_APPROACH || _stage == Stage::TERMINAL_BRAKE ||
+      _stage == Stage::TERMINAL_DASH;
+  if (_param_dock_pred_enable.get() && trusted && approach_stage &&
+      !_startup_height_hold && !hard && _fov_ratio < soft && _camera_time_aligned) {
+    _miss_correction = dock_motion::correct_predicted_miss(_estimated_relative,
+        _velocity_ned, _target_velocity, desired, direction,
+        math::constrain(_param_dock_pred_response.get(), .05f, 2.f),
+        math::constrain(_param_dock_pred_time.get(), .2f, 10.f),
+        math::radians(math::constrain(_param_dock_pred_angle.get(), 1.f, 30.f)), acceleration);
+    if (_miss_correction.valid) {
+      const Vector3f nominal = desired;
+      const Vector3f limited = dock_motion::constrained(_miss_correction.velocity, limits);
+      // An axis limit can scale the whole vector below the target's speed.
+      // Keep the feasible nominal command if this correction would stop closure.
+      if ((limited - _target_velocity) * direction > .5f) { desired = limited; }
+      _miss_correction.velocity = desired;
+      _miss_correction.correction = desired - nominal;
+    }
+  }
   _desired_velocity = desired;
   const float max_accel = desired.norm() < previous.norm() ? rate : acceleration;
   const float vector_accel_limit = _startup_height_hold ? acceleration : max_accel;
@@ -422,6 +448,7 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
 }
 
 bool DockGuidance::dynamic_terminal(hrt_abstime now, bool blind) {
+  if (blind) { _miss_correction = {}; }
   vehicle_local_position_s local{};
   if (!_airborne || !_target_motion.initialized() || !_local_pos_sub.copy(&local) ||
       !local.xy_valid || !local.z_valid || !local.v_xy_valid || !local.v_z_valid ||

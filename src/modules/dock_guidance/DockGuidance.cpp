@@ -94,6 +94,15 @@ void DockGuidance::Run() {
 
   const uint64_t now_us = hrt_absolute_time();
 
+  // Keep the current camera command alive even before the first valid image.
+  // HIL and physical output providers can start after DockGuidance and would
+  // otherwise miss the single command published during initialization.
+  if ((_param_dock_cam_pitch_variable.get() != 0) &&
+      ((_last_camera_pitch_publish_us == 0) ||
+       (now_us - _last_camera_pitch_publish_us >= CAMERA_SERVO_PUBLISH_INTERVAL_US))) {
+    publish_camera_pitch_servo(now_us);
+  }
+
   if (_mode_id < 0 || _arming_check_id < 0) {
     if ((_last_registration_request_us == 0) ||
         (now_us - _last_registration_request_us > 1_s)) {
@@ -191,14 +200,22 @@ void DockGuidance::Run() {
     return;
   }
 
-  // 取与相机画面时间对应的姿态/角速度，减小图像传输和识别延迟带来的误差。
+  // One exposure timestamp for body attitude, own position AND mount command.
+  // Viztra timestamp_sample is reception time; DOCK_CAM_DLY is subtracted once.
   Vector3f att_deg;
   Vector3f gyro_dps;
-
-  if (!get_delayed_state(sample_us, att_deg, gyro_dps)) {
-    invalidate_setpoint(now_us, "state history unavailable");
+  _camera_time_aligned = false;
+  const uint64_t delay_us = static_cast<uint64_t>(math::constrain(
+      _param_dock_cam_dly.get(), int32_t{0}, int32_t{5000})) * 1000ULL;
+  if (!dock_motion::exposure_time(sample_us, delay_us, _observation_exposure_us) ||
+      !get_delayed_state(_observation_exposure_us, att_deg, gyro_dps) ||
+      !_camera_history.at(_observation_exposure_us, _sample_camera_pitch_deg)) {
+    invalidate_setpoint(now_us, "exposure state/camera history unavailable");
     return;
   }
+  _camera_time_aligned = true;
+  const Dcmf sample_camera_to_body(Eulerf(math::radians(_param_dock_cam_roll.get()),
+      math::radians(_sample_camera_pitch_deg), math::radians(_param_dock_cam_yaw.get())));
 
   // 将视觉板给出的目标偏移转换为相机视线角（LOS）。
   // 若视觉板已经输出角度则直接使用；否则根据图像分辨率和 FOV
@@ -265,20 +282,24 @@ void DockGuidance::Run() {
   const bool relative_position_valid =
       obs.relative_position_valid && relative_position_ned.isAllFinite() &&
       (relative_position_ned.norm() > 0.05f) && relative_position_fresh;
-  update_target_motion(obs, att_deg, los_yaw_deg, los_pitch_deg, sample_us);
+  update_target_motion(obs, att_deg, los_yaw_deg, los_pitch_deg, _observation_exposure_us,
+                       sample_camera_to_body);
   process_observation(los_yaw_deg, los_pitch_deg, relative_position_ned,
                       relative_position_valid, att_deg, gyro_dps, run_dt_s,
-                      sample_us);
+                      _observation_exposure_us, sample_camera_to_body);
 }
 
 // ---------- 姿态/角速度延时缓冲 ----------
 
 void DockGuidance::push_delay_history(hrt_abstime timestamp) {
-  // 将 PX4 四元数姿态转换为欧拉角，统一以度保存，便于后续与视觉角度相加。
+  // Retain at most 100 Hz, but always refresh the newest state: a zero-delay
+  // image must not use the previous callback's attitude while the body turns.
   vehicle_attitude_s att{};
   vehicle_angular_velocity_s av{};
 
-  if (!_att_sub.copy(&att) || !_gyro_sub.copy(&av)) {
+  if (!_att_sub.copy(&att) || !_gyro_sub.copy(&av) ||
+      !att.timestamp || !av.timestamp || timestamp < att.timestamp || timestamp < av.timestamp ||
+      timestamp - att.timestamp > 100_ms || timestamp - av.timestamp > 100_ms) {
     return;
   }
 
@@ -292,8 +313,6 @@ void DockGuidance::push_delay_history(hrt_abstime timestamp) {
   Vector3f gyro_dps(math::degrees(av.xyz[0]), math::degrees(av.xyz[1]),
                     math::degrees(av.xyz[2]));
 
-  _att_delay_buf[_delay_idx] = q.normalized();
-  _gyro_delay_buf[_delay_idx] = gyro_dps;
   vehicle_local_position_s lpos{};
   const bool local_valid = _local_pos_sub.copy(&lpos) && lpos.xy_valid && lpos.z_valid
                            && lpos.v_xy_valid && lpos.v_z_valid && lpos.timestamp <= timestamp
@@ -304,41 +323,35 @@ void DockGuidance::push_delay_history(hrt_abstime timestamp) {
       || lpos.z_reset_counter != _z_reset_counter)) {
     _target_motion.reset();
     _target_motion_valid = false;
-    _delay_count = 0;
+    _state_history.reset();
     _estimator_reset_reason = 4;
     if (_param_dock_dyn_enable.get() && _dock_mode_active) {
       invalidate_setpoint(timestamp, "dynamic local position reset");
     }
   }
+  const int slot = _state_history.write(timestamp);
+  _att_delay_buf[slot] = q.normalized();
+  _gyro_delay_buf[slot] = gyro_dps;
   if (local_valid) {
     _position_seen = true;
     _xy_reset_counter = lpos.xy_reset_counter;
     _z_reset_counter = lpos.z_reset_counter;
-    _position_delay_buf[_delay_idx] = Vector3f(lpos.x,lpos.y,lpos.z)
+    _position_delay_buf[slot] = Vector3f(lpos.x,lpos.y,lpos.z)
         + Vector3f(lpos.vx,lpos.vy,lpos.vz)*((timestamp-lpos.timestamp)*1e-6f);
   }
-  _position_delay_valid[_delay_idx] = local_valid;
-  _delay_time_buf[_delay_idx] = timestamp;
-  _delay_idx = (_delay_idx + 1) % DELAY_BUF_SIZE;
-  _delay_count = math::min(_delay_count + 1, DELAY_BUF_SIZE);
+  _position_delay_valid[slot] = local_valid;
+  _delay_time_buf[slot] = timestamp;
 }
 
-bool DockGuidance::get_delayed_state(hrt_abstime timestamp_sample,
+bool DockGuidance::get_delayed_state(hrt_abstime target_us,
                                      Vector3f &att_deg,
                                      Vector3f &gyro_dps) const {
-  if (_delay_count <= 0) {
+  if (_state_history.count() <= 0) {
     return false;
   }
 
-  const uint64_t delay_us =
-      static_cast<uint64_t>(math::constrain(_param_dock_cam_dly.get(),
-                                            int32_t{0}, int32_t{5000})) *
-      1000ULL;
-  const hrt_abstime target_us =
-      (timestamp_sample > delay_us) ? timestamp_sample - delay_us : 0;
-  const int oldest =
-      (_delay_idx - _delay_count + DELAY_BUF_SIZE) % DELAY_BUF_SIZE;
-  const int newest = (_delay_idx - 1 + DELAY_BUF_SIZE) % DELAY_BUF_SIZE;
+  const int oldest = _state_history.oldest();
+  const int newest = _state_history.newest();
 
   if (target_us <= _delay_time_buf[oldest]) {
     // 历史尚未覆盖相机采样时刻时不使用错误姿态；等缓冲区积累足够数据后再输出有效指令。
@@ -355,6 +368,7 @@ bool DockGuidance::get_delayed_state(hrt_abstime timestamp_sample,
   }
 
   if (target_us >= _delay_time_buf[newest]) {
+    if (target_us - _delay_time_buf[newest] >= 20_ms) { return false; }
     const Eulerf euler(_att_delay_buf[newest]);
     att_deg = Vector3f(math::degrees(euler.phi()), math::degrees(euler.theta()),
                        math::degrees(euler.psi()));
@@ -362,13 +376,14 @@ bool DockGuidance::get_delayed_state(hrt_abstime timestamp_sample,
     return true;
   }
 
-  for (int n = 1; n < _delay_count; ++n) {
+  for (int n = 1; n < _state_history.count(); ++n) {
     const int previous = (oldest + n - 1) % DELAY_BUF_SIZE;
     const int next = (oldest + n) % DELAY_BUF_SIZE;
 
     if (target_us <= _delay_time_buf[next]) {
       const uint64_t span_us =
           _delay_time_buf[next] - _delay_time_buf[previous];
+      if (!span_us || span_us > 100_ms) { return false; }
       const float alpha =
           (span_us > 0)
               ? static_cast<float>(target_us - _delay_time_buf[previous]) /
@@ -407,6 +422,10 @@ bool DockGuidance::get_delayed_state(hrt_abstime timestamp_sample,
 }
 
 void DockGuidance::reset_tracking_state() {
+  _miss_correction = {};
+  _observation_exposure_us = 0;
+  _sample_camera_pitch_deg = NAN;
+  _camera_time_aligned = false;
   _capture_schedule.reset();
   _startup_ray_time = 0;
   _startup_ray_rate.zero();
@@ -508,6 +527,8 @@ void DockGuidance::invalidate_setpoint(hrt_abstime timestamp,
 
 void DockGuidance::handle_visual_loss(hrt_abstime timestamp,
                                      const char *reason) {
+  _miss_correction = {};
+  _camera_time_aligned = false;
   _capture_schedule.reset();
   if (_param_dock_dyn_enable.get() && _dock_mode_active && _stage == Stage::TERMINAL_DASH) {
     dynamic_terminal(timestamp, true);
@@ -871,6 +892,13 @@ void DockGuidance::publish_guidance_status(hrt_abstime timestamp, bool valid,
   status.camera_yaw_deg = _los_c_deg(0);
   status.camera_pitch_deg = _los_c_deg(1);
   status.camera_mount_pitch_deg = _camera_mount_pitch_deg;
+  status.exposure_timestamp = _observation_exposure_us;
+  status.sample_mount_pitch_deg = _sample_camera_pitch_deg;
+  status.camera_time_aligned = _camera_time_aligned && !degraded;
+  status.prediction_valid = _miss_correction.valid && !degraded;
+  status.prediction_tgo_s = _miss_correction.time_to_plane;
+  _miss_correction.miss.copyTo(status.prediction_miss_ned);
+  _miss_correction.correction.copyTo(status.prediction_dv_ned);
   status.yaw_setpoint_deg = std::isfinite(_yaw_setpoint_rad)
                                 ? math::degrees(_yaw_setpoint_rad)
                                 : NAN;
@@ -947,7 +975,6 @@ void DockGuidance::update_camera_pitch_servo(float camera_pitch_error_deg,
   _camera_mount_pitch_deg =
       math::constrain(_camera_mount_pitch_deg + pitch_rate_deg_s * dt_s,
                       minimum_pitch, maximum_pitch);
-  update_camera_rotation();
   publish_camera_pitch_servo(timestamp_sample);
 }
 
@@ -971,6 +998,10 @@ void DockGuidance::publish_camera_pitch_servo(hrt_abstime timestamp_sample) {
       -1.0f, 1.0f);
   controls.control[gimbal_controls_s::INDEX_YAW] = NAN;
   _gimbal_controls_pub.publish(controls);
+  _last_camera_pitch_publish_us = controls.timestamp;
+  // Record when the command was actually issued, never backdate it to the
+  // image which caused it. Hardware transit/mechanical lag is not feedback.
+  _camera_history.record(controls.timestamp, _camera_mount_pitch_deg);
 }
 
 void DockGuidance::set_stage(Stage stage) {
@@ -1051,10 +1082,17 @@ Vector3f DockGuidance::compute_image_tracking_velocity(
   const float gain = math::constrain(_param_dock_img_p.get(), 0.05f, 5.0f);
   Vector3f tracking_velocity{};
 
-  const float image_range = _param_dock_dyn_enable.get() && _target_motion_valid
-                              ? _estimated_relative.norm() : _relative_distance_m;
-  if ((_relative_position_valid || (_param_dock_dyn_enable.get() && _target_motion_valid))
-      && std::isfinite(image_range)) {
+  // A calibrated, uncropped target box gives a conservative range even while
+  // target velocity is still uncertain. This is sensor-derived geometry, not
+  // the optional relative-position extension of the Viztra frame.
+  const bool box_range_available = _param_dock_dyn_enable.get() &&
+                                   _target_motion.fresh_range(hrt_absolute_time()) &&
+                                   _estimated_relative.isAllFinite() &&
+                                   std::isfinite(_target_position_error);
+  const float image_range = _relative_position_valid ? _relative_distance_m :
+      (box_range_available ? math::max(0.f, _estimated_relative.norm() -
+                                              2.f * _target_position_error) : NAN);
+  if (std::isfinite(image_range) && image_range > .2f) {
     tracking_velocity =
         -math::max(image_range, 0.0f) * gain * pointing_error;
 
@@ -1261,7 +1299,8 @@ void DockGuidance::process_observation(float los_yaw_deg, float los_pitch_deg,
                                        bool relative_position_valid,
                                        const Vector3f &att_deg,
                                        const Vector3f &gyro_dps, float dt_s,
-                                       hrt_abstime timestamp_sample) {
+                                       hrt_abstime timestamp_sample,
+                                       const Dcmf &sample_camera_to_body) {
   // los_c：相机坐标系中的目标方位角，分别为水平偏差（yaw）与垂直偏差（pitch）。
   _los_c_deg(0) = los_yaw_deg;
   _los_c_deg(1) = los_pitch_deg;
@@ -1275,7 +1314,7 @@ void DockGuidance::process_observation(float los_yaw_deg, float los_pitch_deg,
   const Dcmf R_ned_body(Eulerf(math::radians(att_deg(0)),
                                math::radians(att_deg(1)),
                                math::radians(att_deg(2))));
-  const Dcmf R_ned_cam = R_ned_body * _rot_cam_to_body;
+  const Dcmf R_ned_cam = R_ned_body * sample_camera_to_body;
   _los_e_unit = R_ned_cam * los_c_unit;
   _los_e_unit.normalize();
 
@@ -1348,11 +1387,8 @@ void DockGuidance::process_observation(float los_yaw_deg, float los_pitch_deg,
                              math::degrees(los_e_rate_rads(1)),
                              math::degrees(los_e_rate_rads(2)));
 
-  const Dcmf R_cam_ned = R_ned_cam;
-  Dcmf R_ned_from_cam_T = R_cam_ned;
-  R_ned_from_cam_T.transpose();
-  _los_c_rate_dps = R_ned_from_cam_T * _los_e_rate_dps;
-  _gyro_c_dps = _rot_body_to_cam * gyro_dps;
+  _los_c_rate_dps = R_ned_cam.transpose() * _los_e_rate_dps;
+  _gyro_c_dps = sample_camera_to_body.transpose() * gyro_dps;
   _relative_position_valid = relative_position_valid;
 
   if (_relative_position_valid) {
@@ -1397,14 +1433,15 @@ void DockGuidance::process_observation(float los_yaw_deg, float los_pitch_deg,
     return;
   }
 
-  compute_control(att_deg, dt_s, now);
+  compute_control(att_deg, dt_s, now, sample_camera_to_body);
   update_camera_pitch_servo(los_pitch_deg, dt_s, timestamp_sample);
 }
 
 // ---------- 视觉三维速度引导状态机 ----------
 
 void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
-                                   hrt_abstime now) {
+                                   hrt_abstime now, const Dcmf &sample_camera_to_body) {
+  _miss_correction = {};
   const Vector3f previous_velocity_setpoint_ned = _velocity_setpoint_ned;
 
   // The camera-frame errors define image safety, while the filtered NED LOS
@@ -1412,7 +1449,7 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
   const Dcmf R_ned_body(Eulerf(math::radians(att_deg(0)),
                                math::radians(att_deg(1)),
                                math::radians(att_deg(2))));
-  const Dcmf R_ned_cam = R_ned_body * _rot_cam_to_body;
+  const Dcmf R_ned_cam = R_ned_body * sample_camera_to_body;
 
   Eulerf cam_euler(R_ned_cam);
   _camera_e_deg(0) = math::degrees(cam_euler.phi());
@@ -1484,15 +1521,16 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
   approach_direction.normalize();
   const Vector3f camera_forward_ned = R_ned_cam * Vector3f(1.0f, 0.0f, 0.0f);
 
+  _tracking_velocity_ned =
+      compute_image_tracking_velocity(approach_direction, camera_forward_ned);
   if (_param_dock_cam_pitch_variable.get() != 0) {
-    // Pitch centering belongs to the slow mount servo in this mode. Do not let
-    // the aircraft and servo fight over the same image-axis error. Horizontal
-    // centering is still handled by the vehicle yaw setpoint below.
-    _tracking_velocity_ned.zero();
-
-  } else {
-    _tracking_velocity_ned =
-        compute_image_tracking_velocity(approach_direction, camera_forward_ned);
+    // The mount handles small pitch errors. As the target approaches the soft
+    // image boundary, add bounded aircraft translation: the mount may be too
+    // slow or at its travel limit. Do not discard image correction altogether.
+    const float assist_start = .5f * align_ratio;
+    const float assist = math::constrain((_fov_pitch_ratio - assist_start) /
+        math::max(soft_ratio - assist_start, .05f), 0.f, 1.f);
+    _tracking_velocity_ned *= assist;
   }
   const float horizontal_los =
       Vector2f(approach_direction(0), approach_direction(1)).norm();
@@ -1900,20 +1938,32 @@ void DockGuidance::update_parameters() {
       float(_param_dock_cam_dly.get()), float(_param_dock_cam_pitch_variable.get()),
       _param_dock_res_x.get(), _param_dock_res_y.get(),
       _param_dock_fov_x.get(), _param_dock_fov_y.get(),
-      _param_dock_target_width.get(), _param_dock_target_height.get(), _param_dock_size_error.get()};
+      _param_dock_target_width.get(), _param_dock_target_height.get(), _param_dock_size_error.get(),
+      _param_dock_cam_pitch_min.get(), _param_dock_cam_pitch_max.get()};
   updateParams();
   const float observation_config[] = {
       _param_dock_cam_roll.get(), _param_dock_cam_pitch.get(), _param_dock_cam_yaw.get(),
       float(_param_dock_cam_dly.get()), float(_param_dock_cam_pitch_variable.get()),
       _param_dock_res_x.get(), _param_dock_res_y.get(),
       _param_dock_fov_x.get(), _param_dock_fov_y.get(),
-      _param_dock_target_width.get(), _param_dock_target_height.get(), _param_dock_size_error.get()};
+      _param_dock_target_width.get(), _param_dock_target_height.get(), _param_dock_size_error.get(),
+      _param_dock_cam_pitch_min.get(), _param_dock_cam_pitch_max.get()};
   bool observation_changed = false;
   for (unsigned i = 0; i < sizeof(observation_config) / sizeof(observation_config[0]); ++i) {
     observation_changed |= !(fabsf(old_observation_config[i] - observation_config[i]) <= 1e-6f);
   }
   const bool dynamic_changed = dynamic_was_enabled != (_param_dock_dyn_enable.get() != 0);
   if (observation_changed || dynamic_changed) {
+    _miss_correction = {};
+    if (observation_changed) {
+      _camera_history.reset();
+      _camera_time_aligned = false;
+      _filt_initialized = false;
+      _deriv_count = 0;
+      _los_e_dot.zero();
+      _los_e_rate_dps.zero();
+      _los_c_rate_dps.zero();
+    }
     _capture_schedule.reset();
     _target_motion.reset();
     _target_motion_valid = false;
@@ -1954,23 +2004,14 @@ void DockGuidance::update_parameters() {
         math::constrain(_camera_mount_pitch_deg, minimum_pitch, maximum_pitch);
   }
 
-  update_camera_rotation();
-
   if (camera_pitch_is_variable || camera_pitch_was_variable) {
     // When disabling at runtime, send the configured fixed angle once so the
     // physical camera and the fixed-camera transform remain consistent.
     publish_camera_pitch_servo(hrt_absolute_time());
   }
-}
-
-void DockGuidance::update_camera_rotation() {
-  // 三个参数定义从相机坐标系到 PX4 FRD 机体系的 3-2-1 旋转。
-  // 固定版本使用 DOCK_CAM_PITCH；可变版本使用慢速舵机的当前指令角。
-  _rot_cam_to_body = Dcmf(Eulerf(math::radians(_param_dock_cam_roll.get()),
-                                 math::radians(_camera_mount_pitch_deg),
-                                 math::radians(_param_dock_cam_yaw.get())));
-  _rot_body_to_cam = _rot_cam_to_body;
-  _rot_body_to_cam.transpose();
+  if (!camera_pitch_is_variable) {
+    _camera_history.record(hrt_absolute_time(), _camera_mount_pitch_deg);
+  }
 }
 
 int DockGuidance::task_spawn(int argc, char *argv[]) {

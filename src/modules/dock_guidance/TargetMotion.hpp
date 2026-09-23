@@ -48,7 +48,10 @@ public:
   float update(uint64_t now, bool evidence, float confirmation, float initial_limit,
                float pursuit_limit, bool pass_through, float range_lower, float closing_bias,
                float stop_distance, float deceleration, float jerk) {
-    const float low = clamp(initial_limit, 0.f, 10.f);
+    // Normal visual acquisition remains capped at 10 m/s. A terminal
+    // pass-through explicitly asks for immediate pursuit and may use the
+    // configured relative-speed budget up to the module's 60 m/s ceiling.
+    const float low = clamp(initial_limit, 0.f, pass_through ? 60.f : 10.f);
     if (!evidence || low <= 0.f || !std::isfinite(range_lower + closing_bias)) {
       reset();
       return low;
@@ -398,22 +401,40 @@ inline Vector3f constrained(Vector3f v, const Limits &l) {
   }
   return v * clamp(scale, 0.f, 1.f);
 }
-// Convex velocity constraints: reserve the base velocity before adding closure.
+// Intersect the complete ray base + c*los with the velocity constraints. Partial
+// following alone may be outside a Z bound while adding closure makes the SUM
+// feasible. Rejecting the base first creates a discontinuous zero-capture command.
 inline float closing_budget(const Vector3f &base, const Vector3f &los, const Limits &l,
                             float requested) {
-  if (!feasible(base, l) || !los.isAllFinite() || los.norm() < .5f) {
+  if (!base.isAllFinite() || !los.isAllFinite() || los.norm() < .5f ||
+      !std::isfinite(l.total + l.xy + l.up + l.down + requested) ||
+      min(min(l.total, l.xy), min(l.up, l.down)) < 0.f || requested <= 0.f) {
     return 0.f;
   }
-  float lo = 0.f, hi = max(requested, 0.f);
-  for (int i = 0; i < 24; ++i) {
-    const float mid = .5f * (lo + hi);
-    if (feasible(base + los * mid, l)) {
-      lo = mid;
-    } else {
-      hi = mid;
-    }
+  float lo = 0.f, hi = requested;
+  const auto intersect_ball = [&](float a, float b, float c) {
+    // a*c_speed^2 + 2*b*c_speed + c <= 0
+    if (a <= 0.f) { return c <= 0.f; }
+    const float discriminant = b*b - a*c;
+    if (discriminant < 0.f) { return false; }
+    const float root = sqrtf(discriminant);
+    lo = max(lo, (-b-root)/a);
+    hi = min(hi, (-b+root)/a);
+    return lo <= hi;
+  };
+  if (!intersect_ball(los.norm_squared(), base*los, base.norm_squared()-l.total*l.total) ||
+      !intersect_ball(los(0)*los(0)+los(1)*los(1), base(0)*los(0)+base(1)*los(1),
+                      base(0)*base(0)+base(1)*base(1)-l.xy*l.xy)) {
+    return 0.f;
   }
-  return lo;
+  if (fabsf(los(2)) > 1e-8f) {
+    const float a = (-l.up-base(2))/los(2), b = (l.down-base(2))/los(2);
+    lo = max(lo, min(a,b));
+    hi = min(hi, max(a,b));
+  } else if (base(2) < -l.up || base(2) > l.down) {
+    return 0.f;
+  }
+  return lo <= hi && hi >= 0.f && feasible(base + los*hi, l) ? hi : 0.f;
 }
 struct VelocityPlan {
   Vector3f velocity{}, acceleration{};

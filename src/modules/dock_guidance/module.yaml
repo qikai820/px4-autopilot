@@ -10,8 +10,11 @@ parameters:
         type: boolean
         default: true
       DOCK_CAM_DLY:
-        description: {short: Camera delay compensation}
+        description:
+          short: Camera delay compensation
+          long: Delay from image exposure to timestamp_sample reception. Applied once to body attitude, local position and camera command history. Does not measure servo mechanical lag.
         type: int32
+        unit: ms
         min: 0
         max: 5000
         default: 0
@@ -215,6 +218,38 @@ parameters:
         description: {short: Enable estimated moving-target following}
         type: boolean
         default: false
+      DOCK_PRED_EN:
+        description:
+          short: Enable three-dimensional predicted miss correction
+          long: Requires dynamic guidance and a trusted target estimate. Rotates the desired velocity before existing speed, acceleration, jerk and FOV constraints. Does not add terminal braking.
+        type: boolean
+        default: true
+      DOCK_PRED_TAU:
+        description:
+          short: Predicted velocity response time constant
+          long: Approximate combined command planner and vehicle velocity response. Must be validated from logged command and actual velocity; not camera latency.
+        type: float
+        unit: s
+        min: 0.05
+        max: 2.0
+        decimal: 2
+        default: 0.5
+      DOCK_PRED_TMAX:
+        description: {short: Maximum predicted time to plane for miss correction}
+        type: float
+        unit: s
+        min: 0.2
+        max: 10.0
+        decimal: 1
+        default: 5.0
+      DOCK_PRED_ANG:
+        description: {short: Maximum predictive velocity direction adjustment}
+        type: float
+        unit: deg
+        min: 1.0
+        max: 30.0
+        decimal: 1
+        default: 15.0
       DOCK_TGT_W:
         description: {short: Calibrated target projected width}
         type: float

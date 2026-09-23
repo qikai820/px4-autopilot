@@ -7,6 +7,41 @@
 
 using namespace dock_motion;
 
+static void test_following_outside_axis_limit() {
+  const Limits limits{60,100,40,4};
+  const Vector3f direction(.6f,0,-.8f), following(5.955f,.197f,4.352f);
+  assert(!feasible(following, limits));
+  const float budget = closing_budget(following,direction,limits,60);
+  const Vector3f command = following + direction*budget;
+  assert(budget > 50 && feasible(command,limits) && command(2) < -39.9f);
+  // A 2 mm/s change through the DOWN boundary cannot zero a valid climb.
+  const float before = closing_budget(Vector3f(6,0,3.999f),direction,limits,60);
+  const float after = closing_budget(Vector3f(6,0,4.001f),direction,limits,60);
+  assert(before > 50 && after > 50 && fabsf(before-after) < .01f);
+  assert(closing_budget(following,-direction,limits,60) < .0001f);
+  assert(closing_budget(following,direction,limits,.1f) < .0001f);
+  assert(closing_budget(Vector3f(80,0,0),Vector3f(-1,0,0),limits,60) > 59.99f);
+  assert(closing_budget(Vector3f(0,101,0),Vector3f(0,0,-1),limits,60) < .0001f);
+  // Independent grid oracle: every sampled feasible speed must be no larger
+  // than the returned maximum, including rays which enter from outside.
+  std::mt19937 rng(33);
+  std::uniform_real_distribution<float> sample(-1.f,1.f);
+  for (int trial=0; trial<600; ++trial) {
+    const Vector3f base(80*sample(rng),80*sample(rng),45*sample(rng));
+    const Vector3f axis = Vector3f(sample(rng),sample(rng),sample(rng)).normalized();
+    const Limits bounds{40+20*sample(rng),40+20*sample(rng),20+15*sample(rng),5+4*sample(rng)};
+    const float result = closing_budget(base,axis,bounds,60);
+    assert(result >= 0 && result <= 60);
+    if (result > 0) { assert(feasible(base+axis*result,bounds)); }
+    for (int k=1; k<=2000; ++k) {
+      const float speed = k*.03f;
+      if (feasible(base+axis*speed,bounds)) { assert(result+.001f >= speed); }
+    }
+  }
+  printf("log33 following allocation: closure %.3f m/s, final NED (%.3f, %.3f, %.3f) m/s\n",
+      double(budget),double(command(0)),double(command(1)),double(command(2)));
+}
+
 static void test_capture_schedule() {
   assert(approach_limit(true,40,10) == 40.f);
   assert(approach_limit(false,40,10) == 10.f);
@@ -42,6 +77,9 @@ static void test_capture_schedule() {
   assert(fast == 40.f); // no hidden 3 or 10 m/s ceiling when configured higher
   assert(schedule.update(2300000,false,1,3,40,false,500,5,2,3,8) == 3.f);
   assert(!schedule.ready());
+  // Terminal pass-through gives its full pursuit budget immediately, while
+  // plan_velocity still enforces FOV, axis, acceleration and jerk limits.
+  assert(schedule.update(2350000,false,1,60,60,true,500,5,2,3,8) == 60.f);
   assert(schedule.update(2400000,true,1,0,40,false,500,5,2,3,8) == 0.f);
   assert(!schedule.ready());
   assert(schedule.update(2500000,true,1,3,40,false,NAN,5,2,3,8) == 3.f);
@@ -301,6 +339,7 @@ static void test_bearing_gap() {
 
 int main(int argc, char **argv) {
   if (argc == 2 && strcmp(argv[1], "--replay") == 0) { return replay(); }
+  test_following_outside_axis_limit();
   test_final_velocity_planner();
   test_capture_schedule();
   test_static_camera_motion();

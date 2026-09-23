@@ -56,3 +56,12 @@ float32[3] following_command_ned
 float32[3] capture_command_ned
 float32[3] desired_velocity_ned       # before final acceleration/FOV planning
 float32[3] command_acceleration_ned   # difference of actual published velocity commands
+
+# Exposure alignment uses camera COMMAND history, not measured mount feedback.
+uint64 exposure_timestamp             # timestamp_sample minus DOCK_CAM_DLY, microseconds
+float32 sample_mount_pitch_deg        # command angle in effect at exposure [deg]
+bool camera_time_aligned              # supporting camera/body history found, no visual dropout
+bool prediction_valid                 # trusted approaching state within correction horizon
+float32 prediction_tgo_s              # time to approach plane under nominal first-order response [s]
+float32[3] prediction_miss_ned         # residual at predicted time including nominal response [m]
+float32[3] prediction_dv_ned           # desired-velocity change after speed limits, before accel/FOV [m/s]
