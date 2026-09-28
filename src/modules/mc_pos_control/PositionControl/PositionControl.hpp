@@ -108,6 +108,9 @@ public:
 	 */
 	void setThrustLimits(const float min, const float max);
 
+	/** Hold velocity integration while an external collective throttle is imposed downstream. */
+	void setVelocityIntegralHold(bool hold) { _hold_velocity_integral = hold; }
+
 	/**
 	 * Set margin that is kept for horizontal control when prioritizing vertical thrust
 	 * @param margin of normalized thrust that is kept for horizontal control e.g. 0.3
@@ -217,6 +220,7 @@ private:
 	float _lim_tilt{}; ///< Maximum tilt from level the output attitude is allowed to have
 
 	float _hover_thrust{}; ///< Thrust [HOVER_THRUST_MIN, HOVER_THRUST_MAX] with which the vehicle hovers not accelerating down or up with level orientation
+	bool _hold_velocity_integral{false}; ///< Prevent windup while Dock overrides collective throttle downstream
 	bool _decouple_horizontal_and_vertical_acceleration{true}; ///< Ignore vertical acceleration setpoint to remove its effect on the tilt setpoint
 
 	// States

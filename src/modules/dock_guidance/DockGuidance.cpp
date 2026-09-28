@@ -71,6 +71,7 @@ void DockGuidance::Run() {
   if (should_exit()) {
     if (!_unregistration_sent) {
       if (_dock_mode_active) {
+        _setpoint_valid = false;
         publish_safe_velocity_setpoint(hrt_absolute_time());
       }
 
@@ -797,6 +798,8 @@ void DockGuidance::update_mode_state() {
   }
 
   if (active && !_dock_mode_active) {
+    _dock_mode_active = true;
+    _dock_activation_time = now;
     _prediction_ready = _terminal_ready = _capture_terminal_plan = false;
     _prediction_candidate_since = _capture_terminal_candidate_since = _terminal_plan_deadline = 0;
     _capture_vertical_latch.reset();
@@ -848,6 +851,9 @@ void DockGuidance::update_mode_state() {
     }
 
   } else if (!active && _dock_mode_active) {
+    _dock_mode_active = false;
+    _dock_activation_time = 0;
+    publish_thrust_request(now);
     _prediction_ready = _terminal_ready = _capture_terminal_plan = false;
     _prediction_candidate_since = _capture_terminal_candidate_since = _terminal_plan_deadline = 0;
     _capture_vertical_latch.reset();
@@ -873,6 +879,20 @@ void DockGuidance::update_mode_state() {
   _dock_mode_active = active;
 }
 
+void DockGuidance::publish_thrust_request(hrt_abstime timestamp) {
+  // 发布固定总油门标量的请求；mc_rate_control 在最终推力输出前应用。
+  // 全部有效 Dock 阶段共用，不按速度达标或阶段切换释放。
+  dock_guidance_thrust_s request{};
+  request.timestamp = timestamp;
+  request.activation_timestamp = _dock_activation_time;
+  request.source_id = _mode_id >= 0 ? static_cast<uint8_t>(_mode_id) : 0;
+  request.thrust = _param_dock_thrust.get();
+  request.slew_rate = _param_dock_thrust_rate.get();
+  request.valid = _dock_mode_active && _airborne && _setpoint_valid &&
+                  !_vision_degraded && !_mode_fault_latched;
+  _thrust_pub.publish(request);
+}
+
 void DockGuidance::publish_velocity_setpoint(hrt_abstime timestamp,
                                              const Vector3f &velocity_ned,
                                              float yaw_setpoint_rad) {
@@ -889,6 +909,7 @@ void DockGuidance::publish_velocity_setpoint(hrt_abstime timestamp,
 
   trajectory.yaw = yaw_setpoint_rad;
   trajectory.yawspeed = NAN;
+  publish_thrust_request(timestamp);
   _trajectory_setpoint_pub.publish(trajectory);
 }
 

@@ -123,6 +123,35 @@ parameters:
         max: 20
         decimal: 1
         default: 3.0
+      DOCK_THR:
+        description:
+          short: Dock fixed collective throttle
+          long: >
+            Zero disables fixed throttle and its slew limiter. When positive, ramp the final
+            body-Z throttle sent to control allocation after battery scaling, then hold this
+            normalized scalar throughout all healthy Dock stages, including post-pass operation.
+            Reaching DOCK_VEL_MAX does not release it. The attitude/rate controllers continue
+            producing torque, so individual motor outputs may differ. Bounded by MPC thrust
+            limits. Fixed throttle changes altitude and braking response. Ground contact,
+            invalid guidance, stale commands and mode exit restore normal control immediately.
+        type: float
+        min: 0
+        max: 1
+        decimal: 2
+        default: 0.0
+      DOCK_THR_RATE:
+        description:
+          short: Dock collective throttle slew rate
+          long: >
+            Maximum normalized final body-Z throttle change per second while DOCK_THR is enabled.
+            Applies to entry and changes of DOCK_THR throughout healthy Dock operation in both
+            directions. A value of 0.2 changes thrust by at most 20 percentage points per second.
+            Smaller values give slower transitions. Mode exit and invalid guidance bypass this limiter.
+        type: float
+        min: 0.01
+        max: 2
+        decimal: 2
+        default: 0.2
       DOCK_DEC_MAX:
         description: {short: Maximum approach deceleration}
         type: float

@@ -136,12 +136,15 @@ MulticopterRateControl::Run()
 
 		/* check for updates in other topics */
 		_vehicle_control_mode_sub.update(&_vehicle_control_mode);
+		_dock_thrust_sub.update(&_dock_thrust);
+		_local_pos_sub.update(&_local_pos);
 
 		if (_vehicle_land_detected_sub.updated()) {
 			vehicle_land_detected_s vehicle_land_detected;
 
 			if (_vehicle_land_detected_sub.copy(&vehicle_land_detected)) {
 				_landed = vehicle_land_detected.landed;
+				_ground_contact = vehicle_land_detected.ground_contact;
 				_maybe_landed = vehicle_land_detected.maybe_landed;
 			}
 		}
@@ -255,6 +258,33 @@ MulticopterRateControl::Run()
 				}
 			}
 
+			// Dock fixes the final normalized collective throttle, after the normal
+			// battery scaling. Keep the rate controller's torque command untouched so
+			// the allocator can still correct attitude with individual motor outputs.
+			const hrt_abstime throttle_now = hrt_absolute_time();
+			const bool local_fresh = _local_pos.v_xy_valid && _local_pos.v_z_valid
+					&& _local_pos.timestamp > 0 && throttle_now >= _local_pos.timestamp
+					&& throttle_now - _local_pos.timestamp <= 250_ms;
+			const float measured_speed = local_fresh
+					? Vector3f(_local_pos.vx, _local_pos.vy, _local_pos.vz).norm() : NAN;
+			const bool throttle_allowed = _vehicle_control_mode.flag_armed
+					&& _vehicle_control_mode.flag_control_rates_enabled
+					&& _vehicle_control_mode.flag_multicopter_position_control_enabled
+					&& !_vehicle_control_mode.flag_control_termination_enabled
+					&& _vehicle_status.vehicle_type == vehicle_status_s::VEHICLE_TYPE_ROTARY_WING
+					&& !_landed && !_ground_contact;
+			const auto dock_request = _dock_thrust_control.update(_dock_thrust, throttle_now,
+					_vehicle_control_mode.source_id, throttle_allowed, measured_speed);
+			const float collective = _dock_throttle_slew.update(-vehicle_thrust_setpoint.xyz[2],
+					dock_request.thrust, dock_request.slew_rate, dt,
+					_param_mpc_thr_min.get(), _param_mpc_thr_max.get());
+
+			if (dock_request.slew_rate > 0.f) {
+				vehicle_thrust_setpoint.xyz[0] = 0.f;
+				vehicle_thrust_setpoint.xyz[1] = 0.f;
+				vehicle_thrust_setpoint.xyz[2] = -collective;
+			}
+
 			vehicle_thrust_setpoint.timestamp_sample = angular_velocity.timestamp_sample;
 			vehicle_thrust_setpoint.timestamp = hrt_absolute_time();
 			_vehicle_thrust_setpoint_pub.publish(vehicle_thrust_setpoint);
@@ -265,6 +295,8 @@ MulticopterRateControl::Run()
 
 			updateActuatorControlsStatus(vehicle_torque_setpoint, dt);
 
+		} else {
+			_dock_throttle_slew.reset();
 		}
 	}
 

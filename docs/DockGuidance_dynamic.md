@@ -4,6 +4,58 @@
 `dock_guidance_setpoint` 日志。目标速度和方向由多帧观测估计，不预设为
 10 m/s，也不把结果限制在 20～35 m/s。
 
+## 全阶段固定油门标量与油门软化（2026-09-28）
+
+`DOCK_THR` 大于 0 时，已经离地的飞机进入 Dock 后，`mc_rate_control` 在
+电池补偿之后、向控制分配器发布之前，直接固定机体系 Z 轴总油门标量。
+初始值取上一周期发布的油门，按 `DOCK_THR_RATE` 平滑升降到目标值。
+起始爬升、对准、捕获、加速、接近、恢复、末段及预测通过后均持续固定；
+达到 `DOCK_VEL_MAX` 或切换引导阶段不会释放。运行中修改 `DOCK_THR`
+也按相同变化率过渡。
+
+| 参数 | 含义 | 默认值 |
+| --- | --- | --- |
+| `DOCK_THR` | 归一化总油门标量，范围 0～1；0 关闭固定油门 | 0 |
+| `DOCK_THR_RATE` | 总油门变化率，范围 0.01～2，单位为归一化油门/秒；越小越柔和 | 0.2 |
+
+例如初始油门 0.40、目标 0.70、变化率 0.20，约 1.5 s 到达 0.70
+（前提是没有退出 Dock、限幅或失效）。这只是参数语义示例。
+固定的是 `vehicle_thrust_setpoint.xyz[2]` 的负值；`vehicle_attitude_setpoint`
+和 `vehicle_local_position_setpoint.thrust` 仍显示位置控制器产生的原始指令，
+可以随姿态和速度误差改变。姿态与角速度控制仍发布力矩，各电机经控制
+分配后的输出也可以不同。总油门受 `MPC_THR_MIN/MAX` 限制。
+
+`dock_guidance_thrust` 携带模式来源、入模时间、油门定值及变化率。
+`mc_rate_control` 检查当前模式、参数、新鲜度、离地状态与本机速度有效性；
+失效、视觉退化、触地、模式退出、关闭参数或本机速度无效时立即交还
+自动油门。位置控制器继续计算姿态方向；固定油门生效时冻结速度积分，
+避免交还控制时积分累积造成油门突变。
+
+固定总油门会改变高度与制动响应。`DOCK_VEL_MAX` 仍约束引导速度指令，
+不再控制油门释放，也不能保证实际速度不超限。参数纳入固件/QGC 元数据；
+需刷入新固件后配置，本修改本身不写入飞控参数。
+
+独立回归验证模式来源/时限/离地门控、油门标量斜坡、参数变化、退出接管、
+最终限幅、速度积分保持，以及姿态方向不受固定油门改动。
+构建固件生成 uORB 头文件后运行：
+
+```sh
+g++ -std=c++14 -Wall -Wextra -Wshadow -Werror -O2 \
+  -D__PX4_POSIX -D__PX4_LINUX -D__EXPORT= \
+  -Iplatforms/common/include -Iplatforms/posix/include -Iplatforms/common \
+  -Ibuild/cuav_7-nano_test -Isrc -Isrc/include -Isrc/lib -Isrc/lib/matrix \
+  src/modules/mc_pos_control/test_dock_thrust.cpp \
+  -Isrc/modules/mc_rate_control \
+  src/modules/mc_pos_control/PositionControl/PositionControl.cpp \
+  src/modules/mc_pos_control/PositionControl/ControlMath.cpp -o /tmp/dock_thrust_test
+/tmp/dock_thrust_test
+```
+
+这些测试和固件链接不等于闭环 SITL、HIL 或实飞验证。日志应对齐
+`dock_guidance_thrust`、`vehicle_control_mode`、`vehicle_thrust_setpoint.xyz[2]`
+及 `actuator_motors.control[*]`：进入 Dock 后，最终机体系总油门逐步趋近
+`-DOCK_THR`，各电机保留力矩分配差异。
+
 ## log_49 后的稳定性与采样时刻修正（2026-09-28）
 
 ### log_50 启动低速回归修复

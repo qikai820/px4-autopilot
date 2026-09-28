@@ -42,6 +42,7 @@
 #include <uORB/topics/arming_check_request.h>
 #include <uORB/topics/dock_guidance_setpoint.h>
 #include <uORB/topics/dock_guidance_prediction.h>
+#include <uORB/topics/dock_guidance_thrust.h>
 #include <uORB/topics/gimbal_controls.h>
 #include <uORB/topics/parameter_update.h>
 #include <uORB/topics/register_ext_component_reply.h>
@@ -125,6 +126,7 @@ private:
                                  const matrix::Vector3f &velocity_ned,
                                  float yaw_setpoint_rad);
   void publish_safe_velocity_setpoint(hrt_abstime timestamp);
+  void publish_thrust_request(hrt_abstime timestamp);
   void handle_visual_loss(hrt_abstime timestamp, const char *reason);
   void publish_degraded_setpoint(hrt_abstime timestamp);
   void publish_terminal_dash_setpoint(hrt_abstime timestamp);
@@ -204,6 +206,8 @@ private:
       ORB_ID(dock_guidance_setpoint)};
   uORB::Publication<dock_guidance_prediction_s> _prediction_pub{
       ORB_ID(dock_guidance_prediction)};
+  uORB::Publication<dock_guidance_thrust_s> _thrust_pub{
+      ORB_ID(dock_guidance_thrust)};
   uORB::Publication<gimbal_controls_s> _gimbal_controls_pub{
       ORB_ID(gimbal_controls)};
   uORB::Publication<trajectory_setpoint_s> _trajectory_setpoint_pub{
@@ -248,6 +252,7 @@ private:
   uint64_t _last_valid_observation_us{0};
   bool _setpoint_valid{false};
   bool _dock_mode_active{false};
+  hrt_abstime _dock_activation_time{0};
   bool _vision_degraded{false};
   bool _mode_fault_latched{false};
   bool _unregistration_sent{false};
@@ -409,6 +414,8 @@ private:
       (ParamFloat<px4::params::DOCK_LOS_MAX>)_param_dock_los_max,
       (ParamFloat<px4::params::DOCK_VEL_MAX>)_param_dock_vel_max,
       (ParamFloat<px4::params::DOCK_ACC_MAX>)_param_dock_acc_max,
+      (ParamFloat<px4::params::DOCK_THR>)_param_dock_thrust,
+      (ParamFloat<px4::params::DOCK_THR_RATE>)_param_dock_thrust_rate,
       (ParamFloat<px4::params::DOCK_DEC_MAX>)_param_dock_dec_max,
       (ParamFloat<px4::params::DOCK_STOP_DIST>)_param_dock_stop_dist,
       (ParamFloat<px4::params::DOCK_ALIGN_T>)_param_dock_align_t,

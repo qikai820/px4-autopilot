@@ -33,6 +33,8 @@
 
 #pragma once
 
+#include "DockThrottleSlew.hpp"
+#include "../mc_pos_control/DockThrustControl.hpp"
 #include <lib/rate_control/rate_control.hpp>
 #include <lib/mathlib/math/filter/AlphaFilter.hpp>
 #include <lib/matrix/matrix/math.hpp>
@@ -49,6 +51,7 @@
 #include <uORB/SubscriptionCallback.hpp>
 #include <uORB/topics/actuator_controls_status.h>
 #include <uORB/topics/battery_status.h>
+#include <uORB/topics/dock_guidance_thrust.h>
 #include <uORB/topics/control_allocator_status.h>
 #include <uORB/topics/manual_control_setpoint.h>
 #include <uORB/topics/parameter_update.h>
@@ -56,6 +59,7 @@
 #include <uORB/topics/vehicle_angular_velocity.h>
 #include <uORB/topics/vehicle_control_mode.h>
 #include <uORB/topics/vehicle_land_detected.h>
+#include <uORB/topics/vehicle_local_position.h>
 #include <uORB/topics/vehicle_rates_setpoint.h>
 #include <uORB/topics/vehicle_status.h>
 #include <uORB/topics/vehicle_thrust_setpoint.h>
@@ -93,6 +97,8 @@ private:
 	RateControl _rate_control; ///< class for rate control calculations
 
 	uORB::Subscription _battery_status_sub{ORB_ID(battery_status)};
+	uORB::Subscription _dock_thrust_sub{ORB_ID(dock_guidance_thrust)};
+	uORB::Subscription _local_pos_sub{ORB_ID(vehicle_local_position)};
 	uORB::Subscription _control_allocator_status_sub{ORB_ID(control_allocator_status)};
 	uORB::Subscription _manual_control_setpoint_sub{ORB_ID(manual_control_setpoint)};
 	uORB::Subscription _vehicle_control_mode_sub{ORB_ID(vehicle_control_mode)};
@@ -112,8 +118,13 @@ private:
 
 	vehicle_control_mode_s	_vehicle_control_mode{};
 	vehicle_status_s	_vehicle_status{};
+	dock_guidance_thrust_s _dock_thrust{};
+	vehicle_local_position_s _local_pos{};
+	DockThrustControl _dock_thrust_control;
+	DockThrottleSlew _dock_throttle_slew;
 
 	bool _landed{true};
+	bool _ground_contact{true};
 	bool _maybe_landed{true};
 
 	hrt_abstime _last_run{0};
@@ -133,6 +144,8 @@ private:
 	AlphaFilter<float> _output_lpf_yaw;
 
 	DEFINE_PARAMETERS(
+		(ParamFloat<px4::params::MPC_THR_MIN>) _param_mpc_thr_min,
+		(ParamFloat<px4::params::MPC_THR_MAX>) _param_mpc_thr_max,
 		(ParamFloat<px4::params::MC_ROLLRATE_P>) _param_mc_rollrate_p,
 		(ParamFloat<px4::params::MC_ROLLRATE_I>) _param_mc_rollrate_i,
 		(ParamFloat<px4::params::MC_RR_INT_LIM>) _param_mc_rr_int_lim,

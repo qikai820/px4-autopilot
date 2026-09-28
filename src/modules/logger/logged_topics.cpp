@@ -59,10 +59,11 @@ void LoggedTopics::add_default_topics()
 	add_topic("config_overrides");
 	add_topic("cpuload");
 	add_topic("distance_sensor_mode_change_request");
-	// Dock mode diagnostics: record both the raw visual input and the final
-	// rate/throttle command so visual, speed and actuator behavior can be aligned.
+	// Dock mode diagnostics: align guidance and collective thrust requests with
+	// the downstream attitude/thrust output and vehicle motion.
 	add_topic("dock_guidance_setpoint", 20);
 	add_topic("dock_guidance_prediction", 20);
+	add_topic("dock_guidance_thrust", 20);
 	add_topic_multi("dronecan_node_status", 250);
 	add_optional_topic("external_ins_attitude");
 	add_optional_topic("external_ins_global_position");

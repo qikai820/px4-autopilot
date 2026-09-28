@@ -182,6 +182,12 @@ void PositionControl::_velocityControl(const float dt)
 		_thr_sp.xy() = thrust_sp_xy / thrust_sp_xy_norm * thrust_max_xy;
 	}
 
+	// The downstream Dock throttle cannot respond to velocity-integral corrections.
+	// Hold the integrator until normal collective throttle control resumes.
+	if (_hold_velocity_integral) {
+		return;
+	}
+
 	// Use tracking Anti-Windup for horizontal direction: during saturation, the integrator is used to unsaturate the output
 	// see Anti-Reset Windup for PID controllers, L.Rundqwist, 1990
 	const Vector2f acc_sp_xy_produced = Vector2f(_thr_sp) * (CONSTANTS_ONE_G / _hover_thrust);

@@ -413,6 +413,7 @@ void MulticopterPositionControl::Run()
 		}
 
 		_vehicle_land_detected_sub.update(&_vehicle_land_detected);
+		_dock_thrust_sub.update(&_dock_thrust);
 
 		if (_param_mpc_use_hte.get()) {
 			hover_thrust_estimate_s hte;
@@ -570,6 +571,17 @@ void MulticopterPositionControl::Run()
 
 			const hrt_abstime now = hrt_absolute_time();
 
+			const bool thrust_override_allowed = _vehicle_control_mode.flag_armed
+					&& !_vehicle_control_mode.flag_control_termination_enabled && flying
+					&& !_vehicle_land_detected.landed && !_vehicle_land_detected.ground_contact;
+			const bool speed_valid = vehicle_local_position.v_xy_valid && vehicle_local_position.v_z_valid
+					&& now >= vehicle_local_position.timestamp && now - vehicle_local_position.timestamp <= 100_ms;
+			const float measured_speed = speed_valid ? Vector3f(vehicle_local_position.vx, vehicle_local_position.vy,
+						    vehicle_local_position.vz).norm() : NAN;
+			const auto thrust_request = _dock_thrust_control.update(_dock_thrust, now,
+					_vehicle_control_mode.source_id, thrust_override_allowed, measured_speed);
+			_control.setVelocityIntegralHold(thrust_request.slew_rate > 0.f);
+
 			// Run position control
 			if (_control.update(dt)) {
 
@@ -577,6 +589,9 @@ void MulticopterPositionControl::Run()
 				_last_valid_setpoint = _setpoint;
 
 			} else {
+
+				// Fallback/failsafe must be able to change thrust immediately.
+				_control.setVelocityIntegralHold(false);
 
 				// Initial update failed - Try fallback if within timeout
 				if (now < _last_valid_setpoint.timestamp + 200_ms) {
@@ -616,6 +631,7 @@ void MulticopterPositionControl::Run()
 			_takeoff.updateTakeoffState(_vehicle_control_mode.flag_armed, _vehicle_land_detected.landed, false, 10.f, true,
 						    vehicle_local_position.timestamp_sample);
 			_control.resetIntegral();
+			_control.setVelocityIntegralHold(false);
 		}
 
 		// Publish takeoff status
