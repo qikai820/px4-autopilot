@@ -36,6 +36,46 @@ struct PredictionEvidence {
   bool usable{false};
 };
 
+// Before the full crossing estimate is trusted, persistent vertical miss may
+// still justify a small, reversible steering bias. Never use this for a
+// terminal commit or for the unobservable horizontal/depth components.
+inline float soft_capture_vertical_delta(const MissCorrection &candidate,
+                                         float position_sigma, float acceleration) {
+  if (!candidate.valid || !std::isfinite(position_sigma + acceleration) ||
+      position_sigma < 0.f || acceleration <= 0.f ||
+      candidate.time_to_plane < .25f || candidate.time_to_plane > 2.5f ||
+      !candidate.miss.isAllFinite() || !candidate.correction.isAllFinite() ||
+      fabsf(candidate.miss(2)) < 1.f ||
+      candidate.miss(2) * candidate.correction(2) <= 0.f) {
+    return 0.f;
+  }
+  const float confidence = clamp(fabsf(candidate.miss(2)) / (position_sigma + 1.f), .2f, .5f);
+  const float cap = min(2.f, .25f * acceleration);
+  return clamp(candidate.correction(2) * confidence, -cap, cap);
+}
+
+class VerticalCaptureLatch {
+public:
+  void reset() { _since = 0; _start_updates = 0; _sign = 0; }
+  float update(uint64_t now, int accepted_updates, float delta) {
+    if (!now || !std::isfinite(delta) || fabsf(delta) <= .01f || accepted_updates < 0) {
+      reset();
+      return 0.f;
+    }
+    const int8_t sign = delta > 0.f ? 1 : -1;
+    if (_sign != sign || !_since || now < _since || accepted_updates < _start_updates) {
+      _since = now;
+      _start_updates = accepted_updates;
+      _sign = sign;
+    }
+    return now - _since >= 200000 && accepted_updates >= _start_updates + 2 ? delta : 0.f;
+  }
+private:
+  uint64_t _since{0};
+  int _start_updates{0};
+  int8_t _sign{0};
+};
+
 // Full 3-D velocity uncertainty may be dominated by optical depth. Test the
 // predicted miss IN the crossing plane, including the uncertainty in when the
 // target reaches that plane. This does not certify full target velocity.

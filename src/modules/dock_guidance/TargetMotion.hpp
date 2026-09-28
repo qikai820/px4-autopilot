@@ -44,6 +44,9 @@ class CaptureSchedule {
 public:
   void reset() { _since = 0; _ready = false; }
   bool ready() const { return _ready; }
+  float evidence_duration(uint64_t now) const {
+    return _since && now >= _since ? (now - _since) * 1e-6f : 0.f;
+  }
   float update(uint64_t now, bool evidence, float confirmation, float initial_limit,
                float pursuit_limit, bool pass_through, float range_lower, float closing_bias,
                float stop_distance, float deceleration, float jerk) {

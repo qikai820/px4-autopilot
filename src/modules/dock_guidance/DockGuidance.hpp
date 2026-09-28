@@ -312,8 +312,10 @@ private:
   dock_motion::PredictionReject _prediction_reject{dock_motion::PredictionReject::NoScale};
   float _prediction_cross_sigma{INFINITY};
   float _prediction_cross_velocity_sigma{INFINITY};
+  float _early_vertical_bias{0.f};
   hrt_abstime _prediction_candidate_since{0};
   hrt_abstime _capture_terminal_candidate_since{0};
+  dock_motion::VerticalCaptureLatch _capture_vertical_latch;
   int _prediction_start_updates{0};
   hrt_abstime _terminal_plan_deadline{0};
   float _dynamic_closure{0.f};
@@ -326,6 +328,27 @@ private:
   bool _startup_height_reached{false};
   bool _startup_height_hold{false};
   dock_motion::CaptureSchedule _capture_schedule{};
+  struct CaptureGateDiagnostics {
+    float range_lower_m{NAN};
+    float range_required_m{NAN};
+    float fov_limit{NAN};
+    float los_rate_deg_s{NAN};
+    float los_rate_limit_deg_s{NAN};
+    float evidence_time_s{0.f};
+    float confirmation_required_s{NAN};
+    bool evaluated{false};
+    bool range_fresh{false};
+    bool not_hard{false};
+    bool fov_ok{false};
+    bool los_rate_ok{false};
+    bool range_ok{false};
+    bool pass_through_latched{false};
+    bool limit_enabled{false};
+  } _capture_gate{};
+  float _camera_image_pitch_rate_deg_s{NAN};
+  float _camera_pitch_fov_weight{NAN};
+  float _camera_pitch_rate_weight{NAN};
+  float _camera_pitch_final_weight{NAN};
   hrt_abstime _startup_settled_since{0};
   uint8_t _estimator_reset_reason{0};
   matrix::Vector3f _following_command{}, _capture_command{}, _desired_velocity{};

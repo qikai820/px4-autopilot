@@ -169,6 +169,40 @@ static void test_dynamic_image_translation() {
       limit_image_velocity(mixed, 1.f), forward, camera_right, 0.f);
   assert(fabsf(pitch_first(1) - 1.f) < 1e-5f);
   assert(cap_first(1) < .32f);
+  assert(fabsf(pitch_rate_assist(.1f, 5.f, 5.f) - .1f) < 1e-6f);
+  assert(fabsf(pitch_rate_assist(.1f, 10.f, 5.f) - .5f) < 1e-6f);
+  assert(fabsf(pitch_rate_assist(.1f, -15.f, 5.f) - 1.f) < 1e-6f);
+  assert(fabsf(pitch_rate_assist(.3f, NAN, 5.f) - .3f) < 1e-6f);
+}
+
+static void test_early_vertical_capture() {
+  MissCorrection candidate;
+  candidate.valid = true;
+  candidate.time_to_plane = 1.3f;
+  candidate.miss = Vector3f(2.f, .1f, 4.f);
+  candidate.correction = Vector3f(2.f, .1f, 3.8f);
+  const float up_bias = soft_capture_vertical_delta(candidate, 10.f, 8.f);
+  assert(up_bias > 1.f && up_bias < 2.f);
+  candidate.miss(2) = -4.f;
+  candidate.correction(2) = -3.8f;
+  assert(fabsf(soft_capture_vertical_delta(candidate, 10.f, 8.f) + up_bias) < 1e-6f);
+  candidate.correction(2) = 3.8f;
+  assert(soft_capture_vertical_delta(candidate, 10.f, 8.f) == 0.f);
+  candidate.miss(2) = 20.f;
+  assert(soft_capture_vertical_delta(candidate, 0.f, 8.f) <= 2.f);
+  candidate.time_to_plane = 3.f;
+  assert(soft_capture_vertical_delta(candidate, 10.f, 8.f) == 0.f);
+  candidate.time_to_plane = 1.f;
+  assert(soft_capture_vertical_delta(candidate, NAN, 8.f) == 0.f);
+  VerticalCaptureLatch latch;
+  assert(latch.update(1000000, 10, up_bias) == 0.f);
+  assert(latch.update(1190000, 12, up_bias) == 0.f);
+  assert(latch.update(1200000, 12, up_bias) == up_bias);
+  assert(latch.update(1210000, 13, -up_bias) == 0.f);
+  assert(latch.update(1410000, 15, -up_bias) == -up_bias);
+  assert(latch.update(1420000, 15, 0.f) == 0.f);
+  assert(latch.update(1430000, 16, up_bias) == 0.f);
+  assert(latch.update(1000000, 17, up_bias) == 0.f);
 }
 
 // Separate plant: held velocity command followed by first-order vehicle response.
@@ -218,6 +252,7 @@ int main() {
   test_delayed_rotating_camera();
   test_predictive_geometry();
   test_dynamic_image_translation();
+  test_early_vertical_capture();
   for (float tau : {.2f, .4f, .7f}) {
     const Vector3f relative(150, 20, -70), target(10, 4, 0), own(38, 3, -8);
     const float baseline = run_approach(false, tau, relative, target, own);

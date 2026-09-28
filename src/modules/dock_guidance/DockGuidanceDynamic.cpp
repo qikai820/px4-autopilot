@@ -337,19 +337,39 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
       const float range_lower = _estimated_relative.norm() - 2.f * _target_position_error;
       const bool pass_through_latched = _param_dock_terminal_enable.get() &&
                                         _capture_schedule.ready();
+      const float range_required = math::max(10.f, _param_dock_stop_dist.get());
+      const float los_rate = _los_e_dot.norm();
+      const float acquisition_rate = math::radians(5.f);
+      _capture_gate.evaluated = true;
+      _capture_gate.range_lower_m = range_lower;
+      _capture_gate.range_required_m = range_required;
+      _capture_gate.fov_limit = pass_through_latched ? soft : align;
+      _capture_gate.los_rate_deg_s = math::degrees(los_rate);
+      _capture_gate.los_rate_limit_deg_s = math::degrees(acquisition_rate);
+      _capture_gate.confirmation_required_s = math::constrain(_param_dock_align_t.get(), .1f, 5.f);
+      _capture_gate.pass_through_latched = pass_through_latched;
+      _capture_gate.range_fresh = _target_motion.fresh_range(now);
+      _capture_gate.not_hard = !hard;
+      _capture_gate.fov_ok = std::isfinite(_fov_ratio + align + soft) &&
+                             (pass_through_latched ? _fov_ratio < soft : _fov_ratio <= align);
+      _capture_gate.los_rate_ok = std::isfinite(los_rate) &&
+                                  (pass_through_latched || los_rate < acquisition_rate);
+      _capture_gate.range_ok = std::isfinite(range_lower) &&
+                                (pass_through_latched || range_lower > range_required);
       // 末段穿越属于追击动作：米制目标速度尚未完全收敛时，可用已确认的
       // 几何和图像证据争取可用闭合速度；发布前仍会检查视场、分轴速度、加速度和加加速度。
       const float initial_capture_limit = _param_dock_terminal_enable.get()
                                           ? pursuit_limit
                                           : _param_dock_capture_speed.get();
-      const bool common_capture_evidence = _target_motion.fresh_range(now) &&
+      _capture_gate.limit_enabled = initial_capture_limit > 0.f;
+      const bool common_capture_evidence = _capture_gate.range_fresh &&
           std::isfinite(range_lower) && dock_motion::capture_image_evidence(
-              hard, _fov_ratio, align, soft, _los_e_dot.norm(),
-              math::radians(5.f), pass_through_latched);
+              hard, _fov_ratio, align, soft, los_rate,
+              acquisition_rate, pass_through_latched);
       const bool capture_evidence = dock_motion::capture_evidence_allowed(
           common_capture_evidence, _param_dock_terminal_enable.get(),
           pass_through_latched, range_lower,
-          math::max(10.f, _param_dock_stop_dist.get()));
+          range_required);
       const float closing_bias = (base - _target_velocity) * capture_direction +
           2.f * _target_motion.directional_velocity_sigma(capture_direction);
       const float capture_limit = _capture_schedule.update(now, capture_evidence,
@@ -358,6 +378,7 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
           _param_dock_stop_dist.get(), deceleration, _param_dock_dynamic_jerk.get());
       _capture_evidence_valid = capture_evidence;
       _capture_acceleration_ready = _capture_schedule.ready();
+      _capture_gate.evidence_time_s = _capture_schedule.evidence_duration(now);
       _capture_speed_limit = capture_limit;
       const float capture_scale = hard ? 0.f : dock_motion::clamp(
           (soft - _fov_ratio) / (soft - align), 0.f, 1.f);
@@ -395,6 +416,38 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
     }
   }
   desired = dock_motion::constrained(desired, limits);
+  // 捕获阶段的完整目标速度还不可信时，三维穿越修正常因距离方差过大被拒绝。
+  // 持续同号的垂直错失仍可先给出小幅预修正，为加速度/jerk 规划器争取时间；
+  // 不使用这条软修正放行终端盲飞，也不改变已经收敛的东西向控制。
+  const bool early_vertical_eligible = _param_dock_pred_enable.get() &&
+      _stage == Stage::TRACK_CAPTURE && _capture_schedule.ready() &&
+      _capture_evidence_valid && !_startup_height_hold && !hard &&
+      _fov_ratio < align && _camera_time_aligned &&
+      _target_motion.motion_state() && _target_motion.fresh_range(now) &&
+      std::isfinite(_target_position_error);
+  if (early_vertical_eligible) {
+    const float prediction_time = math::constrain(_param_dock_capture_predict_time.get(), .2f, 5.f);
+    const auto preview = dock_motion::correct_predicted_miss(_estimated_relative,
+        _velocity_ned, _target_velocity, desired, direction,
+        math::constrain(_param_dock_pred_response.get(), .05f, 2.f), prediction_time,
+        math::radians(math::constrain(_param_dock_pred_angle.get(), 1.f, 30.f)), acceleration);
+    const float vertical_delta = dock_motion::soft_capture_vertical_delta(
+        preview, _target_position_error, acceleration);
+    const auto evidence = preview.valid ? dock_motion::assess_prediction(_target_motion, now,
+        direction, _velocity_ned, _target_velocity, preview, prediction_time,
+        math::max(.2f, _param_dock_pass_error.get()),
+        math::max(.2f, _param_dock_est_velocity_error.get())) : dock_motion::PredictionEvidence{};
+    const float confirmed_delta = _capture_vertical_latch.update(now,
+        _target_motion.accepted_updates(), evidence.usable ? 0.f : vertical_delta);
+    if (fabsf(confirmed_delta) > .01f) {
+      const float before_vertical = desired(2);
+      desired(2) += confirmed_delta;
+      desired = dock_motion::constrained(desired, limits);
+      _early_vertical_bias = desired(2) - before_vertical;
+    }
+  } else {
+    _capture_vertical_latch.reset();
+  }
   // 在最终速度规划前修正预测的三维穿越误差；视场/居中约束仍具有优先权。
   // 完整三维速度仍按原门槛标记；捕获时仅允许短时、低横向方差的穿越修正。
   const bool approach_stage = _stage == Stage::ACCELERATE ||

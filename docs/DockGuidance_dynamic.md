@@ -144,6 +144,27 @@ Viztra 驱动的 `timestamp_sample` 是完整串口帧接收时刻。统一曝�
 超过 `DOCK_EST_VERR` 时，`target_motion_valid` 仍保持 false，不把图像框尺寸
 伪装成高精度三维距离。到达时间的不确定性由径向速度误差传播进横向错失预算。
 视场到达软边界或确认硬保护时不增加预测修正，继续由原视场恢复处理。
+在 `TRACK_CAPTURE` 的完整预测仍因不确定度被拒绝时，若已确认捕获、距离更新
+新鲜、相机时间对齐且图像处于对准区，可对持续至少 0.2 s、跨两个新观测且同号的
+垂直预测错失施加受限预修正。该修正最多 2 m/s，只进入原速度/加速度/jerk/FOV
+规划器，不改变东西向目标速度前馈，也不能据此标记 `prediction_ready` 或锁定末段。
+完整预测一旦通过证据检查便接管。`dock_guidance_prediction.early_vertical_dv_m_s`
+记录速度约束后、加速度/FOV 规划前实际采用的垂直偏置。
+动态模式启用相机俯仰舵机时，若已滤波的图像俯仰变化速度超过
+`DOCK_CAM_P_RATE`，逐步提前恢复飞机俯仰平移纠偏；静态模式保持原有辅助比例。
+`dock_guidance_prediction` 还记录捕获门槛：`capture_gate_evaluated` 指示本帧是否
+实际计算了捕获证据；`capture_range_fresh`、`capture_not_hard`、`capture_fov_ok`、
+`capture_los_rate_ok`、`capture_range_ok`、`capture_limit_enabled` 分别记录距离
+新鲜度、硬视场保护、图像对准、地理视线角速度、保守距离和起始限速的判定。
+`capture_range_lower_m` 与 `capture_range_required_m`、`capture_los_rate_deg_s` 与
+`capture_los_rate_limit_deg_s`、`capture_evidence_time_s` 与
+`capture_confirmation_required_s` 可直接对照；`capture_fov_limit` 可与
+`dock_guidance_setpoint.fov_ratio` 对照。`capture_pass_through_latched` 为 true 时，
+视场使用软边界，角速度和初始距离门槛放宽；最终的
+`capture_evidence_valid`、`capture_ready` 与控制话题中的同名状态一致。
+相机辅助记录 `camera_image_pitch_rate_deg_s`、`camera_pitch_fov_weight`、
+`camera_pitch_rate_weight` 和实际采用的 `camera_pitch_final_weight`，后者取前两个
+权重的较大值。门槛未评估或视觉退化时，相关原始量记为 NaN，判定标志为 false。
 仅连续 `DOCK_PRED_CFM` 且跨至少两个新观测后才把 `prediction_ready` 标为 true。
 近距离、剩余时间不超过 `DOCK_BLIND_TGO`，并满足原 `DOCK_PASS_ERR` 及
 `DOCK_TERM_CFM` 时，锁定短时终端速度和平面。目标过近而丢失图像后按锁定估计

@@ -68,9 +68,12 @@ static void test_capture_schedule() {
   assert(!capture_image_evidence(true,.20f,.30f,.65f,.05f,.1f,true));
   CaptureSchedule schedule;
   assert(schedule.update(1000000,true,1,3,10,false,80,6,2,3,8) == 3.f);
+  assert(schedule.evidence_duration(1000000) == 0.f);
   assert(!schedule.ready());
   assert(schedule.update(1900000,true,1,3,10,false,80,6,2,3,8) == 3.f);
+  assert(fabsf(schedule.evidence_duration(1900000) - .9f) < 1e-6f);
   assert(schedule.update(2000000,true,1,3,10,false,80,6,2,3,8) == 10.f);
+  assert(schedule.evidence_duration(2000000) == 1.f);
   assert(schedule.ready());
   const float uncertain = schedule.update(2100000,true,1,3,10,false,20,12,2,3,8);
   assert(uncertain == 3.f); // range/motion uncertainty must still bound capture
@@ -78,6 +81,7 @@ static void test_capture_schedule() {
   assert(fast == 40.f); // no hidden 3 or 10 m/s ceiling when configured higher
   assert(schedule.update(2300000,false,1,3,40,false,500,5,2,3,8) == 3.f);
   assert(!schedule.ready());
+  assert(schedule.evidence_duration(2300000) == 0.f);
   // Terminal pass-through gives its full pursuit budget immediately, while
   // plan_velocity still enforces FOV, axis, acceleration and jerk limits.
   assert(schedule.update(2350000,false,1,60,60,true,500,5,2,3,8) == 60.f);

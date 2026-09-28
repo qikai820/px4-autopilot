@@ -441,12 +441,19 @@ void DockGuidance::reset_tracking_state() {
   _prediction_ready = _terminal_ready = _capture_terminal_plan = false;
   _prediction_reject = dock_motion::PredictionReject::NoScale;
   _prediction_cross_sigma = _prediction_cross_velocity_sigma = INFINITY;
+  _early_vertical_bias = 0.f;
   _prediction_candidate_since = _capture_terminal_candidate_since = _terminal_plan_deadline = 0;
   _prediction_start_updates = 0;
+  _capture_vertical_latch.reset();
   _observation_exposure_us = 0;
   _sample_camera_pitch_deg = NAN;
   _camera_time_aligned = false;
   _capture_schedule.reset();
+  _capture_gate = CaptureGateDiagnostics{};
+  _camera_image_pitch_rate_deg_s = NAN;
+  _camera_pitch_fov_weight = NAN;
+  _camera_pitch_rate_weight = NAN;
+  _camera_pitch_final_weight = NAN;
   _startup_ray_time = 0;
   _startup_ray_rate.zero();
   _startup_climb = false;
@@ -526,6 +533,17 @@ void DockGuidance::invalidate_setpoint(hrt_abstime timestamp,
   prediction.cross_sigma_m = _prediction_cross_sigma;
   prediction.cross_velocity_sigma_m_s = _prediction_cross_velocity_sigma;
   prediction.tgo_s = _miss_correction.time_to_plane;
+  prediction.capture_range_lower_m = NAN;
+  prediction.capture_range_required_m = NAN;
+  prediction.capture_fov_limit = NAN;
+  prediction.capture_los_rate_deg_s = NAN;
+  prediction.capture_los_rate_limit_deg_s = NAN;
+  prediction.capture_evidence_time_s = NAN;
+  prediction.capture_confirmation_required_s = NAN;
+  prediction.camera_image_pitch_rate_deg_s = NAN;
+  prediction.camera_pitch_fov_weight = NAN;
+  prediction.camera_pitch_rate_weight = NAN;
+  prediction.camera_pitch_final_weight = NAN;
   prediction.reject_reason = static_cast<uint8_t>(dock_motion::PredictionReject::Fault);
   _prediction_pub.publish(prediction);
 
@@ -560,6 +578,8 @@ void DockGuidance::handle_visual_loss(hrt_abstime timestamp,
   _miss_correction = {};
   _camera_time_aligned = false;
   _capture_schedule.reset();
+  _capture_vertical_latch.reset();
+  _early_vertical_bias = 0.f;
   if (_param_dock_dyn_enable.get() && _dock_mode_active && _stage == Stage::TERMINAL_DASH) {
     dynamic_terminal(timestamp, true);
     return;
@@ -755,6 +775,8 @@ void DockGuidance::update_mode_state() {
   if (active && !_dock_mode_active) {
     _prediction_ready = _terminal_ready = _capture_terminal_plan = false;
     _prediction_candidate_since = _capture_terminal_candidate_since = _terminal_plan_deadline = 0;
+    _capture_vertical_latch.reset();
+    _early_vertical_bias = 0.f;
     // 入模时重置捕获计时；动态路径从当前实测速度过渡，起飞爬升期间禁止要求下降。
     _capture_schedule.reset();
     _startup_ray_time = 0;
@@ -804,6 +826,8 @@ void DockGuidance::update_mode_state() {
   } else if (!active && _dock_mode_active) {
     _prediction_ready = _terminal_ready = _capture_terminal_plan = false;
     _prediction_candidate_since = _capture_terminal_candidate_since = _terminal_plan_deadline = 0;
+    _capture_vertical_latch.reset();
+    _early_vertical_bias = 0.f;
     _capture_schedule.reset();
     _startup_climb = false;
     _startup_height_reached = false;
@@ -946,6 +970,30 @@ void DockGuidance::publish_guidance_status(hrt_abstime timestamp, bool valid,
   prediction.cross_sigma_m = _prediction_cross_sigma;
   prediction.cross_velocity_sigma_m_s = _prediction_cross_velocity_sigma;
   prediction.tgo_s = _miss_correction.time_to_plane;
+  prediction.early_vertical_dv_m_s = valid && !degraded ? _early_vertical_bias : 0.f;
+  const bool capture_diagnostics_valid = valid && !degraded && _capture_gate.evaluated;
+  prediction.capture_gate_evaluated = capture_diagnostics_valid;
+  prediction.capture_range_lower_m = capture_diagnostics_valid ? _capture_gate.range_lower_m : NAN;
+  prediction.capture_range_required_m = capture_diagnostics_valid ? _capture_gate.range_required_m : NAN;
+  prediction.capture_fov_limit = capture_diagnostics_valid ? _capture_gate.fov_limit : NAN;
+  prediction.capture_los_rate_deg_s = capture_diagnostics_valid ? _capture_gate.los_rate_deg_s : NAN;
+  prediction.capture_los_rate_limit_deg_s = capture_diagnostics_valid ? _capture_gate.los_rate_limit_deg_s : NAN;
+  prediction.capture_evidence_time_s = capture_diagnostics_valid ? _capture_gate.evidence_time_s : NAN;
+  prediction.capture_confirmation_required_s = capture_diagnostics_valid ? _capture_gate.confirmation_required_s : NAN;
+  prediction.capture_range_fresh = capture_diagnostics_valid && _capture_gate.range_fresh;
+  prediction.capture_not_hard = capture_diagnostics_valid && _capture_gate.not_hard;
+  prediction.capture_fov_ok = capture_diagnostics_valid && _capture_gate.fov_ok;
+  prediction.capture_los_rate_ok = capture_diagnostics_valid && _capture_gate.los_rate_ok;
+  prediction.capture_range_ok = capture_diagnostics_valid && _capture_gate.range_ok;
+  prediction.capture_pass_through_latched = capture_diagnostics_valid && _capture_gate.pass_through_latched;
+  prediction.capture_limit_enabled = capture_diagnostics_valid && _capture_gate.limit_enabled;
+  prediction.capture_evidence_valid = capture_diagnostics_valid && _capture_evidence_valid;
+  prediction.capture_ready = capture_diagnostics_valid && _capture_acceleration_ready;
+  const bool pitch_diagnostics_valid = valid && !degraded && std::isfinite(_camera_pitch_final_weight);
+  prediction.camera_image_pitch_rate_deg_s = pitch_diagnostics_valid ? _camera_image_pitch_rate_deg_s : NAN;
+  prediction.camera_pitch_fov_weight = pitch_diagnostics_valid ? _camera_pitch_fov_weight : NAN;
+  prediction.camera_pitch_rate_weight = pitch_diagnostics_valid ? _camera_pitch_rate_weight : NAN;
+  prediction.camera_pitch_final_weight = pitch_diagnostics_valid ? _camera_pitch_final_weight : NAN;
   prediction.prediction_ready = _prediction_ready && valid &&
       _prediction_reject == dock_motion::PredictionReject::Ready && !degraded;
   prediction.terminal_ready = _terminal_ready;
@@ -1477,6 +1525,12 @@ void DockGuidance::process_observation(float los_yaw_deg, float los_pitch_deg,
 void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
                                    hrt_abstime now, const Dcmf &sample_camera_to_body) {
   _miss_correction = {};
+  _early_vertical_bias = 0.f;
+  _capture_gate = CaptureGateDiagnostics{};
+  _camera_image_pitch_rate_deg_s = NAN;
+  _camera_pitch_fov_weight = NAN;
+  _camera_pitch_rate_weight = NAN;
+  _camera_pitch_final_weight = NAN;
   const Vector3f previous_velocity_setpoint_ned = _velocity_setpoint_ned;
 
   // 相机系误差用于判断图像边界是否安全；滤波后的 NED 视线决定交给
@@ -1569,8 +1623,26 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
         math::max(soft_ratio - assist_start, .05f), 0.f, 1.f);
     if (_param_dock_dyn_enable.get()) {
       // 动态目标横向误差必须靠飞机平移，舵机只替代俯仰平移。
+      // 使用上一帧已滤波的图像角速度：舵机跟不上时，提前恢复俯仰平移权重。
+      float image_pitch_rate = 0.f;
+      bool pitch_rate_sample_valid = false;
+      if (_startup_ray_time && now > _startup_ray_time && now - _startup_ray_time < 100_ms) {
+        const float yaw = math::radians(_los_c_deg(0));
+        const float pitch = math::radians(_los_c_deg(1));
+        const Vector3f pitch_tangent(-sinf(pitch) * cosf(yaw),
+                                     -sinf(pitch) * sinf(yaw), -cosf(pitch));
+        image_pitch_rate = math::degrees(_startup_ray_rate * pitch_tangent);
+        pitch_rate_sample_valid = std::isfinite(image_pitch_rate);
+      }
+      const float servo_rate = math::constrain(_param_dock_cam_pitch_rate.get(), .1f, 30.f);
+      const float rate_assist = dock_motion::pitch_rate_assist(0.f, image_pitch_rate, servo_rate);
+      const float effective_assist = dock_motion::pitch_rate_assist(assist, image_pitch_rate, servo_rate);
+      _camera_image_pitch_rate_deg_s = pitch_rate_sample_valid ? image_pitch_rate : NAN;
+      _camera_pitch_fov_weight = assist;
+      _camera_pitch_rate_weight = rate_assist;
+      _camera_pitch_final_weight = effective_assist;
       _tracking_velocity_ned = dock_motion::image_pitch_assist(
-          _tracking_velocity_ned, approach_direction, camera_right_ned, assist);
+          _tracking_velocity_ned, approach_direction, camera_right_ned, effective_assist);
       _tracking_velocity_ned = dock_motion::limit_image_velocity(
           _tracking_velocity_ned, math::constrain(_param_dock_img_vmax.get(), .1f, 20.f));
     } else {
@@ -2003,6 +2075,8 @@ void DockGuidance::update_parameters() {
   const bool dynamic_changed = dynamic_was_enabled != (_param_dock_dyn_enable.get() != 0);
   if (observation_changed || dynamic_changed) {
     _miss_correction = {};
+    _capture_vertical_latch.reset();
+    _early_vertical_bias = 0.f;
     if (observation_changed) {
       _camera_history.reset();
       _camera_time_aligned = false;

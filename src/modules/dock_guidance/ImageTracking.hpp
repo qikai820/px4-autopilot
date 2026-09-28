@@ -1,6 +1,7 @@
 // Copyright (c) 2026 PX4 Development Team. BSD-3-Clause.
 #pragma once
 
+#include <cmath>
 #include <matrix/matrix/math.hpp>
 
 namespace dock_motion {
@@ -41,6 +42,17 @@ inline matrix::Vector3f image_pitch_assist(const matrix::Vector3f &tracking,
   horizontal_axis /= norm;
   const matrix::Vector3f horizontal = horizontal_axis * (horizontal_axis * tracking);
   return horizontal + (tracking - horizontal) * assist;
+}
+
+inline float pitch_rate_assist(float fov_assist, float image_pitch_rate_deg_s,
+                               float servo_rate_deg_s) {
+  if (!std::isfinite(image_pitch_rate_deg_s) || !std::isfinite(servo_rate_deg_s) ||
+      servo_rate_deg_s <= 0.f) {
+    return fov_assist;
+  }
+  const float shortfall = fabsf(image_pitch_rate_deg_s) - servo_rate_deg_s;
+  const float rate_assist = fminf(fmaxf(shortfall / fmaxf(2.f * servo_rate_deg_s, 5.f), 0.f), 1.f);
+  return fmaxf(fov_assist, rate_assist);
 }
 
 inline matrix::Vector3f limit_image_velocity(const matrix::Vector3f &tracking, float limit) {
