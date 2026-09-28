@@ -309,27 +309,31 @@ void DockGuidance::push_delay_history(hrt_abstime timestamp) {
   // 当前姿态，不能在机体转动时误用前一次回调的姿态。
   vehicle_attitude_s att{};
   vehicle_angular_velocity_s av{};
+  uint64_t attitude_time = 0, rate_time = 0;
+  _history_attitude_age_ms = NAN;
 
   if (!_att_sub.copy(&att) || !_gyro_sub.copy(&av) ||
-      !att.timestamp || !av.timestamp || timestamp < att.timestamp || timestamp < av.timestamp ||
-      timestamp - att.timestamp > 100_ms || timestamp - av.timestamp > 100_ms) {
+      !dock_motion::state_sample_time(att.timestamp_sample, att.timestamp, timestamp, 20_ms, attitude_time) ||
+      !dock_motion::state_sample_time(av.timestamp_sample, av.timestamp, timestamp, 20_ms, rate_time)) {
     return;
   }
 
-  const Quatf q(att.q);
-
-  if (!q.isAllFinite() || (q.norm() < 0.5f) ||
-      !Vector3f(av.xyz).isAllFinite()) {
+  Quatf q;
+  if (!dock_motion::attitude_at_time(Quatf(att.q), Vector3f(av.xyz),
+      attitude_time, rate_time, timestamp, q)) {
     return;
   }
+  _history_attitude_age_ms = (timestamp - attitude_time) * 1e-3f;
 
   Vector3f gyro_dps(math::degrees(av.xyz[0]), math::degrees(av.xyz[1]),
                     math::degrees(av.xyz[2]));
 
   vehicle_local_position_s lpos{};
+  uint64_t position_time = 0;
   const bool local_valid = _local_pos_sub.copy(&lpos) && lpos.xy_valid && lpos.z_valid
-                           && lpos.v_xy_valid && lpos.v_z_valid && lpos.timestamp <= timestamp
-                           && timestamp - lpos.timestamp < 100_ms
+                           && lpos.v_xy_valid && lpos.v_z_valid
+                           && dock_motion::state_sample_time(lpos.timestamp_sample, lpos.timestamp,
+                               timestamp, 100_ms, position_time)
                            && Vector3f(lpos.x,lpos.y,lpos.z).isAllFinite()
                            && Vector3f(lpos.vx,lpos.vy,lpos.vz).isAllFinite();
   if (local_valid && _position_seen && (lpos.xy_reset_counter != _xy_reset_counter
@@ -344,14 +348,14 @@ void DockGuidance::push_delay_history(hrt_abstime timestamp) {
     }
   }
   const int slot = _state_history.write(timestamp);
-  _att_delay_buf[slot] = q.normalized();
+  _att_delay_buf[slot] = q;
   _gyro_delay_buf[slot] = gyro_dps;
   if (local_valid) {
     _position_seen = true;
     _xy_reset_counter = lpos.xy_reset_counter;
     _z_reset_counter = lpos.z_reset_counter;
     _position_delay_buf[slot] = Vector3f(lpos.x,lpos.y,lpos.z)
-        + Vector3f(lpos.vx,lpos.vy,lpos.vz)*((timestamp-lpos.timestamp)*1e-6f);
+        + Vector3f(lpos.vx,lpos.vy,lpos.vz)*((timestamp-position_time)*1e-6f);
   }
   _position_delay_valid[slot] = local_valid;
   _delay_time_buf[slot] = timestamp;
@@ -438,6 +442,13 @@ bool DockGuidance::get_delayed_state(hrt_abstime target_us,
 void DockGuidance::reset_tracking_state() {
   // 清理观测、滤波、捕获和末段状态；模式注册及故障锁存由调用方单独管理。
   _miss_correction = {};
+  _closest_approach = {};
+  _point_error_bound = INFINITY;
+  _point_time_upper = INFINITY;
+  _height_brake_velocity = NAN;
+  _vertical_accel_up = _vertical_accel_down = NAN;
+  _history_attitude_age_ms = NAN;
+  _dynamic_recovery.reset();
   _prediction_ready = _terminal_ready = _capture_terminal_plan = false;
   _prediction_reject = dock_motion::PredictionReject::NoScale;
   _prediction_cross_sigma = _prediction_cross_velocity_sigma = INFINITY;
@@ -533,6 +544,16 @@ void DockGuidance::invalidate_setpoint(hrt_abstime timestamp,
   prediction.cross_sigma_m = _prediction_cross_sigma;
   prediction.cross_velocity_sigma_m_s = _prediction_cross_velocity_sigma;
   prediction.tgo_s = _miss_correction.time_to_plane;
+  prediction.point_tgo_s = NAN;
+  prediction.point_miss_m = NAN;
+  prediction.point_error_bound_m = NAN;
+  prediction.point_time_upper_s = NAN;
+  prediction.height_brake_velocity_m_s = NAN;
+  prediction.vertical_accel_up_m_s2 = NAN;
+  prediction.vertical_accel_down_m_s2 = NAN;
+  prediction.history_attitude_age_ms = _history_attitude_age_ms;
+  prediction.radial_velocity_sigma_m_s = _target_motion.radial_velocity_sigma();
+  prediction.lateral_velocity_sigma_m_s = _target_motion.lateral_velocity_sigma();
   prediction.capture_range_lower_m = NAN;
   prediction.capture_range_required_m = NAN;
   prediction.capture_fov_limit = NAN;
@@ -545,6 +566,9 @@ void DockGuidance::invalidate_setpoint(hrt_abstime timestamp,
   prediction.camera_pitch_rate_weight = NAN;
   prediction.camera_pitch_final_weight = NAN;
   prediction.reject_reason = static_cast<uint8_t>(dock_motion::PredictionReject::Fault);
+  prediction.motion_validity_reason = static_cast<uint8_t>(
+      _target_motion.validity_reason(timestamp, _param_dock_est_velocity_error.get()));
+  prediction.motion_update_result = static_cast<uint8_t>(_target_motion.last_update_result());
   _prediction_pub.publish(prediction);
 
   reset_tracking_state();
@@ -970,6 +994,20 @@ void DockGuidance::publish_guidance_status(hrt_abstime timestamp, bool valid,
   prediction.cross_sigma_m = _prediction_cross_sigma;
   prediction.cross_velocity_sigma_m_s = _prediction_cross_velocity_sigma;
   prediction.tgo_s = _miss_correction.time_to_plane;
+  prediction.point_tgo_s = _closest_approach.valid && valid && !degraded
+      ? _closest_approach.time_s : NAN;
+  prediction.point_miss_m = _closest_approach.valid && valid && !degraded
+      ? _closest_approach.miss.norm() : NAN;
+  prediction.point_error_bound_m = _closest_approach.valid && valid && !degraded
+      ? _point_error_bound : NAN;
+  prediction.point_time_upper_s = _closest_approach.valid && valid && !degraded
+      ? _point_time_upper : NAN;
+  prediction.height_brake_velocity_m_s = valid && !degraded ? _height_brake_velocity : NAN;
+  prediction.vertical_accel_up_m_s2 = valid && !degraded ? _vertical_accel_up : NAN;
+  prediction.vertical_accel_down_m_s2 = valid && !degraded ? _vertical_accel_down : NAN;
+  prediction.history_attitude_age_ms = _history_attitude_age_ms;
+  prediction.radial_velocity_sigma_m_s = _target_motion.radial_velocity_sigma();
+  prediction.lateral_velocity_sigma_m_s = _target_motion.lateral_velocity_sigma();
   prediction.early_vertical_dv_m_s = valid && !degraded ? _early_vertical_bias : 0.f;
   const bool capture_diagnostics_valid = valid && !degraded && _capture_gate.evaluated;
   prediction.capture_gate_evaluated = capture_diagnostics_valid;
@@ -998,6 +1036,9 @@ void DockGuidance::publish_guidance_status(hrt_abstime timestamp, bool valid,
       _prediction_reject == dock_motion::PredictionReject::Ready && !degraded;
   prediction.terminal_ready = _terminal_ready;
   prediction.reject_reason = static_cast<uint8_t>(_prediction_reject);
+  prediction.motion_validity_reason = static_cast<uint8_t>(
+      _target_motion.validity_reason(timestamp, _param_dock_est_velocity_error.get()));
+  prediction.motion_update_result = static_cast<uint8_t>(_target_motion.last_update_result());
   _prediction_pub.publish(prediction);
   _miss_correction.miss.copyTo(status.prediction_miss_ned);
   _miss_correction.correction.copyTo(status.prediction_dv_ned);

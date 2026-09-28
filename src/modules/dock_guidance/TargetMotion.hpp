@@ -17,6 +17,27 @@ inline bool airborne_state(bool armed, bool landed, uint64_t stamp, uint64_t now
   return armed && !landed && stamp != 0 && now >= stamp && now - stamp <= 2000000;
 }
 
+// Once recovery starts, crossing back below SOFT is insufficient: keep the
+// recovery command until the image stays inside ALIGN for the configured time.
+class RecoveryHysteresis {
+public:
+  void reset() { _active = false; _centered_since = 0; }
+  bool update(uint64_t now, bool required, bool centered, float confirmation) {
+    if (required) { _active = true; _centered_since = 0; }
+    if (!_active) { return false; }
+    if (required || !centered || !now || !std::isfinite(confirmation)) {
+      _centered_since = 0;
+      return true;
+    }
+    if (!_centered_since || now < _centered_since) { _centered_since = now; }
+    if (now - _centered_since >= uint64_t(clamp(confirmation, .05f, 5.f) * 1e6f)) { reset(); }
+    return _active;
+  }
+private:
+  bool _active{false};
+  uint64_t _centered_since{0};
+};
+
 inline bool capture_evidence_allowed(bool common_evidence, bool pass_through,
                                      bool already_ready, float range_lower,
                                      float initial_distance) {
@@ -98,6 +119,28 @@ inline float height_capture_velocity(float remaining, float actual_vz, float up_
   return startup_climb_velocity(available, up_limit, decel, fov_scale);
 }
 
+// Use a fresh metric height observation to start arresting a fast climb before
+// the aircraft reaches the moving target's height. This is only an upward
+// velocity ceiling; image tracking, target following and the existing planner
+// retain authority to request a slower climb or a descent.
+inline float limit_target_climb_velocity(float desired_vz, float relative_down,
+                                         float own_vz, float target_vz, float height_sigma,
+                                         float decel, float jerk) {
+  if (!std::isfinite(desired_vz + relative_down + own_vz + target_vz + height_sigma + decel + jerk) ||
+      height_sigma < 0.f || decel <= 0.f || jerk <= 0.f) {
+    return desired_vz;
+  }
+  const float height_above = max(0.f, -relative_down);
+  // Uncertain monocular scale calls for earlier braking, but must not create
+  // an artificial stand-off altitude that prevents the final height crossing.
+  const float margin = min(height_sigma, .15f * height_above);
+  const float relative_up = max(0.f, target_vz - own_vz);
+  const float reaction = .25f + decel / jerk;
+  const float available = max(0.f, height_above - margin - relative_up * reaction);
+  const float upward_limit = sqrtf(2.f * decel * available);
+  return max(desired_vz, target_vz - upward_limit);
+}
+
 // 像素框首先给出光学轴向深度，斜距还要按视线角换算。
 // 必须已标定目标真实投影尺寸；未知尺寸时不能启用米制距离推算。
 inline bool box_range(float width_px, float height_px, float width_m, float height_m, float fx,
@@ -128,18 +171,36 @@ inline bool box_range(float width_px, float height_px, float width_m, float heig
 // 本地 NED 系下的目标匀速状态估计，状态量为三维位置和三维速度。
 // 本机位置取曝光时刻，完整 6x6 协方差保留位置与速度相关性。
 // 纯方位角不能初始化米制位置；人为距离先验不等于真实量测。
+enum class MotionValidityReason : uint8_t {
+  Ready = 0, NoState = 1, TooFewUpdates = 2, TooYoung = 3,
+  StaleUpdate = 4, StaleMetric = 5, VelocityUncertain = 6
+};
+
+enum class MotionUpdateResult : uint8_t {
+  None = 0, Accepted = 1, InvalidInput = 2, TimeOrder = 3,
+  RateLimited = 4, NoRecentMetric = 5, ResidualOutlier = 6,
+  StateReset = 7
+};
+
 class TargetMotion {
 public:
   void reset() { const uint32_t count = _resets + 1; *this = TargetMotion{}; _resets = count; }
   uint32_t resets() const { return _resets; }
   int accepted_updates() const { return _count; }
   uint8_t motion_state() const { return _motion_state; } // 0 未知，1 静止，2 运动。
+  MotionUpdateResult last_update_result() const { return _last_update_result; }
   bool initialized() const { return _time != 0; }
   Vector3f velocity() const { return Vector3f(_x(3), _x(4), _x(5)); }
   float age(uint64_t now) const {
     return initialized() && now >= _accepted ? (now - _accepted) * 1e-6f : INFINITY;
   }
   float velocity_sigma() const { return sqrtf(max(0.f, _p(3, 3) + _p(4, 4) + _p(5, 5))); }
+  float radial_velocity_sigma() const {
+    return initialized() ? directional_velocity_sigma(_last_los) : INFINITY;
+  }
+  float lateral_velocity_sigma() const {
+    return initialized() ? transverse_velocity_sigma(_last_los) : INFINITY;
+  }
   bool mature(uint64_t now) const {
     return initialized() && _count >= 8 && now >= _start && now - _start >= 1000000 &&
            age(now) <= .25f;
@@ -222,12 +283,30 @@ public:
     return max(_scale_floor, sqrtf(max(0.f, variance))) + .5f * _accel * horizon * horizon;
   }
   bool valid(uint64_t now, float max_error) const {
-    // 目标速度成熟、米制量测仍新鲜且速度方差足够低，才允许用于高速闭合。
-    return mature(now) && now >= _metric_time && now - _metric_time <= 1000000 &&
-           velocity_sigma() <= max_error;
+    return validity_reason(now, max_error) == MotionValidityReason::Ready;
+  }
+  MotionValidityReason validity_reason(uint64_t now, float max_error) const {
+    // Expose the first failed condition; never alter a safety gate merely to
+    // turn the validity flag on in a flight log.
+    if (!initialized()) { return MotionValidityReason::NoState; }
+    if (_count < 8) { return MotionValidityReason::TooFewUpdates; }
+    if (now < _start || now - _start < 1000000) { return MotionValidityReason::TooYoung; }
+    if (age(now) > .25f) { return MotionValidityReason::StaleUpdate; }
+    if (now < _metric_time || now - _metric_time > 1000000) {
+      return MotionValidityReason::StaleMetric;
+    }
+    if (!(velocity_sigma() <= max_error)) {
+      return MotionValidityReason::VelocityUncertain;
+    }
+    return MotionValidityReason::Ready;
+  }
+  bool recent_metric(uint64_t now) const {
+    // Height braking only needs a recent calibrated distance, not a mature
+    // three-dimensional target-velocity estimate.
+    return initialized() && now >= _metric_time && now - _metric_time <= 250000;
   }
   bool fresh_range(uint64_t now) const {
-    return mature(now) && now >= _metric_time && now - _metric_time <= 250000;
+    return mature(now) && recent_metric(now);
   }
   Vector3f relative(uint64_t now, const Vector3f &own) const {
     const float dt = now >= _time ? (now - _time) * 1e-6f : 0.f;
@@ -242,15 +321,18 @@ public:
     if (!own.isAllFinite() || !los.isAllFinite() || fabsf(los.norm() - 1.f) > .01f ||
         !std::isfinite(angle_sigma) || (!metric && !initialized()) ||
         angle_sigma <= 0.f || time == 0) {
+      _last_update_result = MotionUpdateResult::InvalidInput;
       return false;
     }
     if (_time && time <= _time) {
+      _last_update_result = MotionUpdateResult::TimeOrder;
       return false;
     }
     if (_time && time - _accepted > 500000) {
       reset();
     }
     if (!metric && (!_time || time < _metric_time || time - _metric_time > 1000000)) {
+      _last_update_result = MotionUpdateResult::NoRecentMetric;
       return false;
     }
     _accel = clamp(accel, .1f, 30.f);
@@ -270,10 +352,12 @@ public:
       _last_los = los;
       _metric_time = time;
       _count = 1;
+      _last_update_result = MotionUpdateResult::Accepted;
       return true;
     }
     // 像素量化使连续目标框高度相关，估计器最多以 10 Hz 接受更新。
     if (time - _time < 100000) {
+      _last_update_result = MotionUpdateResult::RateLimited;
       return false;
     }
     const float dt = (time - _time) * 1e-6f;
@@ -311,6 +395,7 @@ public:
         _count = 0;
         _motion_state = _evidence_candidate = 0;
         _evidence_since = 0;
+        _last_update_result = MotionUpdateResult::ResidualOutlier;
         return false;
       }
     }
@@ -331,6 +416,7 @@ public:
     }
     if (!_x.isAllFinite() || !_p.isAllFinite() || velocity().norm() > max_speed) {
       reset();
+      _last_update_result = MotionUpdateResult::StateReset;
       return false;
     }
     _accepted = time;
@@ -355,6 +441,7 @@ public:
     } else if (time - _evidence_since >= 1500000) {
       _motion_state = candidate;
     }
+    _last_update_result = MotionUpdateResult::Accepted;
     return true;
   }
 
@@ -365,6 +452,7 @@ private:
   uint64_t _metric_time{0}, _evidence_since{0};
   uint32_t _resets{0};
   uint8_t _motion_state{0}, _evidence_candidate{0};
+  MotionUpdateResult _last_update_result{MotionUpdateResult::None};
   Vector3f _evidence_velocity{};
   int _count{0};
   float _scale_floor{INFINITY}, _accel{8.f};
@@ -480,23 +568,42 @@ struct VelocityPlan {
   bool limits_override{false};
 };
 
+inline Vector3f constrain_acceleration(const Vector3f &acceleration, float total,
+                                       float up, float down) {
+  // Preserve the requested direction while satisfying every acceleration
+  // ceiling. Clipping Z before normalizing the full vector turns a steep
+  // climb into a mostly horizontal command (the log_50 regression).
+  float scale = 1.f;
+  const float magnitude = acceleration.norm();
+  if (magnitude > total) { scale = total / magnitude; }
+  if (acceleration(2) < -up) { scale = min(scale, up / -acceleration(2)); }
+  if (acceleration(2) > down) { scale = min(scale, down / acceleration(2)); }
+  return acceleration * scale;
+}
+
 // 对最终将发布的速度候选逐个评分：先合入高度反馈，再统一限制加加速度。
 // 不在选定候选后覆盖 Z 轴，否则会绕过已验证的速度和加加速度约束。
 inline VelocityPlan plan_velocity(const Vector3f &desired_velocity, const Vector3f &previous_velocity,
     const Vector3f &previous_accel, const Limits &limits, float dt, float accel_limit, float jerk,
     const Vector3f &ray, const Vector3f &ray_rate, const matrix::Dcmf &camera_to_ned,
-    float range, float half_x, float half_y, float soft, bool height_priority, bool no_descent) {
+    float range, float half_x, float half_y, float soft, bool height_priority, bool no_descent,
+    float accel_up = INFINITY, float accel_down = INFINITY) {
   VelocityPlan result;
   dt = clamp(dt, .002f, .1f);
   const float jerk_step = max(.1f, jerk) * dt;
-  Vector3f desired = (constrained(desired_velocity, limits) - previous_velocity) / .5f;
-  if (desired.norm() > accel_limit) { desired *= accel_limit / desired.norm(); }
+  // NED vertical acceleration has its own envelope. Accelerating horizontally
+  // must not grant the climb-braking axis the larger vector acceleration limit.
+  accel_up = min(accel_limit, max(.1f, accel_up));
+  accel_down = min(accel_limit, max(.1f, accel_down));
+  const Vector3f desired = constrain_acceleration(
+      (constrained(desired_velocity, limits) - previous_velocity) / .5f,
+      accel_limit, accel_up, accel_down);
   const float vertical_step = clamp(desired(2) - previous_accel(2), -.6f * jerk_step, .6f * jerk_step);
   const float horizontal_step = sqrtf(max(0.f, jerk_step * jerk_step - vertical_step * vertical_step));
   float best_score = INFINITY;
   for (int mode = 0; mode < 2; ++mode) {
-    Vector3f target = mode == 0 ? desired : -previous_velocity * 2.f;
-    if (target.norm() > accel_limit) { target *= accel_limit / target.norm(); }
+    const Vector3f target = mode == 0 ? desired :
+        constrain_acceleration(-previous_velocity * 2.f, accel_limit, accel_up, accel_down);
     Vector3f delta = target - previous_accel;
     if (height_priority) {
       delta(2) = 0.f;
@@ -507,11 +614,13 @@ inline VelocityPlan plan_velocity(const Vector3f &desired_velocity, const Vector
     }
     for (int x = 0; x <= 2; ++x) {
       for (int y = 0; y <= 2; ++y) {
-        const Vector3f proposal = previous_accel + Vector3f(.5f * x * delta(0), .5f * y * delta(1), delta(2));
+        Vector3f proposal = previous_accel + Vector3f(.5f * x * delta(0), .5f * y * delta(1), delta(2));
+        proposal(2) = clamp(proposal(2), -accel_up, accel_down);
         Vector3f velocity = constrained(previous_velocity + proposal * dt, limits);
         if (no_descent) { velocity(2) = min(velocity(2), 0.f); }
         const Vector3f actual = (velocity - previous_velocity) / dt;
-        if (actual.norm() > accel_limit + .002f || (actual - previous_accel).norm() > jerk_step + .002f) {
+        if (actual.norm() > accel_limit + .002f || (actual - previous_accel).norm() > jerk_step + .002f ||
+            actual(2) < -accel_up - .002f || actual(2) > accel_down + .002f) {
           continue;
         }
         const float risk = startup_fov_cost(ray, ray_rate, camera_to_ned,
@@ -533,7 +642,9 @@ inline VelocityPlan plan_velocity(const Vector3f &desired_velocity, const Vector
     // 此时优先返回受速度约束的候选，并显式记录 override 供日志诊断。
     Vector3f delta = -previous_accel;
     if (delta.norm() > jerk_step) { delta *= jerk_step / delta.norm(); }
-    result.velocity = constrained(previous_velocity + (previous_accel + delta) * dt, limits);
+    const Vector3f fallback_accel = constrain_acceleration(previous_accel + delta,
+        accel_limit, accel_up, accel_down);
+    result.velocity = constrained(previous_velocity + fallback_accel * dt, limits);
     if (no_descent) { result.velocity(2) = min(result.velocity(2), 0.f); }
     result.acceleration = (result.velocity - previous_velocity) / dt;
     result.predicted_fov = startup_fov_cost(ray, ray_rate, camera_to_ned,

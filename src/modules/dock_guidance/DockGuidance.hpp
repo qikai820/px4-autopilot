@@ -265,6 +265,7 @@ private:
   bool _position_delay_valid[DELAY_BUF_SIZE]{};
   uint8_t _xy_reset_counter{0}, _z_reset_counter{0};
   bool _position_seen{false};
+  float _history_attitude_age_ms{NAN};
   dock_motion::SampleHistoryIndex<DELAY_BUF_SIZE> _state_history{WATCHDOG_INTERVAL_US};
 
   // _velocity_ned 是 EKF 估计的本机速度；_velocity_setpoint_ned 是本模块输出。
@@ -306,6 +307,12 @@ private:
   matrix::Vector3f _target_velocity{}, _estimated_relative{}, _terminal_direction{};
   matrix::Vector3f _dynamic_acceleration{};
   dock_motion::MissCorrection _miss_correction{};
+  dock_motion::ClosestApproach _closest_approach{};
+  float _point_error_bound{INFINITY};
+  float _point_time_upper{INFINITY};
+  float _height_brake_velocity{NAN};
+  float _vertical_accel_up{NAN}, _vertical_accel_down{NAN};
+  dock_motion::RecoveryHysteresis _dynamic_recovery;
   bool _prediction_ready{false};
   bool _terminal_ready{false};
   bool _capture_terminal_plan{false};
@@ -428,6 +435,8 @@ private:
       (ParamInt<px4::params::DOCK_VIS_GRACE>)_param_dock_vis_grace,
       (ParamInt<px4::params::DOCK_REL_TOUT>)_param_dock_rel_tout,
       (ParamFloat<px4::params::MPC_XY_VEL_MAX>)_param_mpc_xy_vel_max,
+      (ParamFloat<px4::params::MPC_ACC_UP_MAX>)_param_mpc_acc_up,
+      (ParamFloat<px4::params::MPC_ACC_DOWN_MAX>)_param_mpc_acc_down,
       (ParamFloat<px4::params::MPC_Z_VEL_MAX_UP>)_param_mpc_z_vel_max_up,
       (ParamFloat<px4::params::MPC_Z_VEL_MAX_DN>)_param_mpc_z_vel_max_down)
 };

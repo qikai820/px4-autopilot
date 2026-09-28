@@ -8,6 +8,98 @@
 
 using namespace dock_motion;
 
+static void test_steep_climb_acceleration_direction() {
+  // log_50 requested roughly (14.2, 0.72, -40) m/s from near hover.
+  // An axis ceiling must reduce the magnitude, not rotate that request into
+  // horizontal acceleration and immediately push the image outside the FOV.
+  const Vector3f desired(14.2f, .72f, -40.f);
+  const Vector3f direction = desired.normalized();
+  const matrix::Dcmf camera(matrix::Eulerf(0.f,
+      atan2f(-direction(2), hypotf(direction(0), direction(1))),
+      atan2f(direction(1), direction(0))));
+  const Limits limits{50.f, 100.f, 40.f, 4.f};
+  Vector3f velocity, acceleration;
+  const float dt = .02f;
+  for (int i = 0; i < 100; ++i) {
+    const auto plan = plan_velocity(desired, velocity, acceleration, limits, dt, 8.f, 8.f,
+        Vector3f(1.f, 0.f, 0.f), Vector3f{}, camera, 440.f, .5f, .4f, .65f,
+        false, false, 4.f, 3.f);
+    assert(!plan.limits_override);
+    assert(plan.acceleration.normalized() * direction > .99999f);
+    assert(plan.acceleration(2) >= -4.002f);
+    assert(plan.acceleration.norm() <= 8.002f);
+    assert((plan.acceleration - acceleration).norm() <= 8.f * dt + .002f);
+    velocity = plan.velocity;
+    acceleration = plan.acceleration;
+  }
+  assert(velocity(2) < -6.5f && velocity(0) > 2.f && velocity(0) < 3.f);
+  // With no separate axis restriction, preserve the original norm-limited
+  // vector direction as well; the default arguments must not alter it.
+  const auto unrestricted = plan_velocity(desired, Vector3f{}, Vector3f{}, limits, dt, 8.f, 8.f,
+      Vector3f(1.f, 0.f, 0.f), Vector3f{}, camera, 440.f, .5f, .4f, .65f, false, false);
+  assert(unrestricted.acceleration.normalized() * direction > .99999f);
+  printf("log50 steep climb: after 2 s command NED (%.3f, %.3f, %.3f) m/s, direction preserved\n",
+      double(velocity(0)), double(velocity(1)), double(velocity(2)));
+}
+
+static void test_vertical_acceleration_limits() {
+  const matrix::Dcmf camera(matrix::Eulerf(0.f, 0.f, 0.f));
+  const Limits limits{80.f, 80.f, 40.f, 10.f};
+  const float dt = .02f;
+  Vector3f velocity(30.f, 0.f, -30.f), acceleration;
+  float peak_down = 0.f, peak_up = 0.f;
+  // Horizontal acceleration and climb braking occur together in log_49.
+  // The 8 m/s^2 vector budget must not override the 3 m/s^2 vertical brake.
+  for (int i = 0; i < 750; ++i) {
+    const Vector3f wanted = i < 375 ? Vector3f(55.f, 0.f, -5.f) : Vector3f(55.f, 0.f, -30.f);
+    const auto plan = plan_velocity(wanted, velocity, acceleration, limits, dt, 8.f, 8.f,
+        Vector3f(1.f, 0.f, 0.f), Vector3f{}, camera, 200.f, .5f, .4f, .65f,
+        false, false, 4.f, 3.f);
+    assert(!plan.limits_override);
+    assert(plan.acceleration(2) <= 3.002f && plan.acceleration(2) >= -4.002f);
+    assert(plan.acceleration.norm() <= 8.002f);
+    assert((plan.acceleration - acceleration).norm() <= 8.f * dt + .002f);
+    assert(Vector3f((plan.velocity - velocity) / dt - plan.acceleration).norm() < .0001f);
+    peak_down = max(peak_down, plan.acceleration(2));
+    peak_up = max(peak_up, -plan.acceleration(2));
+    velocity = plan.velocity;
+    acceleration = plan.acceleration;
+  }
+  assert(peak_down > 2.9f && peak_up > 3.9f);
+  // A parameter reduction can make a hard acceleration bound incompatible
+  // with jerk. Honour the bound and expose the exceptional transition.
+  const auto reduced = plan_velocity(Vector3f(30.f, 0.f, 0.f), Vector3f(30.f, 0.f, -10.f),
+      Vector3f(0.f, 0.f, 3.f), limits, dt, 8.f, 8.f, Vector3f(1.f, 0.f, 0.f),
+      Vector3f{}, camera, 200.f, .5f, .4f, .65f, false, false, 4.f, 1.f);
+  assert(reduced.limits_override && reduced.acceleration(2) <= 1.002f);
+  printf("vertical planner: down %.3f, up %.3f m/s^2; reduced-limit conflict flagged\n",
+      double(peak_down), double(peak_up));
+}
+
+static void test_recovery_hysteresis() {
+  RecoveryHysteresis recovery;
+  assert(!recovery.update(1000000, false, false, 1.f));
+  assert(recovery.update(1020000, true, false, 1.f));
+  // Crossing SOFT on alternate frames cannot re-enable the capture budget.
+  for (uint64_t time = 1040000; time < 2000000; time += 20000) {
+    assert(recovery.update(time, (time / 20000) % 2, false, 1.f));
+  }
+  assert(recovery.update(2000000, false, true, 1.f));
+  assert(recovery.update(2900000, false, true, 1.f));
+  assert(recovery.update(2920000, false, false, 1.f)); // alignment lost: restart dwell
+  assert(recovery.update(2940000, false, true, 1.f));
+  assert(recovery.update(3920000, false, true, 1.f));
+  assert(!recovery.update(3940000, false, true, 1.f));
+  assert(recovery.update(4000000, true, true, 1.f)); // hard protection has priority
+  assert(recovery.update(4020000, false, true, 1.f));
+  assert(recovery.update(3000000, false, true, 1.f)); // timestamp reversal restarts dwell
+  assert(recovery.update(3980000, false, true, 1.f));
+  assert(!recovery.update(4000000, false, true, 1.f));
+  recovery.update(5000000, true, false, 1.f);
+  recovery.reset();
+  assert(!recovery.update(6000000, false, false, 1.f));
+}
+
 static void test_following_outside_axis_limit() {
   const Limits limits{60,100,40,4};
   const Vector3f direction(.6f,0,-.8f), following(5.955f,.197f,4.352f);
@@ -135,6 +227,9 @@ static void test_motion(const Vector3f &target_velocity, bool own_moving) {
          own_moving, double(error), double(tracker.velocity_sigma()));
   assert(error < 1.f);
   assert(tracker.valid(time, 3.f));
+  assert(fabsf(tracker.radial_velocity_sigma() * tracker.radial_velocity_sigma() +
+      tracker.lateral_velocity_sigma() * tracker.lateral_velocity_sigma() -
+      tracker.velocity_sigma() * tracker.velocity_sigma()) < .0001f);
   assert(!tracker.valid(time + 300000, 3.f));
   const Vector3f before = tracker.velocity();
   // Duplicate timestamps and physically impossible jumps cannot create motion.
@@ -204,6 +299,14 @@ static void test_quantized_boxes() {
       tracker.velocity(), candidate, 2.f, 100.f, 3.f);
   assert(cross.usable && cross.reject == PredictionReject::Ready);
   assert(cross.transverse_velocity_sigma < tracker.velocity_sigma());
+  const auto point = predict_closest_approach(relative, own_velocity,
+      tracker.velocity(), own_velocity, .5f, 2.f);
+  const auto point_evidence = assess_closest_approach(tracker, time, point);
+  assert(point_evidence.valid);
+  // The box's radial scale uncertainty changes encounter time, while a
+  // sideways miss is bounded by uncertainty perpendicular to the flight path.
+  assert(point_evidence.miss_bound_m < point.miss.norm() +
+      2.f * tracker.position_sigma(tracker.age(time) + point.time_s));
   assert(assess_prediction(tracker, time, axis, own_velocity, tracker.velocity(),
       candidate, 2.f, .1f, 3.f).reject == PredictionReject::Uncertain);
   assert(assess_prediction(tracker, time + 300000, axis, own_velocity, tracker.velocity(),
@@ -344,27 +447,74 @@ static void test_static_camera_motion() {
 static void test_bearing_gap() {
   TargetMotion tracker;
   const Vector3f los(1,0,0);
+  assert(tracker.validity_reason(1000000,3) == MotionValidityReason::NoState);
+  assert(!tracker.update(1000000,Vector3f{},los,NAN,NAN,.002f,1,60));
+  assert(tracker.last_update_result() == MotionUpdateResult::InvalidInput);
   for (uint64_t t = 1000000; t <= 4000000; t += 100000) {
     assert(tracker.update(t,Vector3f{},los,100,.5f,.002f,1,60));
   }
+  assert(tracker.validity_reason(4000000,3) == MotionValidityReason::Ready);
+  assert(tracker.validity_reason(4000000,.001f) == MotionValidityReason::VelocityUncertain);
+  const auto point = predict_closest_approach(Vector3f(10,1,0), Vector3f(5,0,0),
+      Vector3f{}, Vector3f(5,0,0), .5f, 4.f);
+  const auto evidence = assess_closest_approach(tracker,4000000,point);
+  assert(evidence.valid && evidence.miss_bound_m >= point.miss.norm());
+  assert(evidence.time_upper_s >= point.time_s);
+  assert(!assess_closest_approach(tracker,4300000,point).valid);
+  assert(!tracker.update(4050000,Vector3f{},los,100,.5f,.002f,1,60));
+  assert(tracker.last_update_result() == MotionUpdateResult::RateLimited);
   const auto resets = tracker.resets();
   for (uint64_t t = 4100000; t <= 4900000; t += 100000) {
     assert(tracker.update(t,Vector3f{},los,NAN,NAN,.002f,1,60));
   }
   assert(tracker.resets() == resets && tracker.valid(4900000,3));
   assert(!tracker.update(5100000,Vector3f{},los,NAN,NAN,.002f,1,60));
+  assert(tracker.last_update_result() == MotionUpdateResult::NoRecentMetric);
+  assert(tracker.validity_reason(5100000,3) == MotionValidityReason::StaleMetric);
+  assert(tracker.validity_reason(5200000,3) == MotionValidityReason::StaleUpdate);
   assert(!tracker.valid(5100000,3));
   assert(tracker.update(6000000,Vector3f{},los,100,.5f,.002f,1,60));
   assert(tracker.resets() == resets+1 && tracker.accepted_updates() == 1);
+  assert(tracker.validity_reason(6000000,3) == MotionValidityReason::TooFewUpdates);
+}
+
+static void test_target_height_envelope() {
+  // Reachable log_46-like climb: a speed setpoint that previously continued
+  // upward is passed through the actual jerk-limited velocity planner and a
+  // lagged, acceleration-limited vertical plant.
+  constexpr float dt = .02f;
+  float remaining = 220.f;
+  float actual_vz = -30.f;
+  Vector3f previous(30.f, 0.f, -30.f), acceleration;
+  const matrix::Dcmf camera(matrix::Eulerf(0.f, 0.f, 0.f));
+  for (int i = 0; i < 600; ++i) {
+    const float vz = limit_target_climb_velocity(-40.f, -remaining, actual_vz,
+        0.f, 10.f, 3.f, 8.f);
+    const auto plan = plan_velocity(Vector3f(30.f, 0.f, vz), previous,
+        acceleration, Limits{60.f, 60.f, 40.f, 10.f}, dt, 3.f, 8.f,
+        Vector3f(1.f, 0.f, 0.f), Vector3f{}, camera, 200.f,
+        .5f, .4f, .65f, false, false);
+    previous = plan.velocity;
+    acceleration = plan.acceleration;
+    const float plant_acceleration = clamp((plan.velocity(2) - actual_vz) / .2f, -3.f, 3.f);
+    actual_vz += plant_acceleration * dt;
+    remaining += actual_vz * dt;
+    assert(remaining > -.6f);
+  }
+  assert(remaining < 10.f && actual_vz > -3.f);
 }
 
 int main(int argc, char **argv) {
   if (argc == 2 && strcmp(argv[1], "--replay") == 0) { return replay(); }
   test_following_outside_axis_limit();
+  test_steep_climb_acceleration_direction();
+  test_vertical_acceleration_limits();
+  test_recovery_hysteresis();
   test_final_velocity_planner();
   test_capture_schedule();
   test_static_camera_motion();
   test_bearing_gap();
+  test_target_height_envelope();
   assert(startup_climb_velocity(10, 20, 3, 1) == -3.f);
   assert(startup_climb_velocity(10, 1, 3, 1) == -1.f);
   assert(startup_climb_velocity(.2f, 20, 3, 1) > -.21f);
@@ -372,6 +522,15 @@ int main(int argc, char **argv) {
   assert(startup_climb_velocity(10, 20, 3, 0) == 0.f);
   assert(startup_climb_velocity(NAN, 20, 3, 1) == 0.f);
   assert(startup_climb_velocity(10, 20, 3, .5f) == -1.5f);
+  // In log_46 the aircraft was still climbing at 27 m/s with only about
+  // 70 m of height remaining. The target-height envelope must brake before
+  // the altitude crossing, without reversing an already slower command.
+  const float early_brake = limit_target_climb_velocity(-20.f, -70.f, -27.f, 0.f, 10.f, 3.f, 8.f);
+  assert(early_brake > -17.f && early_brake < -15.f);
+  assert(limit_target_climb_velocity(-5.f, -70.f, -27.f, 0.f, 10.f, 3.f, 8.f) == -5.f);
+  assert(limit_target_climb_velocity(-6.f, 2.8f, -7.f, 0.f, 1.f, 3.f, 8.f) == 0.f);
+  assert(limit_target_climb_velocity(-30.f, -400.f, -2.f, 0.f, 20.f, 3.f, 8.f) == -30.f);
+  assert(limit_target_climb_velocity(-6.f, NAN, -7.f, 0.f, 1.f, 3.f, 8.f) == -6.f);
   float range = 0, sigma = 0;
   assert(!box_range(10, 10, 0, 0, 1000, 1000, 1, .15f, range, sigma));
   assert(!box_range(2, 2, 1, 1, 1000, 1000, 1, .15f, range, sigma));

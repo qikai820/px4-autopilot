@@ -3,8 +3,35 @@
 
 #include <cmath>
 #include <cstdint>
+#include <matrix/matrix/math.hpp>
 
 namespace dock_motion {
+
+// A publication timestamp is not the time represented by an estimator state.
+// Fall back only for publishers which do not provide a sample timestamp.
+inline bool state_sample_time(uint64_t sample, uint64_t published, uint64_t now,
+                              uint64_t max_age, uint64_t &stamp) {
+  stamp = sample ? sample : published;
+  return stamp && published && stamp <= published && published <= now && now - stamp <= max_age;
+}
+
+// Bring the attitude to the history-slot time using fresh body rates. The
+// short hold is bounded independently of the camera-delay history length.
+inline bool attitude_at_time(const matrix::Quatf &sample, const matrix::Vector3f &body_rate,
+                             uint64_t sample_time, uint64_t rate_time, uint64_t now,
+                             matrix::Quatf &aligned) {
+  if (!sample.isAllFinite() || sample.norm() < .5f || !body_rate.isAllFinite() ||
+      !sample_time || !rate_time || now < sample_time || now < rate_time ||
+      now - sample_time > 20000 || now - rate_time > 20000) {
+    return false;
+  }
+  const float dt = (now - sample_time) * 1e-6f;
+  aligned = sample;
+  aligned.normalize();
+  aligned = aligned * matrix::Quatf(matrix::AxisAnglef(body_rate * dt));
+  aligned.normalize();
+  return aligned.isAllFinite();
+}
 
 // 延时状态历史的槽位索引：保留采样率受 interval 限制，但每次回调仍刷新最新槽位。
 // 间隔未满时覆盖最新槽位，避免零延迟观测读到旧姿态；时间倒退则清空历史。

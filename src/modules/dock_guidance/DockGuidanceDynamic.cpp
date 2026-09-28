@@ -50,14 +50,15 @@ void DockGuidance::update_target_motion(const viztra_observation_s &obs, const V
   Vector3f own;
   vehicle_local_position_s local{};
   const hrt_abstime now = hrt_absolute_time();
+  uint64_t position_time = 0;
   if (!delayed_position(exposure, own) || !_local_pos_sub.copy(&local) || !local.xy_valid ||
       !local.z_valid || !local.v_xy_valid || !local.v_z_valid ||
-      now < local.timestamp || now - local.timestamp > 100_ms) {
+      !dock_motion::state_sample_time(local.timestamp_sample, local.timestamp, now, 100_ms, position_time)) {
     return;
   }
   const Vector3f own_now =
       Vector3f(local.x, local.y, local.z) +
-      Vector3f(local.vx, local.vy, local.vz) * ((now - local.timestamp) * 1e-6f);
+      Vector3f(local.vx, local.vy, local.vz) * ((now - position_time) * 1e-6f);
   if (!own_now.isAllFinite()) {
     return;
   }
@@ -142,6 +143,11 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
       _param_dock_terminal_enable.get(), limits.total, _param_dock_relative_speed.get());
   const float acceleration = math::constrain(_param_dock_acc_max.get(), .1f, 20.f);
   const float deceleration = math::constrain(_param_dock_dec_max.get(), .1f, 20.f);
+  _vertical_accel_up = math::min(acceleration, math::constrain(_param_mpc_acc_up.get(), .1f, 20.f));
+  _vertical_accel_down = math::min(deceleration, math::constrain(_param_mpc_acc_down.get(), .1f, 20.f));
+  // Either vector budget can be selected after the desired velocity changes.
+  // The stopping envelope must not assume more braking than either permits.
+  const float height_deceleration = math::min(acceleration, _vertical_accel_down);
   const bool trusted = _airborne && _target_motion_valid &&
                        _target_motion.valid(now, _param_dock_est_velocity_error.get());
   Vector3f correction = _tracking_velocity_ned;
@@ -191,7 +197,7 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
     const float fov_scale = hard ? 0.f
                                  : dock_motion::clamp((soft - _fov_ratio) / (soft - align), 0.f, 1.f);
     startup_vz = dock_motion::height_capture_velocity(remaining, local.vz, limits.up,
-        deceleration, _param_dock_dynamic_jerk.get(), fov_scale);
+        height_deceleration, _param_dock_dynamic_jerk.get(), fov_scale);
     // 起始高度完成只取决于高度和爬升速度；目标可观测性与图像对准另行判定。
     // 完成爬升后仍可能先进入受限捕获，而不是立即高速追踪。
     if (_startup_climb) {
@@ -209,9 +215,11 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
   }
   float wanted_closure = 0.f;
   if (!_airborne) {
+    _dynamic_recovery.reset();
     set_stage(Stage::ALIGN);
     _aligned_since_us = 0;
   } else if (_startup_climb) {
+    _dynamic_recovery.reset();
     set_stage(Stage::STARTUP_CLIMB);
     _aligned_since_us = _terminal_candidate_since_us = 0;
     _dynamic_closure = _dynamic_max_closure = 0.f;
@@ -219,10 +227,13 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
   } else if (_stage != Stage::TERMINAL_DASH) {
     // 视场越界优先恢复；目标速度不可信时保留 TRACK_CAPTURE，
     // 只有目标跟随误差、LOS 角速度和对准时间共同满足条件才放行加速。
+    const bool recovering = _dynamic_recovery.update(now,
+        hard || _fov_ratio >= soft || (trusted && !_dynamic_reachable),
+        _fov_ratio <= align, _param_dock_recovery_time.get());
     if (hard) {
       set_stage(Stage::EMERGENCY_RECOVERY);
       _aligned_since_us = 0;
-    } else if (_fov_ratio >= soft || (trusted && !_dynamic_reachable)) {
+    } else if (recovering) {
       set_stage(Stage::RECOVERY);
       _aligned_since_us = 0;
     } else if (!trusted) {
@@ -272,18 +283,20 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
       }
       const Vector3f relative_velocity = _velocity_ned - _target_velocity;
       const float actual_closure = relative_velocity * direction;
-      const float ttc =
-          actual_closure > .5f ? _estimated_relative.norm() / actual_closure : INFINITY;
-      const float pass_time =
-          ttc + _param_dock_pass_distance.get() / math::max(actual_closure, .5f);
-      const float miss = (_estimated_relative - relative_velocity * ttc).norm();
-      // 穿越许可同时检查：接近时间、预测横向误差加两倍位置不确定度、
-      // 当前视场与距离，并要求这些条件持续满足确认时间。
+      const auto closest = dock_motion::predict_closest_approach(
+          _estimated_relative, _velocity_ned, _target_velocity, previous,
+          math::constrain(_param_dock_pred_response.get(), .05f, 2.f),
+          math::constrain(_param_dock_pred_time.get(), .2f, 10.f));
+      const auto point_evidence = dock_motion::assess_closest_approach(_target_motion, now, closest);
+      const float pass_time = point_evidence.time_upper_s +
+          _param_dock_pass_distance.get() / math::max(actual_closure, .5f);
+      // The target accepts entry from any direction: require a bounded 3-D
+      // closest approach rather than only a small error in a chosen plane.
       const bool candidate =
-          _param_dock_terminal_enable.get() && _fov_ratio <= align && std::isfinite(ttc) &&
+          _param_dock_terminal_enable.get() && _fov_ratio <= align &&
+          actual_closure > .5f && point_evidence.valid &&
           pass_time < .8f * _param_dock_terminal_max_time.get() &&
-          miss + 2.f * _target_motion.position_sigma(_target_motion.age(now) + pass_time) <
-              _param_dock_pass_error.get() &&
+          point_evidence.miss_bound_m < _param_dock_pass_error.get() &&
           (_param_dock_terminal_distance.get() <= 0.f ||
            _estimated_relative.norm() <= _param_dock_terminal_distance.get());
       if (candidate) {
@@ -415,6 +428,20 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
       _startup_height_hold = false;
     }
   }
+  _height_brake_velocity = NAN;
+  const bool height_brake_allowed = _airborne && !_startup_climb && !_startup_height_hold &&
+      _stage != Stage::TERMINAL_DASH && _target_motion.recent_metric(now) &&
+      _estimated_relative.isAllFinite() && std::isfinite(_target_position_error);
+  if (height_brake_allowed) {
+    // The target's vertical speed is used only after the full estimate is
+    // trusted. Otherwise a recent camera-derived height still prevents the
+    // aircraft from continuing a fast climb through the target's altitude.
+    const float target_vz = trusted ? _target_velocity(2) : 0.f;
+    desired(2) = dock_motion::limit_target_climb_velocity(
+        desired(2), _estimated_relative(2), _velocity_ned(2), target_vz,
+        _target_position_error, height_deceleration, _param_dock_dynamic_jerk.get());
+    _height_brake_velocity = desired(2);
+  }
   desired = dock_motion::constrained(desired, limits);
   // 捕获阶段的完整目标速度还不可信时，三维穿越修正常因距离方差过大被拒绝。
   // 持续同号的垂直错失仍可先给出小幅预修正，为加速度/jerk 规划器争取时间；
@@ -506,6 +533,22 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
                     ? dock_motion::PredictionReject::ImageEdge
                     : dock_motion::PredictionReject::NotEligible)));
   }
+  if (height_brake_allowed) {
+    // A subsequent image/prediction correction must not undo the vertical
+    // stopping envelope. If it requested more climb, its unmodified miss
+    // prediction no longer describes the velocity sent to the planner.
+    const float target_vz = trusted ? _target_velocity(2) : 0.f;
+    const float braked_vz = dock_motion::limit_target_climb_velocity(
+        desired(2), _estimated_relative(2), _velocity_ned(2), target_vz,
+        _target_position_error, height_deceleration, _param_dock_dynamic_jerk.get());
+    if (braked_vz > desired(2) + .001f && _prediction_ready) {
+      _prediction_ready = false;
+      _miss_correction.valid = false;
+      _prediction_reject = dock_motion::PredictionReject::PlannerLimited;
+    }
+    desired(2) = braked_vz;
+    _height_brake_velocity = braked_vz;
+  }
   _desired_velocity = desired;
   const float max_accel = desired.norm() < previous.norm() ? rate : acceleration;
   const float vector_accel_limit = _startup_height_hold ? acceleration : max_accel;
@@ -530,11 +573,27 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
         limits, dt, vector_accel_limit, math::constrain(_param_dock_dynamic_jerk.get(), .1f, 100.f),
         ray, _startup_ray_rate, camera_to_ned, range,
         math::radians(.5f * _param_dock_fov_x.get()), math::radians(.5f * _param_dock_fov_y.get()),
-        soft, _startup_height_hold, _startup_climb);
+        soft, _startup_height_hold, _startup_climb, _vertical_accel_up, _vertical_accel_down);
     _velocity_setpoint_ned = plan.velocity;
     _dynamic_acceleration = plan.acceleration;
     _velocity_limits_override = plan.limits_override;
     _predicted_fov_ratio = plan.predicted_fov;
+  }
+  _closest_approach = {};
+  _point_error_bound = INFINITY;
+  _point_time_upper = INFINITY;
+  if (_target_motion.recent_metric(now) && _estimated_relative.isAllFinite() &&
+      _velocity_ned.isAllFinite() && _target_velocity.isAllFinite()) {
+    _closest_approach = dock_motion::predict_closest_approach(
+        _estimated_relative, _velocity_ned, _target_velocity, _velocity_setpoint_ned,
+        math::constrain(_param_dock_pred_response.get(), .05f, 2.f),
+        math::constrain(_param_dock_pred_time.get(), .2f, 10.f));
+    const auto point_evidence = dock_motion::assess_closest_approach(
+        _target_motion, now, _closest_approach);
+    if (point_evidence.valid) {
+      _point_error_bound = point_evidence.miss_bound_m;
+      _point_time_upper = point_evidence.time_upper_s;
+    }
   }
   // Planner 的视场/动态限幅可能挡住修正；只有实际发布的速度朝修正方向变化
   // 才把 prediction_valid 计为真，且需要新观测持续确认。
@@ -568,7 +627,9 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
   const bool commit_capture_plan = capture_prediction && _prediction_ready &&
       _prediction_reject == dock_motion::PredictionReject::Ready &&
       _param_dock_terminal_enable.get() && !_startup_height_hold &&
-      _miss_correction.time_to_plane <= math::constrain(_param_dock_blind_tgo.get(), .1f, .5f) &&
+      _closest_approach.valid &&
+      _point_time_upper <= math::constrain(_param_dock_blind_tgo.get(), .1f, .5f) &&
+      _point_error_bound < pass_error &&
       predicted_miss + 2.f * _prediction_cross_sigma < pass_error &&
       _bbox_edge_ratio < soft && _predicted_fov_ratio < soft &&
       (_param_dock_terminal_distance.get() <= 0.f ||
@@ -583,7 +644,7 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
       _terminal_blind_since_us = 0;
       _terminal_velocity_ned = _velocity_setpoint_ned;
       const float duration = math::min(_param_dock_terminal_blind.get(),
-          _miss_correction.time_to_plane + .1f);
+          _point_time_upper + .1f);
       _terminal_plan_deadline = now + static_cast<uint64_t>(math::max(.05f, duration) * 1e6f);
       set_stage(Stage::TERMINAL_DASH);
     }

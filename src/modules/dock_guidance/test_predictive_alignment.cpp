@@ -10,6 +10,45 @@ using namespace dock_motion;
 using matrix::Dcmf;
 using matrix::Eulerf;
 
+static void test_estimator_sample_alignment() {
+  uint64_t stamp = 0;
+  assert(state_sample_time(1000000, 1002000, 1010000, 20000, stamp) && stamp == 1000000);
+  assert(state_sample_time(0, 1002000, 1010000, 20000, stamp) && stamp == 1002000);
+  assert(!state_sample_time(1003000, 1002000, 1010000, 20000, stamp));
+  assert(!state_sample_time(1000000, 1011000, 1010000, 20000, stamp));
+  assert(!state_sample_time(980000, 1002000, 1010000, 20000, stamp));
+  assert(!state_sample_time(0, 0, 1010000, 20000, stamp));
+
+  const matrix::Quatf initial(Eulerf(.4f, -.3f, .7f));
+  const Vector3f rates(.4f, -1.2f, .7f);
+  const Vector3f target(150.f, 30.f, -80.f);
+  float old_error = 0.f, new_error = 0.f;
+  // Jitter in attitude delivery must not appear as motion of a static target.
+  // Analytic constant-body-rate motion provides an independent geometry oracle.
+  for (int i = 0; i < 100; ++i) {
+    const uint64_t now = 2000000 + i * 10000;
+    const uint64_t lag = 5000 + (i % 4) * 5000;
+    const float elapsed = (now - 1000000) * 1e-6f;
+    const matrix::Quatf actual = initial * matrix::Quatf(matrix::AxisAnglef(rates * elapsed));
+    const matrix::Quatf delayed = initial * matrix::Quatf(matrix::AxisAnglef(rates * (elapsed - lag * 1e-6f)));
+    matrix::Quatf aligned;
+    assert(attitude_at_time(delayed, rates, now - lag, now - 1000, now, aligned));
+    const Vector3f ray = Dcmf(actual).transpose() * target;
+    old_error = max(old_error, Vector3f(Dcmf(delayed) * ray - target).norm());
+    new_error = max(new_error, Vector3f(Dcmf(aligned) * ray - target).norm());
+  }
+  assert(old_error > 3.f && new_error < .0002f);
+  matrix::Quatf unused;
+  assert(!attitude_at_time(initial, rates, 1000000, 1020000, 1020001, unused));
+  assert(!attitude_at_time(initial, rates, 1020000, 1000000, 1020001, unused));
+  assert(!attitude_at_time(initial, rates, 1020001, 1020000, 1020000, unused));
+  assert(!attitude_at_time(initial, Vector3f(NAN, 0.f, 0.f), 1020000, 1020000, 1020000, unused));
+  assert(attitude_at_time(initial, Vector3f{}, 1000000, 1000000, 1020000, unused));
+  assert(Vector3f(Dcmf(unused) * target - Dcmf(initial) * target).norm() < .0001f);
+  printf("state sample timing: static-target error before %.3f m, aligned %.6f m\n",
+      double(old_error), double(new_error));
+}
+
 static void test_fresh_state_history() {
   SampleHistoryIndex<601> history(10000);
   uint64_t stamps[601]{};
@@ -136,6 +175,32 @@ static void test_predictive_geometry() {
   assert(!correct_predicted_miss(relative, own, target, nominal, axis, .5f,5,0,8).valid);
 }
 
+static void test_three_dimensional_closest_approach() {
+  const Vector3f relative(90.f, 5.f, -4.f), own(40.f, 0.f, 0.f);
+  const Vector3f target(10.f, 0.f, 0.f);
+  const auto point = predict_closest_approach(relative, own, target, own, .5f, 5.f);
+  assert(point.valid && fabsf(point.time_s - 3.f) < .003f);
+  assert((point.miss - Vector3f(0.f, 5.f, -4.f)).norm() < .01f);
+  assert(fabsf(point.relative_speed_m_s - 30.f) < .001f);
+  assert((point.approach_axis - Vector3f(1.f, 0.f, 0.f)).norm() < .001f);
+  assert(!predict_closest_approach(relative, own, target, own, .5f, 2.f).valid);
+  assert(!predict_closest_approach(relative, -own, target, -own, .5f, 5.f).valid);
+  // A target that can be entered from any direction is evaluated at its true
+  // minimum separation, which can occur before a north-facing plane crossing.
+  const auto crossing = predict_closest_approach(Vector3f(10.f, 5.f, 0.f),
+      Vector3f(5.f, 0.f, 0.f), Vector3f(0.f, 1.f, 0.f),
+      Vector3f(5.f, 0.f, 0.f), .5f, 4.f);
+  assert(crossing.valid && fabsf(crossing.time_s - 45.f / 26.f) < .003f);
+  assert(fabsf(crossing.miss.norm() - 6.8640647f) < .01f);
+  const Dcmf rotation(Eulerf(.5f, -.4f, .7f));
+  const auto rotated = predict_closest_approach(rotation * relative, rotation * own,
+      rotation * target, rotation * own, .5f, 5.f);
+  assert(rotated.valid && fabsf(rotated.time_s - point.time_s) < .003f);
+  assert((rotated.miss - rotation * point.miss).norm() < .01f);
+  assert((rotated.approach_axis - rotation * point.approach_axis).norm() < .001f);
+  assert(!predict_closest_approach(relative, own, target, Vector3f(NAN, 0.f, 0.f), .5f, 5.f).valid);
+}
+
 static void test_dynamic_image_translation() {
   const Vector3f forward(1.f, 0.f, 0.f);
   const Vector3f right = Vector3f(10.f, 1.f, 0.f).normalized();
@@ -247,10 +312,12 @@ static float run_approach(bool predictive, float plant_tau, const Vector3f &init
 }
 
 int main() {
+  test_estimator_sample_alignment();
   test_fresh_state_history();
   test_camera_history();
   test_delayed_rotating_camera();
   test_predictive_geometry();
+  test_three_dimensional_closest_approach();
   test_dynamic_image_translation();
   test_early_vertical_capture();
   for (float tau : {.2f, .4f, .7f}) {

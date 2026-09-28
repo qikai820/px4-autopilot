@@ -12,6 +12,95 @@ struct MissCorrection {
   bool valid{false};
 };
 
+struct ClosestApproach {
+  Vector3f miss{}; // Target center minus aircraft at minimum separation.
+  Vector3f approach_axis{}; // Relative velocity direction at that instant.
+  float time_s{NAN};
+  float relative_speed_m_s{NAN};
+  bool valid{false};
+};
+
+struct PointEvidence {
+  float miss_bound_m{INFINITY};
+  float time_upper_s{INFINITY};
+  bool valid{false};
+};
+
+// Along-track position error mostly shifts encounter time; it does not become
+// a spatial miss for a target enterable from either side. Check the transverse
+// miss separately and retain a conservative time budget for that depth error.
+inline PointEvidence assess_closest_approach(const TargetMotion &motion, uint64_t now,
+                                             const ClosestApproach &point) {
+  PointEvidence result;
+  if (!point.valid || !motion.recent_metric(now) ||
+      !std::isfinite(point.relative_speed_m_s) || point.relative_speed_m_s <= .5f) {
+    return result;
+  }
+  const float horizon = motion.age(now) + point.time_s;
+  const float across_sigma = motion.transverse_position_sigma(point.approach_axis, horizon);
+  const float position_sigma = motion.position_sigma(horizon);
+  result.miss_bound_m = point.miss.norm() + 2.f * across_sigma;
+  result.time_upper_s = point.time_s + 2.f * position_sigma / point.relative_speed_m_s;
+  result.valid = std::isfinite(result.miss_bound_m + result.time_upper_s);
+  return result;
+}
+
+// A target that may be entered from any direction has no privileged crossing
+// plane. Predict the minimum 3-D separation under the same first-order
+// velocity response used by the steering correction below. Do not report a
+// horizon endpoint as a predicted intercept.
+inline ClosestApproach predict_closest_approach(const Vector3f &relative,
+    const Vector3f &own_velocity, const Vector3f &target_velocity,
+    const Vector3f &command, float response_time, float horizon) {
+  ClosestApproach result;
+  if (!relative.isAllFinite() || !own_velocity.isAllFinite() ||
+      !target_velocity.isAllFinite() || !command.isAllFinite() ||
+      !std::isfinite(response_time + horizon) || response_time < .05f || horizon <= 0.f) {
+    return result;
+  }
+  const Vector3f initial_relative_velocity = own_velocity - target_velocity;
+  const Vector3f command_change = command - own_velocity;
+  const auto miss_at = [&](float time) {
+    const float response = time + response_time * expm1f(-time / response_time);
+    return relative - initial_relative_velocity * time - command_change * response;
+  };
+  constexpr int samples = 20;
+  int minimum = 0;
+  float best = relative.norm_squared();
+  for (int i = 1; i <= samples; ++i) {
+    const float miss_squared = miss_at(horizon * i / samples).norm_squared();
+    if (miss_squared < best) {
+      best = miss_squared;
+      minimum = i;
+    }
+  }
+  if (minimum == 0 || minimum == samples) {
+    return result;
+  }
+  float lo = horizon * (minimum - 1) / samples;
+  float hi = horizon * (minimum + 1) / samples;
+  for (int i = 0; i < 22; ++i) {
+    const float left = lo + (hi - lo) / 3.f;
+    const float right = hi - (hi - lo) / 3.f;
+    if (miss_at(left).norm_squared() < miss_at(right).norm_squared()) {
+      hi = right;
+    } else {
+      lo = left;
+    }
+  }
+  result.time_s = .5f * (lo + hi);
+  result.miss = miss_at(result.time_s);
+  const Vector3f relative_velocity = initial_relative_velocity +
+      command_change * (1.f - expf(-result.time_s / response_time));
+  result.relative_speed_m_s = relative_velocity.norm();
+  if (result.relative_speed_m_s > .5f && std::isfinite(result.relative_speed_m_s)) {
+    result.approach_axis = relative_velocity / result.relative_speed_m_s;
+  }
+  result.valid = result.time_s > 0.f && result.time_s < horizon && result.miss.isAllFinite() &&
+      result.approach_axis.isAllFinite() && result.relative_speed_m_s > .5f;
+  return result;
+}
+
 enum class PredictionReject : uint8_t {
   Ready = 0,
   Disabled = 1,
