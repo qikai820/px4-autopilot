@@ -135,6 +135,26 @@ static void test_following_outside_axis_limit() {
       double(budget),double(command(0)),double(command(1)),double(command(2)));
 }
 
+static void test_terminal_distance_no_brake() {
+  // A 35 m/s pass must not be reduced to sqrt(2*a*remaining), even before TERMINAL_DASH.
+  for (float distance : {200.f, 20.f, 5.f, 2.f, .1f, 0.f}) {
+    assert(distance_limited_approach_speed(true, 35.f, distance, 2.f, 3.f) == 35.f);
+    // Keep upstream speed/FOV limits: disabling distance braking must not increase their result.
+    assert(distance_limited_approach_speed(true, 7.f, distance, 2.f, 3.f) == 7.f);
+  }
+  assert(fabsf(distance_limited_approach_speed(false, 35.f, 20.f, 2.f, 3.f) - sqrtf(108.f)) < 1e-5f);
+  assert(distance_limited_approach_speed(false, 35.f, 2.f, 2.f, 3.f) == 0.f);
+  assert(distance_limited_approach_speed(false, 35.f, .1f, 2.f, 3.f) == 0.f);
+  assert(distance_limited_approach_speed(false, 3.f, 200.f, 2.f, 3.f) == 3.f);
+  const Vector3f direction(1.f, 0.f, 0.f);
+  for (float along : {20.f, 2.f, .1f, 0.f, -2.f, -3.f}) {
+    // With 0.5 m uncertainty and 2 m clearance, merely reaching the target is not completion.
+    assert(classify_pass(Vector3f(along, 0.f, 0.f), direction, .5f, 2.f, 3.f) == PassState::Approaching);
+  }
+  assert(classify_pass(Vector3f(-3.01f, 0.f, 0.f), direction, .5f, 2.f, 3.f) == PassState::Predicted);
+  puts("terminal pass: no distance braking before pass, old stopping mode and confirmed-past-plane boundary passed");
+}
+
 static void test_capture_schedule() {
   assert(approach_limit(true,40,10) == 40.f);
   assert(approach_limit(false,40,10) == 10.f);
@@ -512,6 +532,7 @@ int main(int argc, char **argv) {
   test_recovery_hysteresis();
   test_final_velocity_planner();
   test_capture_schedule();
+  test_terminal_distance_no_brake();
   test_static_camera_motion();
   test_bearing_gap();
   test_target_height_envelope();

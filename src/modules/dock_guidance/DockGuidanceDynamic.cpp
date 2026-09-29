@@ -276,11 +276,8 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
                     _stage == Stage::TERMINAL_BRAKE)) {
       wanted_closure =
           _dynamic_max_closure * dock_motion::clamp((soft - _fov_ratio) / (soft - align), 0.f, 1.f);
-      if (!_param_dock_terminal_enable.get()) {
-        const float remaining =
-            math::max(0.f, _estimated_relative.norm() - _param_dock_stop_dist.get());
-        wanted_closure = math::min(wanted_closure, sqrtf(2.f * deceleration * remaining));
-      }
+      wanted_closure = dock_motion::distance_limited_approach_speed(_param_dock_terminal_enable.get(),
+          wanted_closure, _estimated_relative.norm(), _param_dock_stop_dist.get(), deceleration);
       const Vector3f relative_velocity = _velocity_ned - _target_velocity;
       const float actual_closure = relative_velocity * direction;
       const auto closest = dock_motion::predict_closest_approach(
@@ -762,19 +759,36 @@ bool DockGuidance::dynamic_terminal(hrt_abstime now, bool blind) {
 }
 
 void DockGuidance::publish_predicted_pass(hrt_abstime now) {
-  // 预测越过后逐步衰减当前速度设定值；继续刷新轨迹话题，等待其他模式接管。
+  // 推力制动以零速度为闭环目标，由下层对实际速度反向倾斜并平滑改变姿态/油门。
+  // 高速期间允许高度暂时偏移，避免为了立即消除爬升而大幅收油门。
   vehicle_local_position_s local{};
   if (!_local_pos_sub.copy(&local) || !local.v_xy_valid || !local.v_z_valid ||
-      now < local.timestamp || now - local.timestamp > 500_ms ||
-      !Vector3f(local.vx, local.vy, local.vz).isAllFinite()) {
-    invalidate_setpoint(now, "post-pass local velocity invalid");
+      !local.timestamp || now < local.timestamp || now - local.timestamp > 500_ms ||
+      !Vector3f(local.vx, local.vy, local.vz).isAllFinite() || !std::isfinite(local.heading)) {
+    invalidate_setpoint(now, "post-pass local velocity/heading invalid");
     return;
   }
   const float dt = _last_control_update_us && now > _last_control_update_us
                        ? math::constrain((now - _last_control_update_us) * 1e-6f, .002f, .1f)
                        : LOOP_DT;
+  _velocity_ned = Vector3f(local.vx, local.vy, local.vz);
+  _velocity_valid = true;
+  _velocity_speed_ms = _velocity_ned.norm();
+  // 高速锁定实际机头，不继续追赶通过前尚未到达的 yaw 目标。
+  // 三维实速严格低于阈值后才限速恢复目标；俯仰/横滚制动不受此门控影响。
+  const float recovery_yaw = _recovery_heading.update(_velocity_ned, local.heading, _yaw_setpoint_rad,
+      math::constrain(_param_dock_recovery_yaw_speed.get(), .1f, 20.f),
+      math::radians(math::constrain(_param_dock_yaw_rate.get(), 1.f, 90.f)), dt,
+      local.heading_reset_counter, local.delta_heading);
+  if (!std::isfinite(recovery_yaw)) {
+    invalidate_setpoint(now, "post-pass heading gate invalid");
+    return;
+  }
+  _yaw_setpoint_rad = recovery_yaw;
   const float speed = _velocity_setpoint_ned.norm();
-  if (speed > .001f) {
+  if (_param_dock_brake_enable.get()) {
+    _velocity_setpoint_ned.zero();
+  } else if (speed > .001f) {
     _velocity_setpoint_ned *=
         math::max(0.f, speed - math::max(.1f, _param_dock_dec_max.get()) * dt) / speed;
   } else {
@@ -786,6 +800,8 @@ void DockGuidance::publish_predicted_pass(hrt_abstime now) {
   _commanded_speed_ms = _velocity_setpoint_ned.norm();
   _last_control_update_us = now;
   _setpoint_valid = true;
+  // PASS_PREDICTED 已经不依赖视觉；不能让盲穿阶段遗留的退化标志关闭制动推力。
+  _vision_degraded = false;
   publish_guidance_status(now, true, false);
   publish_velocity_setpoint(now, _velocity_setpoint_ned, _yaw_setpoint_rad);
 }

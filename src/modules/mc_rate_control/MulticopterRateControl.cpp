@@ -150,6 +150,11 @@ MulticopterRateControl::Run()
 		}
 
 		_vehicle_status_sub.update(&_vehicle_status);
+		if (_dock_fault_transfer.update(hrt_absolute_time(), _vehicle_control_mode, _vehicle_status,
+						_dock_thrust, !_landed && !_ground_contact)) {
+			_dock_fault_braking_complete = false;
+		}
+		if (!_dock_fault_transfer.active()) { _dock_fault_braking_complete = false; }
 
 		// use rates setpoint topic
 		vehicle_rates_setpoint_s vehicle_rates_setpoint{};
@@ -267,22 +272,48 @@ MulticopterRateControl::Run()
 					&& throttle_now - _local_pos.timestamp <= 250_ms;
 			const float measured_speed = local_fresh
 					? Vector3f(_local_pos.vx, _local_pos.vy, _local_pos.vz).norm() : NAN;
+			const float horizontal_speed = local_fresh ? Vector2f(_local_pos.vx, _local_pos.vy).norm() : NAN;
 			const bool throttle_allowed = _vehicle_control_mode.flag_armed
 					&& _vehicle_control_mode.flag_control_rates_enabled
 					&& _vehicle_control_mode.flag_multicopter_position_control_enabled
 					&& !_vehicle_control_mode.flag_control_termination_enabled
+					&& !_vehicle_status.failsafe
 					&& _vehicle_status.vehicle_type == vehicle_status_s::VEHICLE_TYPE_ROTARY_WING
 					&& !_landed && !_ground_contact;
 			const auto dock_request = _dock_thrust_control.update(_dock_thrust, throttle_now,
 					_vehicle_control_mode.source_id, throttle_allowed, measured_speed);
-			const float collective = _dock_throttle_slew.update(-vehicle_thrust_setpoint.xyz[2],
-					dock_request.thrust, dock_request.slew_rate, dt,
-					_param_mpc_thr_min.get(), _param_mpc_thr_max.get());
+			if (_dock_fault_transfer.active() && !PX4_ISFINITE(measured_speed)) {
+				_dock_fault_transfer.cancel();
+			}
+			if (_dock_fault_transfer.active()
+			    && measured_speed < math::constrain(_param_dock_recovery_yaw_speed.get(), .1f, 20.f)) {
+				_dock_fault_braking_complete = true;
+			}
+			const bool fault_thrust_slew = _param_dock_brake_enable.get() && _dock_fault_transfer.active();
+			// Braking attitude and thrust are computed together in mc_pos_control. Keep the
+			// final slew limiter, but allow that thrust to return to hover as speed decreases.
+			const float automatic_throttle = -vehicle_thrust_setpoint.xyz[2];
+			const float throttle_target = (dock_request.braking || fault_thrust_slew) ? automatic_throttle : dock_request.thrust;
+			const float throttle_slew_rate = fault_thrust_slew
+						 ? math::constrain(_param_dock_thrust_rate.get(), .01f, 2.f) : dock_request.slew_rate;
+			// The user's braking floor applies on the first pitch/roll transition cycle.
+			// It takes priority over the slew limiter, while MPC_THR_MAX remains a hard cap.
+			const float braking_floor = DockThrottleSlew::brakingFloor(
+						     dock_request.braking || (fault_thrust_slew && !_dock_fault_braking_complete),
+						     horizontal_speed, _param_dock_brake_min_speed.get(), _param_dock_brake_min_throttle.get());
+			const float collective = _dock_throttle_slew.update(automatic_throttle,
+					throttle_target, throttle_slew_rate, dt,
+					_param_mpc_thr_min.get(), _param_mpc_thr_max.get(), braking_floor);
 
-			if (dock_request.slew_rate > 0.f) {
+			if (throttle_slew_rate > 0.f) {
 				vehicle_thrust_setpoint.xyz[0] = 0.f;
 				vehicle_thrust_setpoint.xyz[1] = 0.f;
 				vehicle_thrust_setpoint.xyz[2] = -collective;
+			}
+			if (fault_thrust_slew && _dock_fault_braking_complete
+			    && PX4_ISFINITE(automatic_throttle)
+			    && fabsf(collective - automatic_throttle) < .01f) {
+				_dock_fault_transfer.cancel();
 			}
 
 			vehicle_thrust_setpoint.timestamp_sample = angular_velocity.timestamp_sample;

@@ -129,11 +129,14 @@ parameters:
           long: >
             Zero disables fixed throttle and its slew limiter. When positive, ramp the final
             body-Z throttle sent to control allocation after battery scaling, then hold this
-            normalized scalar throughout all healthy Dock stages, including post-pass operation.
+            normalized scalar throughout healthy Dock stages. With DOCK_BRK_EN enabled,
+            post-pass and Dock-fault-to-RTL braking instead use DOCK_BRK_THR;
+            DOCK_BRK_TMIN enforces a higher final-output floor above DOCK_BRK_TVEL.
             Reaching DOCK_VEL_MAX does not release it. The attitude/rate controllers continue
             producing torque, so individual motor outputs may differ. Bounded by MPC thrust
             limits. Fixed throttle changes altitude and braking response. Ground contact,
-            invalid guidance, stale commands and mode exit restore normal control immediately.
+            invalid guidance, stale commands and mode exit restore normal control immediately,
+            except for a verified automatic Dock fault handoff to RTL.
         type: float
         min: 0
         max: 1
@@ -143,15 +146,133 @@ parameters:
         description:
           short: Dock collective throttle slew rate
           long: >
-            Maximum normalized final body-Z throttle change per second while DOCK_THR is enabled.
+            Maximum normalized final body-Z throttle change per second while DOCK_THR,
+            post-pass braking or Dock-fault-to-RTL braking is enabled.
             Applies to entry and changes of DOCK_THR throughout healthy Dock operation in both
             directions. A value of 0.2 changes thrust by at most 20 percentage points per second.
-            Smaller values give slower transitions. Mode exit and invalid guidance bypass this limiter.
+            Smaller values give slower transitions. The high-speed DOCK_BRK_TMIN
+            floor can raise throttle immediately. Mode exit and invalid guidance
+            bypass this limiter.
         type: float
         min: 0.01
         max: 2
         decimal: 2
         default: 0.2
+      DOCK_BRK_EN:
+        description:
+          short: Thrust-preserving post-pass braking
+          long: >
+            After PASS_PREDICTED or automatic Dock fault handoff to RTL, tilt against
+            measured horizontal velocity while preserving thrust and temporarily relaxing
+            vertical velocity control. Fade to normal control at low speed. Uses
+            MPC_TILTMAX_AIR and MPC thrust limits. Does not change vision recovery or
+            terminal approach. Disable to omit this thrust brake during fault RTL.
+        type: boolean
+        default: 1
+      DOCK_BRK_THR:
+        description:
+          short: Dock recovery braking thrust floor
+          long: >
+            High-speed braking uses the greater of this value and tilt-compensated
+            hover thrust. The floor fades below DOCK_BRK_VEL and is released at 0.5 m/s.
+            MPC_THR_MAX always wins. Altitude can change while braking; this is not altitude hold.
+        type: float
+        min: 0
+        max: 1
+        decimal: 2
+        default: 0.35
+      DOCK_BRK_TMIN:
+        description:
+          short: Minimum collective during high-speed Dock braking
+          long: >
+            Minimum final normalized body-Z collective while post-pass or automatic
+            Dock-fault-to-RTL braking is active and measured horizontal speed is at or above
+            DOCK_BRK_TVEL. Applies immediately on entry, including the pitch/roll
+            transition, even if DOCK_THR_RATE would otherwise delay an increase.
+            MPC_THR_MAX takes priority. Below DOCK_BRK_TVEL, normal throttle slew
+            resumes from the last output. This does not guarantee any individual
+            motor output or altitude hold.
+        type: float
+        min: 0
+        max: 1
+        decimal: 2
+        default: 0.70
+      DOCK_BRK_TVEL:
+        description:
+          short: Speed for minimum braking collective
+          long: >
+            Keep DOCK_BRK_TMIN active while measured horizontal speed is at or above
+            this threshold. The floor releases strictly below it; DOCK_THR_RATE
+            then limits any downward collective transition. This is separate from
+            DOCK_BRK_VEL, which blends braking tilt, and DOCK_REC_YAW_V, which
+            controls when yaw may turn.
+        type: float
+        unit: m/s
+        min: 0.5
+        max: 30
+        decimal: 1
+        default: 8.0
+      DOCK_BRK_RATE:
+        description:
+          short: Dock recovery braking tilt slew rate
+          long: >
+            Maximum rotation rate of the commanded thrust direction during recovery braking
+            and return to normal control. Hard MPC tilt limits take priority.
+        type: float
+        unit: deg/s
+        min: 5
+        max: 180
+        decimal: 1
+        default: 45
+      DOCK_BRK_VEL:
+        description:
+          short: Speed for full Dock recovery braking
+          long: >
+            At or above this horizontal speed, fully prioritize braking against measured motion
+            and preserve thrust. Tilt also reserves speed for leveling out. Below this speed reduce braking authority;
+            at 0.5 m/s normal velocity and vertical control take over. Larger values start
+            the transition earlier to reduce reverse motion near a stop.
+        type: float
+        unit: m/s
+        min: 2
+        max: 30
+        decimal: 1
+        default: 10
+      DOCK_REC_YAW_V:
+        description:
+          short: Dock recovery yaw release speed
+          long: >
+            In PASS_PREDICTED, hold the measured heading at recovery entry while measured
+            3-D speed is at or above this threshold. Below it, slew toward the heading target
+            saved before recovery at DOCK_YAW_RATE. Re-lock the current measured heading if
+            speed rises to the threshold again. Also holds measured heading when an
+            automatic Dock fault transfers control to RTL. RTL translation remains at
+            zero while speed is reduced below this threshold and the measured heading
+            aligns with the settled RTL yaw target at MPC_YAWRAUTO_MAX. Translation resumes
+            with a velocity-setpoint ramp; normal RTL then owns yaw. If the RTL yaw target
+            is unavailable or alignment times out, native RTL regains control. When DOCK_EXIT_MODE
+            selects Hold, the fault handoff instead keeps its zero-speed goal until Hold
+            is requested. Applies with either post-pass braking method.
+        type: float
+        unit: m/s
+        min: 0.1
+        max: 20
+        decimal: 1
+        default: 2.0
+      DOCK_EXIT_MODE:
+        description:
+          short: Mode after Dock braking
+          long: >
+            Select the flight mode after a predicted target pass has decelerated to below
+            0.5 m/s for 0.5 seconds. On a Dock fault, Commander first takes over in RTL
+            and the existing fault braking runs; Hold is requested only after the same
+            stop check succeeds. If velocity or position is invalid, Commander retains
+            its failsafe authority. A predicted pass does not confirm physical contact.
+        type: enum
+        values:
+          0: RTL
+          1: Hold
+        default: 0
       DOCK_DEC_MAX:
         description: {short: Maximum approach deceleration}
         type: float
@@ -160,7 +281,11 @@ parameters:
         decimal: 1
         default: 3.0
       DOCK_STOP_DIST:
-        description: {short: Final stand-off distance}
+        description:
+          short: Final stand-off distance
+          long: >
+            Target stopping distance when DOCK_TERM_EN is disabled. With terminal pass-through
+            enabled, neither static nor dynamic approach uses this distance to slow down before the target.
         type: float
         min: 0
         max: 100
@@ -383,7 +508,13 @@ parameters:
         type: boolean
         default: false
       DOCK_TERM_EN:
-        description: {short: Enable maximum-speed terminal dash}
+        description:
+          short: Enable maximum-speed terminal dash
+          long: >
+            Enables terminal pass-through and disables the target stopping-distance speed envelope
+            throughout normal static and dynamic approach, including before terminal entry.
+            Normal post-pass braking starts only after PASS_PREDICTED. Observation, state and
+            terminal timeout protections remain active; a timeout is not completion.
         type: boolean
         default: true
       DOCK_TERM_DIST:

@@ -14,6 +14,7 @@ px4_add_module(
 		DockGuidance.hpp
 		CameraHistory.hpp
 		PredictiveCorrection.hpp
+		RecoveryHeading.hpp
 	MODULE_CONFIG
 		module.yaml
 	DEPENDS

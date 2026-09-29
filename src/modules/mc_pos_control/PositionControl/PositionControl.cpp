@@ -72,6 +72,26 @@ void PositionControl::setHorizontalThrustMargin(const float margin)
 	_lim_thr_xy_margin = margin;
 }
 
+void PositionControl::setDockBraking(bool enabled, float thrust, float rate, float speed)
+{
+	enabled = enabled && PX4_ISFINITE(thrust) && thrust >= 0.f && thrust <= 1.f
+		  && PX4_ISFINITE(rate) && rate > 0.f && PX4_ISFINITE(speed) && speed >= 2.f;
+
+	if (enabled && !_dock_braking) {
+		// Start the rotation from the previous commanded attitude, including forward tilt.
+		_dock_brake_body_z = _thr_sp.isAllFinite() && _thr_sp.norm() > .001f
+				     ? -_thr_sp.normalized() : Vector3f(0.f, 0.f, 1.f);
+		// The approach can leave a large forward velocity integral. It must not
+		// become the normal-control direction blended into low-speed braking.
+		_vel_int.xy() = Vector2f();
+	}
+
+	_dock_braking = enabled;
+	_dock_brake_thrust = thrust;
+	_dock_brake_rate = rate;
+	_dock_brake_speed = speed;
+}
+
 void PositionControl::updateHoverThrust(const float hover_thrust_new)
 {
 	// Given that the equation for thrust is T = a_sp * Th / g - Th
@@ -184,7 +204,9 @@ void PositionControl::_velocityControl(const float dt)
 
 	// The downstream Dock throttle cannot respond to velocity-integral corrections.
 	// Hold the integrator until normal collective throttle control resumes.
-	if (_hold_velocity_integral) {
+	const bool braking = _dockBrakeControl(dt);
+
+	if (_hold_velocity_integral || braking) {
 		return;
 	}
 
@@ -205,6 +227,72 @@ void PositionControl::_velocityControl(const float dt)
 	ControlMath::setZeroIfNanVector3f(vel_error);
 	// Update integral part of velocity control
 	_vel_int += vel_error.emult(_gain_vel_i) * dt;
+}
+
+bool PositionControl::_dockBrakeControl(float dt)
+{
+	if (!_dock_braking || !_vel.isAllFinite() || !_thr_sp.isAllFinite()) {
+		return false;
+	}
+
+	const float speed = _vel.xy().norm();
+	const float weight = math::constrain((speed - .5f) / (_dock_brake_speed - .5f), 0.f, 1.f);
+	const float automatic_thrust = _thr_sp.norm();
+	Vector3f normal_body_z = automatic_thrust > .001f ? -_thr_sp / automatic_thrust : Vector3f(0.f, 0.f, 1.f);
+	Vector3f desired_body_z = normal_body_z;
+
+	if (weight > 0.f) {
+		// Body +Z points WITH velocity, so the rotor thrust (-Z) brakes AGAINST it.
+		// Heading is retained: forward flight gives nose-up pitch; lateral drift also uses roll.
+		const Vector2f direction = _vel.xy() / speed;
+		const float normal_along_motion = Vector2f(normal_body_z).dot(direction);
+		if (normal_along_motion < 0.f) {
+			// A forward-biased normal controller may point its thrust WITH motion.
+			// Remove that component before blending while retaining cross-track direction.
+			normal_body_z.xy() -= direction * normal_along_motion;
+			normal_body_z.normalize();
+		}
+		const float tilt = math::constrain(_lim_tilt, 0.f, math::radians(89.f));
+		const Vector3f brake_body_z(_vel(0) / speed * sinf(tilt), _vel(1) / speed * sinf(tilt), cosf(tilt));
+		desired_body_z = (normal_body_z * (1.f - weight) + brake_body_z * weight).normalized();
+		// Reserve speed for leveling out. A large tilt cannot disappear instantly and otherwise
+		// continues braking through zero speed. Use maximum thrust and a 0.2 s response allowance:
+		// dv <= (Tmax*g/Thover) * (theta^2/(2*rate) + 0.2*theta).
+		const float response_angle = .2f * _dock_brake_rate;
+		const float leveling_angle = sqrtf(response_angle * response_angle
+				+ 2.f * _dock_brake_rate * speed * _hover_thrust
+				/ (CONSTANTS_ONE_G * math::max(_lim_thr_max, .001f))) - response_angle;
+		ControlMath::limitTilt(desired_body_z, Vector3f(0.f, 0.f, 1.f), math::min(tilt, leveling_angle));
+	}
+
+	// Spherical interpolation bounds the total tilt-vector rotation, including entry and leveling.
+	const float angle = acosf(math::constrain(_dock_brake_body_z.dot(desired_body_z), -1.f, 1.f));
+	const float step = _dock_brake_rate * math::constrain(dt, 0.f, .1f);
+	const bool rotating = angle > math::max(step, .001f);
+
+	if (rotating) {
+		_dock_brake_body_z = (_dock_brake_body_z * sinf(angle - step) + desired_body_z * sinf(step)) / sinf(angle);
+		_dock_brake_body_z.normalize();
+
+	} else {
+		_dock_brake_body_z = desired_body_z;
+	}
+
+	ControlMath::limitTilt(_dock_brake_body_z, Vector3f(0.f, 0.f, 1.f), _lim_tilt);
+	// At speed, do not cut throttle to immediately cancel climb. At least preserve tilt-compensated
+	// hover thrust (or the configured floor). Height is allowed to change until braking fades.
+	const float floor = math::max(_dock_brake_thrust, _hover_thrust / math::max(_dock_brake_body_z(2), .1f));
+	const float thrust = math::constrain(automatic_thrust + weight * math::max(0.f, floor - automatic_thrust),
+					  _lim_thr_min, _lim_thr_max);
+	_thr_sp = -_dock_brake_body_z * thrust;
+
+	if (weight > 0.f || rotating) {
+		// Log the acceleration corresponding to the modified thrust, not the discarded height demand.
+		_acc_sp = _thr_sp * (CONSTANTS_ONE_G / _hover_thrust) + Vector3f(0.f, 0.f, CONSTANTS_ONE_G);
+		return true;
+	}
+
+	return false;
 }
 
 void PositionControl::_accelerationControl()

@@ -83,7 +83,9 @@ stateDiagram-v2
 | `EMERGENCY_RECOVERY` | 目标越过硬边界但仍可见时快速停止接近并继续跟踪，不触发 RTL |
 | `TERMINAL_DASH` | 锁存末段；保持最大三维速度预算，视觉有效时继续修正方向，短时丢失时冻结最后速度向量 |
 
-`TERMINAL_BRAKE` 和普通视觉丢失减速仍用于终端提交之前；进入 `TERMINAL_DASH` 后不再应用这些减速逻辑。
+`DOCK_TERM_EN=1` 时，静态与动态路径从正常接近阶段起就绕过目标前距离制动，
+不会先按 `DOCK_STOP_DIST` 降速再提交终端。终端提交前仍有视场/视觉异常保护；
+进入 `TERMINAL_DASH` 后保持末段速度预算。正常恢复制动由 `PASS_PREDICTED` 触发。
 
 ## 当前状态机：最大速度终端冲刺
 

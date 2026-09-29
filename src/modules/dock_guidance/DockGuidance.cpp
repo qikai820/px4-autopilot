@@ -96,14 +96,6 @@ void DockGuidance::Run() {
 
   const uint64_t now_us = hrt_absolute_time();
 
-  // 首帧到达前也定期重发相机俯仰命令：HIL 或实体输出设备可能晚于模块启动，
-  // 仅在初始化时发送一次会使后来接入的设备错过当前角度。
-  if ((_param_dock_cam_pitch_variable.get() != 0) &&
-      ((_last_camera_pitch_publish_us == 0) ||
-       (now_us - _last_camera_pitch_publish_us >= CAMERA_SERVO_PUBLISH_INTERVAL_US))) {
-    publish_camera_pitch_servo(now_us);
-  }
-
   if (_mode_id < 0 || _arming_check_id < 0) {
     if ((_last_registration_request_us == 0) ||
         (now_us - _last_registration_request_us > 1_s)) {
@@ -124,10 +116,24 @@ void DockGuidance::Run() {
   }
 
   update_mode_state();
+  if (_fault_hold_pending) {
+    maybe_request_exit_mode(now_us);
+  }
+
+  // 首帧到达前也定期重发相机俯仰命令；先同步解锁状态，避免重发未解锁前的旧角度。
+  if ((_param_dock_cam_pitch_variable.get() != 0) &&
+      ((_last_camera_pitch_publish_us == 0) ||
+       (now_us - _last_camera_pitch_publish_us >= CAMERA_SERVO_PUBLISH_INTERVAL_US))) {
+    publish_camera_pitch_servo(now_us);
+  }
+
   push_delay_history(now_us);
 
   if (_dock_mode_active && _stage == Stage::PASS_PREDICTED) {
     publish_predicted_pass(now_us);
+    if (_dock_mode_active && _stage == Stage::PASS_PREDICTED && _setpoint_valid) {
+      maybe_request_exit_mode(now_us);
+    }
     return;
   }
 
@@ -537,6 +543,9 @@ void DockGuidance::invalidate_setpoint(hrt_abstime timestamp,
 
   if (was_active) {
     _mode_fault_latched = true;
+    _fault_hold_pending = _param_dock_exit_mode.get() == 1;
+    _exit_stable_since_us = 0;
+    _last_exit_request_us = 0;
   }
 
   dock_guidance_prediction_s prediction{};
@@ -783,6 +792,15 @@ void DockGuidance::update_mode_state() {
 
   const bool active =
       (_mode_id >= 0) && (status.nav_state == static_cast<uint8_t>(_mode_id));
+  _camera_servo_armed = status.arming_state == vehicle_status_s::ARMING_STATE_ARMED;
+
+  if ((_param_dock_cam_pitch_variable.get() != 0) && !_camera_servo_armed) {
+    // 未解锁时舵机没有输出，不能把这段时间的图像误差积分成已执行的相机角度。
+    _camera_mount_pitch_deg = math::constrain(_param_dock_cam_pitch.get(),
+        math::min(_param_dock_cam_pitch_min.get(), _param_dock_cam_pitch_max.get()),
+        math::max(_param_dock_cam_pitch_min.get(), _param_dock_cam_pitch_max.get()));
+  }
+
   vehicle_land_detected_s land{};
   const hrt_abstime now = hrt_absolute_time();
   _airborne = _land_sub.copy(&land) && dock_motion::airborne_state(
@@ -799,6 +817,9 @@ void DockGuidance::update_mode_state() {
 
   if (active && !_dock_mode_active) {
     _dock_mode_active = true;
+    _fault_hold_pending = false;
+    _exit_stable_since_us = 0;
+    _last_exit_request_us = 0;
     _dock_activation_time = now;
     _prediction_ready = _terminal_ready = _capture_terminal_plan = false;
     _prediction_candidate_since = _capture_terminal_candidate_since = _terminal_plan_deadline = 0;
@@ -879,15 +900,89 @@ void DockGuidance::update_mode_state() {
   _dock_mode_active = active;
 }
 
+void DockGuidance::maybe_request_exit_mode(hrt_abstime now) {
+  const bool post_pass = _dock_mode_active && _stage == Stage::PASS_PREDICTED && _setpoint_valid;
+  const bool fault_hold = _fault_hold_pending && _param_dock_exit_mode.get() == 1;
+  if (!post_pass && !fault_hold) {
+    _exit_stable_since_us = 0;
+    return;
+  }
+
+  vehicle_status_s status{};
+  if (!_vehicle_status_sub.copy(&status) || status.timestamp == 0 || now < status.timestamp ||
+      now - status.timestamp > 500_ms) {
+    _exit_stable_since_us = 0;
+    return;
+  }
+
+  if (fault_hold) {
+    // Only follow the automatic Dock fault handoff. A pilot mode change cancels this request.
+    if (status.nav_state_user_intention != static_cast<uint8_t>(_mode_id) ||
+        (status.nav_state != vehicle_status_s::NAVIGATION_STATE_AUTO_RTL &&
+         status.nav_state != static_cast<uint8_t>(_mode_id))) {
+      _fault_hold_pending = false;
+      _exit_stable_since_us = 0;
+      return;
+    }
+    if (status.nav_state != vehicle_status_s::NAVIGATION_STATE_AUTO_RTL || !status.failsafe) {
+      _exit_stable_since_us = 0;
+      return;
+    }
+  }
+
+  vehicle_local_position_s local{};
+  if (!_local_pos_sub.copy(&local) || !local.xy_valid || !local.z_valid ||
+      !local.v_xy_valid || !local.v_z_valid || local.timestamp == 0 ||
+      now < local.timestamp || now - local.timestamp > 100_ms ||
+      !Vector3f(local.vx, local.vy, local.vz).isAllFinite() ||
+      Vector3f(local.vx, local.vy, local.vz).norm() >= 0.5f) {
+    _exit_stable_since_us = 0;
+    return;
+  }
+
+  if (_exit_stable_since_us == 0) {
+    _exit_stable_since_us = now;
+    return;
+  }
+  if (now - _exit_stable_since_us < 500_ms ||
+      (_last_exit_request_us != 0 && now - _last_exit_request_us < 1_s)) {
+    return;
+  }
+
+  const uint8_t destination = _param_dock_exit_mode.get() == 1
+      ? vehicle_status_s::NAVIGATION_STATE_AUTO_LOITER
+      : vehicle_status_s::NAVIGATION_STATE_AUTO_RTL;
+  vehicle_command_s command{};
+  command.timestamp = now;
+  command.command = vehicle_command_s::VEHICLE_CMD_SET_NAV_STATE;
+  command.param1 = static_cast<float>(destination);
+  command.target_system = status.system_id;
+  command.target_component = status.component_id;
+  command.source_system = status.system_id;
+  command.source_component = status.component_id;
+  command.from_external = false;
+  _vehicle_command_pub.publish(command);
+  _last_exit_request_us = now;
+  PX4_INFO("dock braking complete; request %s", destination == vehicle_status_s::NAVIGATION_STATE_AUTO_LOITER
+           ? "Hold" : "RTL");
+}
+
 void DockGuidance::publish_thrust_request(hrt_abstime timestamp) {
   // 发布固定总油门标量的请求；mc_rate_control 在最终推力输出前应用。
-  // 全部有效 Dock 阶段共用，不按速度达标或阶段切换释放。
+  // 通过后的制动改由位置控制器联合生成推力和姿态；末级仍限制总油门变化率。
   dock_guidance_thrust_s request{};
   request.timestamp = timestamp;
   request.activation_timestamp = _dock_activation_time;
   request.source_id = _mode_id >= 0 ? static_cast<uint8_t>(_mode_id) : 0;
   request.thrust = _param_dock_thrust.get();
   request.slew_rate = _param_dock_thrust_rate.get();
+  request.braking = _stage == Stage::PASS_PREDICTED && _param_dock_brake_enable.get();
+  if (request.braking) {
+    // 独立的制动下限；追踪阶段的高油门只作为末级斜坡起点，避免收角时仍强制持续爬升。
+    request.thrust = _param_dock_brake_thrust.get();
+    request.brake_rate = math::radians(_param_dock_brake_rate.get());
+    request.brake_speed = _param_dock_brake_speed.get();
+  }
   request.valid = _dock_mode_active && _airborne && _setpoint_valid &&
                   !_vision_degraded && !_mode_fault_latched;
   _thrust_pub.publish(request);
@@ -1108,7 +1203,7 @@ void DockGuidance::publish_guidance_status(hrt_abstime timestamp, bool valid,
 void DockGuidance::update_camera_pitch_servo(float camera_pitch_error_deg,
                                              float dt_s,
                                              hrt_abstime timestamp_sample) {
-  if (_param_dock_cam_pitch_variable.get() == 0) {
+  if ((_param_dock_cam_pitch_variable.get() == 0) || !_camera_servo_armed) {
     return;
   }
 
@@ -1209,6 +1304,7 @@ void DockGuidance::set_stage(Stage stage) {
     break;
 
   case Stage::PASS_PREDICTED:
+    _recovery_heading.reset();
     PX4_INFO("dock predicted pass; braking to hold (not contact confirmation)");
     break;
   case Stage::STARTUP_CLIMB:
@@ -2027,11 +2123,9 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
     if (_relative_position_valid) {
       const float stop_distance =
           math::constrain(_param_dock_stop_dist.get(), 0.0f, 100.0f);
-      const float remaining_distance =
-          math::max(_relative_distance_m - stop_distance, 0.0f);
-      const float braking_speed =
-          sqrtf(2.0f * deceleration * remaining_distance);
-      desired_speed = math::min(desired_speed, braking_speed);
+      // DOCK_TERM_EN=1 从正常接近阶段就不使用目标前停距，避免先刹车再进入冲刺。
+      desired_speed = dock_motion::distance_limited_approach_speed(terminal_enabled,
+          desired_speed, _relative_distance_m, stop_distance, deceleration);
     }
     const float speed_delta =
         math::constrain(desired_speed - _commanded_speed_ms,

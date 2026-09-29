@@ -35,6 +35,7 @@
 
 #include "DockThrottleSlew.hpp"
 #include "../mc_pos_control/DockThrustControl.hpp"
+#include "../mc_pos_control/DockFaultTransfer.hpp"
 #include <lib/rate_control/rate_control.hpp>
 #include <lib/mathlib/math/filter/AlphaFilter.hpp>
 #include <lib/matrix/matrix/math.hpp>
@@ -122,6 +123,8 @@ private:
 	vehicle_local_position_s _local_pos{};
 	DockThrustControl _dock_thrust_control;
 	DockThrottleSlew _dock_throttle_slew;
+	DockFaultTransfer _dock_fault_transfer;
+	bool _dock_fault_braking_complete{false};
 
 	bool _landed{true};
 	bool _ground_contact{true};
@@ -146,6 +149,11 @@ private:
 	DEFINE_PARAMETERS(
 		(ParamFloat<px4::params::MPC_THR_MIN>) _param_mpc_thr_min,
 		(ParamFloat<px4::params::MPC_THR_MAX>) _param_mpc_thr_max,
+		(ParamBool<px4::params::DOCK_BRK_EN>) _param_dock_brake_enable,
+		(ParamFloat<px4::params::DOCK_BRK_TMIN>) _param_dock_brake_min_throttle,
+		(ParamFloat<px4::params::DOCK_BRK_TVEL>) _param_dock_brake_min_speed,
+		(ParamFloat<px4::params::DOCK_REC_YAW_V>) _param_dock_recovery_yaw_speed,
+		(ParamFloat<px4::params::DOCK_THR_RATE>) _param_dock_thrust_rate,
 		(ParamFloat<px4::params::MC_ROLLRATE_P>) _param_mc_rollrate_p,
 		(ParamFloat<px4::params::MC_ROLLRATE_I>) _param_mc_rollrate_i,
 		(ParamFloat<px4::params::MC_RR_INT_LIM>) _param_mc_rr_int_lim,

@@ -111,6 +111,9 @@ public:
 	/** Hold velocity integration while an external collective throttle is imposed downstream. */
 	void setVelocityIntegralHold(bool hold) { _hold_velocity_integral = hold; }
 
+	/** Post-pass braking: retain thrust, tilt against motion, and relax height control at speed. */
+	void setDockBraking(bool enabled, float thrust = 0.f, float rate = 0.f, float speed = 0.f);
+
 	/**
 	 * Set margin that is kept for horizontal control when prioritizing vertical thrust
 	 * @param margin of normalized thrust that is kept for horizontal control e.g. 0.3
@@ -203,6 +206,7 @@ private:
 	void _positionControl(); ///< Position proportional control
 	void _velocityControl(const float dt); ///< Velocity PID control
 	void _accelerationControl(); ///< Acceleration setpoint processing
+	bool _dockBrakeControl(float dt); ///< Returns true while normal velocity integration must be held
 
 	// Gains
 	matrix::Vector3f _gain_pos_p; ///< Position control proportional gain
@@ -221,6 +225,11 @@ private:
 
 	float _hover_thrust{}; ///< Thrust [HOVER_THRUST_MIN, HOVER_THRUST_MAX] with which the vehicle hovers not accelerating down or up with level orientation
 	bool _hold_velocity_integral{false}; ///< Prevent windup while Dock overrides collective throttle downstream
+	bool _dock_braking{false};
+	float _dock_brake_thrust{0.f};
+	float _dock_brake_rate{0.f};
+	float _dock_brake_speed{0.f};
+	matrix::Vector3f _dock_brake_body_z{0.f, 0.f, 1.f};
 	bool _decouple_horizontal_and_vertical_acceleration{true}; ///< Ignore vertical acceleration setpoint to remove its effect on the tilt setpoint
 
 	// States

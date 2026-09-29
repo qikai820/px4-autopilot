@@ -414,6 +414,7 @@ void MulticopterPositionControl::Run()
 
 		_vehicle_land_detected_sub.update(&_vehicle_land_detected);
 		_dock_thrust_sub.update(&_dock_thrust);
+		_vehicle_status_sub.update(&_vehicle_status);
 
 		if (_param_mpc_use_hte.get()) {
 			hover_thrust_estimate_s hte;
@@ -426,6 +427,19 @@ void MulticopterPositionControl::Run()
 		}
 
 		PositionControlStates states{set_vehicle_states(vehicle_local_position, dt)};
+		const hrt_abstime control_now = hrt_absolute_time();
+		if (_dock_fault_transfer.update(control_now, _vehicle_control_mode, _vehicle_status, _dock_thrust,
+						   !_vehicle_land_detected.landed && !_vehicle_land_detected.ground_contact)) {
+			_dock_failsafe_yaw.latch(states.yaw, vehicle_local_position.heading_reset_counter);
+			_dock_rtl_velocity_ramp.reset();
+			PX4_WARN("dock fault RTL: brake, then align yaw before return at %.1f m/s",
+					 (double)_param_dock_recovery_yaw_speed.get());
+		}
+		if (_dock_rtl_velocity_ramp.active() && (!_vehicle_control_mode.flag_armed
+		    || _vehicle_control_mode.source_id != 0
+		    || _vehicle_status.nav_state != vehicle_status_s::NAVIGATION_STATE_AUTO_RTL)) {
+			_dock_rtl_velocity_ramp.reset();
+		}
 
 		// If a goto setpoint is available this publishes a trajectory setpoint to go there
 		// If trajectory_setpoint is published elsewhere, do not use the goto setpoint
@@ -545,23 +559,77 @@ void MulticopterPositionControl::Run()
 				math::min(speed_up, _param_mpc_z_vel_max_up.get()), // takeoff ramp starts with negative velocity limit
 				math::max(speed_down, 0.f));
 
-			_control.setInputSetpoint(_setpoint);
+			trajectory_setpoint_s control_setpoint = _setpoint;
+			const bool valid_velocity = vehicle_local_position.v_xy_valid && vehicle_local_position.v_z_valid
+						&& vehicle_local_position.timestamp > 0 && control_now >= vehicle_local_position.timestamp
+						&& control_now - vehicle_local_position.timestamp <= 100_ms;
+			const float speed = valid_velocity ? Vector3f(vehicle_local_position.vx, vehicle_local_position.vy,
+									      vehicle_local_position.vz).norm() : NAN;
+			const bool dock_fault_to_hold = _param_dock_exit_mode.get() == 1
+					&& _dock_fault_transfer.active() && PX4_ISFINITE(speed)
+					&& vehicle_local_position.xy_valid && vehicle_local_position.z_valid
+					&& PX4_ISFINITE(states.yaw);
+			if (_param_dock_exit_mode.get() == 1 && _dock_fault_transfer.active() && !dock_fault_to_hold) {
+				// Without a fresh position, velocity and heading, leave the native RTL failsafe in charge.
+				_dock_fault_transfer.cancel();
+			}
+			const auto yaw_guard = _dock_failsafe_yaw.update(_dock_fault_transfer.active(),
+						speed, states.yaw, _setpoint.yaw,
+						dock_fault_to_hold ? .1f : math::constrain(_param_dock_recovery_yaw_speed.get(), .1f, 20.f),
+						math::radians(math::constrain(_param_mpc_yawrauto_max.get(), 1.f, 90.f)), dt,
+						vehicle_local_position.heading_reset_counter, vehicle_local_position.delta_heading);
+			if (yaw_guard.release_to_rtl && !dock_fault_to_hold) {
+				_dock_fault_transfer.cancel();
+				_dock_rtl_velocity_ramp.start();
+				if (yaw_guard.aligned) {
+					PX4_INFO("dock fault RTL: yaw aligned; resume return with velocity ramp");
+				} else {
+					PX4_WARN("dock fault RTL: yaw unavailable or alignment timed out; return to native RTL");
+				}
+			}
+			if (yaw_guard.active || dock_fault_to_hold) {
+				control_setpoint.yaw = dock_fault_to_hold && speed < .5f ? states.yaw
+						: (yaw_guard.active ? yaw_guard.yaw : states.yaw);
+				control_setpoint.yawspeed = 0.f;
+			}
+			if (yaw_guard.hold_translation || dock_fault_to_hold) {
+				// Complete braking and measured yaw alignment before RTL can accelerate away.
+				for (int axis = 0; axis < 3; ++axis) {
+					control_setpoint.position[axis] = NAN;
+					control_setpoint.velocity[axis] = 0.f;
+					control_setpoint.acceleration[axis] = NAN;
+					control_setpoint.jerk[axis] = NAN;
+				}
+			} else if (_dock_rtl_velocity_ramp.active()) {
+				const Vector3f target_velocity(control_setpoint.velocity);
+				const Vector3f ramped_velocity = _dock_rtl_velocity_ramp.update(target_velocity,
+					math::constrain(_param_mpc_acc_hor.get(), .1f, 20.f), dt);
+				if (_dock_rtl_velocity_ramp.active()) {
+					for (int axis = 0; axis < 3; ++axis) {
+						control_setpoint.position[axis] = NAN;
+						control_setpoint.velocity[axis] = ramped_velocity(axis);
+						control_setpoint.acceleration[axis] = NAN;
+						control_setpoint.jerk[axis] = NAN;
+					}
+				}
+			}
+			_control.setInputSetpoint(control_setpoint);
 
 			// update states
-			if (!PX4_ISFINITE(_setpoint.position[2])
-			    && PX4_ISFINITE(_setpoint.velocity[2]) && (fabsf(_setpoint.velocity[2]) > FLT_EPSILON)
+			if (!PX4_ISFINITE(control_setpoint.position[2])
+			    && PX4_ISFINITE(control_setpoint.velocity[2]) && (fabsf(control_setpoint.velocity[2]) > FLT_EPSILON)
 			    && PX4_ISFINITE(vehicle_local_position.z_deriv) && vehicle_local_position.z_valid && vehicle_local_position.v_z_valid) {
 				// A change in velocity is demanded and the altitude is not controlled.
 				// Set velocity to the derivative of position
 				// because it has less bias but blend it in across the landing speed range
 				//  <  MPC_LAND_SPEED: ramp up using altitude derivative without a step
 				//  >= MPC_LAND_SPEED: use altitude derivative
-				float weighting = fminf(fabsf(_setpoint.velocity[2]) / _param_mpc_land_speed.get(), 1.f);
+				float weighting = fminf(fabsf(control_setpoint.velocity[2]) / _param_mpc_land_speed.get(), 1.f);
 				states.velocity(2) = vehicle_local_position.z_deriv * weighting + vehicle_local_position.vz * (1.f - weighting);
 			}
 
-			if ((!PX4_ISFINITE(_setpoint.velocity[0]) || !PX4_ISFINITE(_setpoint.velocity[1]))
-			    && (!PX4_ISFINITE(_setpoint.position[0]) || !PX4_ISFINITE(_setpoint.position[1]))) {
+			if ((!PX4_ISFINITE(control_setpoint.velocity[0]) || !PX4_ISFINITE(control_setpoint.velocity[1]))
+			    && (!PX4_ISFINITE(control_setpoint.position[0]) || !PX4_ISFINITE(control_setpoint.position[1]))) {
 				// Horizontal velocity is not controlled, reset the integrators to avoid
 				// over-corrections when starting again.
 				_control.resetIntegralXY();
@@ -580,18 +648,25 @@ void MulticopterPositionControl::Run()
 						    vehicle_local_position.vz).norm() : NAN;
 			const auto thrust_request = _dock_thrust_control.update(_dock_thrust, now,
 					_vehicle_control_mode.source_id, thrust_override_allowed, measured_speed);
-			_control.setVelocityIntegralHold(thrust_request.slew_rate > 0.f);
+			_control.setVelocityIntegralHold(thrust_request.slew_rate > 0.f && !thrust_request.braking);
+			const bool fault_brake = (yaw_guard.braking || (dock_fault_to_hold && speed >= .5f))
+					&& _param_dock_brake_enable.get();
+			_control.setDockBraking(fault_brake || thrust_request.braking,
+					       fault_brake ? _param_dock_brake_thrust.get() : thrust_request.thrust,
+					       fault_brake ? math::radians(_param_dock_brake_rate.get()) : thrust_request.brake_rate,
+					       fault_brake ? _param_dock_brake_speed.get() : thrust_request.brake_speed);
 
 			// Run position control
 			if (_control.update(dt)) {
 
 				// Valid control update - store for fallback
-				_last_valid_setpoint = _setpoint;
+				_last_valid_setpoint = control_setpoint;
 
 			} else {
 
 				// Fallback/failsafe must be able to change thrust immediately.
 				_control.setVelocityIntegralHold(false);
+				_control.setDockBraking(false);
 
 				// Initial update failed - Try fallback if within timeout
 				if (now < _last_valid_setpoint.timestamp + 200_ms) {
@@ -628,6 +703,7 @@ void MulticopterPositionControl::Run()
 
 		} else {
 			// an update is necessary here because otherwise the takeoff state doesn't get skipped with non-altitude-controlled modes
+			_control.setDockBraking(false);
 			_takeoff.updateTakeoffState(_vehicle_control_mode.flag_armed, _vehicle_land_detected.landed, false, 10.f, true,
 						    vehicle_local_position.timestamp_sample);
 			_control.resetIntegral();

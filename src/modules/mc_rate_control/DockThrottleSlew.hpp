@@ -12,8 +12,18 @@ class DockThrottleSlew
 {
 public:
 	void reset() { _last = NAN; }
+	static float brakingFloor(bool braking, float speed, float release_speed, float minimum)
+	{
+		if (!braking || !std::isfinite(speed) || !std::isfinite(release_speed)
+		    || release_speed <= 0.f || speed < release_speed || !std::isfinite(minimum)) {
+			return 0.f;
+		}
 
-	float update(float automatic, float requested, float rate, float dt, float min_throttle, float max_throttle)
+		return fmaxf(0.f, fminf(minimum, 1.f));
+	}
+
+	float update(float automatic, float requested, float rate, float dt, float min_throttle, float max_throttle,
+		     float active_floor = 0.f)
 	{
 		if (!std::isfinite(automatic)) {
 			_last = NAN;
@@ -25,8 +35,9 @@ public:
 			return automatic;
 		}
 
-		const float lower = fmaxf(0.f, fminf(min_throttle, 1.f));
-		const float upper = fmaxf(lower, fminf(max_throttle, 1.f));
+		const float upper = fmaxf(0.f, fminf(max_throttle, 1.f));
+		const float floor = std::isfinite(active_floor) ? active_floor : 0.f;
+		const float lower = fminf(upper, fmaxf(0.f, fmaxf(min_throttle, floor)));
 		const float target = fmaxf(lower, fminf(requested, upper));
 		const float previous = std::isfinite(_last) ? _last : automatic;
 		const float step = rate * fmaxf(dt, 0.f);

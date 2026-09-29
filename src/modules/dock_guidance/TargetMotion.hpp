@@ -503,6 +503,14 @@ struct Limits {
 inline float approach_limit(bool terminal_enabled, float total_limit, float relative_limit) {
   return terminal_enabled ? max(0.f, total_limit) : clamp(relative_limit, 0.f, 60.f);
 }
+// 高速通过时不套目标前停距包络；静态/动态路径共用，避免在末段提交前提前降速。
+// desired_speed 已由上游速度预算和视场保护约束，本函数不取消这些约束。
+inline float distance_limited_approach_speed(bool terminal_enabled, float desired_speed,
+    float distance, float stop_distance, float deceleration) {
+  if (terminal_enabled) { return desired_speed; }
+  const float remaining = max(0.f, distance - stop_distance);
+  return min(desired_speed, sqrtf(2.f * deceleration * remaining));
+}
 inline bool feasible(const Vector3f &v, const Limits &l) {
   return v.isAllFinite() && v.norm() <= l.total + 1e-4f && hypotf(v(0), v(1)) <= l.xy + 1e-4f &&
          -v(2) <= l.up + 1e-4f && v(2) <= l.down + 1e-4f;

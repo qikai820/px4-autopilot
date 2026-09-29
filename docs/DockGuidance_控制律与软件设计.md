@@ -254,7 +254,9 @@ s_{target}=\max\left(
 通过 `DOCK_TERM_EN` 控制两种行为：
 
 - `DOCK_TERM_EN=0`：保留当前 `TERMINAL_BRAKE`、FOV 恢复和视觉失效制动逻辑。
-- `DOCK_TERM_EN=1`：满足终端进入条件后绕过 `TERMINAL_BRAKE`，进入 `TERMINAL_DASH`；终端内不使用 `DOCK_STOP_DIST` 和 FOV 速度缩放。
+- `DOCK_TERM_EN=1`：静态与动态正常接近从一开始就不使用 `DOCK_STOP_DIST` 距离制动，
+  满足终端条件后进入 `TERMINAL_DASH`；终端内也不使用 FOV 速度缩放。
+  以现有 `PASS_PREDICTED` 判定预测通过后，才开始正常恢复制动。
 
 当前实现已通过模块编译；仍需用新 ULog 验证实际穿越精度、末段速度保持和超时边界。
 

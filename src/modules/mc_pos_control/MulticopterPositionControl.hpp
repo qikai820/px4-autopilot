@@ -41,6 +41,9 @@
 #include "Takeoff/Takeoff.hpp"
 #include "GotoControl/GotoControl.hpp"
 #include "DockThrustControl.hpp"
+#include "DockFailsafeYaw.hpp"
+#include "DockRtlVelocityRamp.hpp"
+#include "DockFaultTransfer.hpp"
 
 #include <drivers/drv_hrt.h>
 #include <lib/mathlib/math/filter/AlphaFilter.hpp>
@@ -66,6 +69,7 @@
 #include <uORB/topics/vehicle_constraints.h>
 #include <uORB/topics/vehicle_control_mode.h>
 #include <uORB/topics/vehicle_land_detected.h>
+#include <uORB/topics/vehicle_status.h>
 #include <uORB/topics/vehicle_local_position.h>
 #include <uORB/topics/vehicle_local_position_setpoint.h>
 
@@ -106,6 +110,7 @@ private:
 
 	uORB::Subscription _hover_thrust_estimate_sub{ORB_ID(hover_thrust_estimate)};
 	uORB::Subscription _dock_thrust_sub{ORB_ID(dock_guidance_thrust)};
+	uORB::Subscription _vehicle_status_sub{ORB_ID(vehicle_status)};
 	uORB::Subscription _trajectory_setpoint_sub{ORB_ID(trajectory_setpoint)};
 	uORB::Subscription _vehicle_constraints_sub{ORB_ID(vehicle_constraints)};
 	uORB::Subscription _vehicle_control_mode_sub{ORB_ID(vehicle_control_mode)};
@@ -119,6 +124,10 @@ private:
 	vehicle_control_mode_s _vehicle_control_mode{};
 	dock_guidance_thrust_s _dock_thrust{};
 	DockThrustControl _dock_thrust_control;
+	vehicle_status_s _vehicle_status{};
+	DockFailsafeYaw _dock_failsafe_yaw;
+	DockFaultTransfer _dock_fault_transfer;
+	DockRtlVelocityRamp _dock_rtl_velocity_ramp;
 
 	vehicle_constraints_s _vehicle_constraints {
 		.timestamp = 0,
@@ -154,6 +163,12 @@ private:
 		(ParamFloat<px4::params::MPC_THR_HOVER>)    _param_mpc_thr_hover,
 		(ParamBool<px4::params::MPC_USE_HTE>)       _param_mpc_use_hte,
 		(ParamBool<px4::params::MPC_ACC_DECOUPLE>)  _param_mpc_acc_decouple,
+		(ParamFloat<px4::params::DOCK_REC_YAW_V>)   _param_dock_recovery_yaw_speed,
+		(ParamInt<px4::params::DOCK_EXIT_MODE>)    _param_dock_exit_mode,
+		(ParamBool<px4::params::DOCK_BRK_EN>)       _param_dock_brake_enable,
+		(ParamFloat<px4::params::DOCK_BRK_THR>)    _param_dock_brake_thrust,
+		(ParamFloat<px4::params::DOCK_BRK_RATE>)   _param_dock_brake_rate,
+		(ParamFloat<px4::params::DOCK_BRK_VEL>)    _param_dock_brake_speed,
 
 		(ParamFloat<px4::params::MPC_VEL_LP>)       _param_mpc_vel_lp,
 		(ParamFloat<px4::params::MPC_VEL_NF_FRQ>)   _param_mpc_vel_nf_frq,

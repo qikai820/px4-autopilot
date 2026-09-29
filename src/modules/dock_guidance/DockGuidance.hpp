@@ -52,6 +52,7 @@
 #include <uORB/topics/vehicle_angular_velocity.h>
 #include <uORB/topics/vehicle_attitude.h>
 #include <uORB/topics/vehicle_control_mode.h>
+#include <uORB/topics/vehicle_command.h>
 #include <uORB/topics/vehicle_local_position.h>
 #include <uORB/topics/vehicle_status.h>
 #include <uORB/topics/vehicle_land_detected.h>
@@ -63,6 +64,7 @@
 #include "TargetMotion.hpp"
 #include "CameraHistory.hpp"
 #include "PredictiveCorrection.hpp"
+#include "RecoveryHeading.hpp"
 
 using namespace time_literals;
 
@@ -120,6 +122,7 @@ private:
   void unregister_dock_mode();
   void reply_to_arming_check(const arming_check_request_s &request);
   void update_mode_state();
+  void maybe_request_exit_mode(hrt_abstime now);
   // 向位置控制器发布 NED 速度和航向；安全输出为零速度并保留当前航向。
   // 失效状态另通过 dock_guidance_setpoint 告知下游。
   void publish_velocity_setpoint(hrt_abstime timestamp,
@@ -219,6 +222,7 @@ private:
       ORB_ID(unregister_ext_component)};
   uORB::Publication<vehicle_control_mode_s> _config_control_setpoints_pub{
       ORB_ID(config_control_setpoints)};
+  uORB::Publication<vehicle_command_s> _vehicle_command_pub{ORB_ID(vehicle_command)};
   uORB::Publication<arming_check_reply_s> _arming_check_reply_pub{
       ORB_ID(arming_check_reply)};
 
@@ -255,6 +259,9 @@ private:
   hrt_abstime _dock_activation_time{0};
   bool _vision_degraded{false};
   bool _mode_fault_latched{false};
+  bool _fault_hold_pending{false};
+  hrt_abstime _exit_stable_since_us{0};
+  hrt_abstime _last_exit_request_us{0};
   bool _unregistration_sent{false};
   int8_t _arming_check_id{-1};
   int8_t _mode_id{-1};
@@ -286,6 +293,7 @@ private:
   matrix::Vector3f _velocity_setpoint_ned{0.0f, 0.0f, 0.0f};
   matrix::Vector3f _tracking_velocity_ned{0.0f, 0.0f, 0.0f};
   float _yaw_setpoint_rad{NAN};
+  dock_motion::RecoveryHeading _recovery_heading;
   float _commanded_speed_ms{0.0f};
   float _fov_ratio{0.0f};
   float _fov_yaw_ratio{0.0f};
@@ -294,6 +302,7 @@ private:
   float _bbox_edge_ratio{0.0f};
   float _camera_mount_pitch_deg{0.0f};
   bool _camera_pitch_initialized{false};
+  bool _camera_servo_armed{false};
   hrt_abstime _last_camera_pitch_publish_us{0};
   dock_motion::CameraHistory<1024> _camera_history;
   hrt_abstime _observation_exposure_us{0};
@@ -416,6 +425,12 @@ private:
       (ParamFloat<px4::params::DOCK_ACC_MAX>)_param_dock_acc_max,
       (ParamFloat<px4::params::DOCK_THR>)_param_dock_thrust,
       (ParamFloat<px4::params::DOCK_THR_RATE>)_param_dock_thrust_rate,
+      (ParamBool<px4::params::DOCK_BRK_EN>)_param_dock_brake_enable,
+      (ParamFloat<px4::params::DOCK_BRK_THR>)_param_dock_brake_thrust,
+      (ParamFloat<px4::params::DOCK_BRK_RATE>)_param_dock_brake_rate,
+      (ParamFloat<px4::params::DOCK_BRK_VEL>)_param_dock_brake_speed,
+      (ParamFloat<px4::params::DOCK_REC_YAW_V>)_param_dock_recovery_yaw_speed,
+      (ParamInt<px4::params::DOCK_EXIT_MODE>)_param_dock_exit_mode,
       (ParamFloat<px4::params::DOCK_DEC_MAX>)_param_dock_dec_max,
       (ParamFloat<px4::params::DOCK_STOP_DIST>)_param_dock_stop_dist,
       (ParamFloat<px4::params::DOCK_ALIGN_T>)_param_dock_align_t,
