@@ -28,7 +28,7 @@ using namespace time_literals;
 class UorbUdpBridge final : public ModuleBase<UorbUdpBridge>
 {
 public:
-	static constexpr unsigned GENERIC_TOPIC_COUNT{11};
+	static constexpr unsigned GENERIC_TOPIC_COUNT{13};
 	UorbUdpBridge() = default;
 	~UorbUdpBridge() override
 	{
@@ -488,7 +488,9 @@ private:
 			"vehicle_local_position_setpoint",
 			// Camera mount pitch is the commanded body-relative angle [deg];
 			// camera pitch/yaw are target image errors, not servo feedback.
-			"dock_guidance_setpoint"
+			"dock_guidance_setpoint",
+			"vehicle_thrust_setpoint",
+			"hover_thrust_estimate"
 		};
 		static_assert(sizeof(names) / sizeof(names[0]) == GENERIC_TOPIC_COUNT,
 			      "generic topic count does not match topic registry");
@@ -567,7 +569,8 @@ private:
 	TopicLayout _topic_layout[GENERIC_TOPIC_COUNT]{};
 	const hrt_abstime _topic_interval_us[GENERIC_TOPIC_COUNT] {
 		20_ms, 20_ms, 20_ms, 20_ms, 100_ms, 500_ms,
-		20_ms, 20_ms, 20_ms, 20_ms, 20_ms
+		20_ms, 20_ms, 20_ms, 20_ms, 20_ms,
+		20_ms, 20_ms
 	};
 	hrt_abstime _last_topic_send[GENERIC_TOPIC_COUNT]{};
 };
