@@ -63,6 +63,7 @@ void LoggedTopics::add_default_topics()
 	// the downstream attitude/thrust output and vehicle motion.
 	add_topic("dock_guidance_setpoint", 20);
 	add_topic("dock_guidance_prediction", 20);
+	add_topic("dock_guidance_relative", 20);
 	add_topic("dock_guidance_thrust", 20);
 	add_topic_multi("dronecan_node_status", 250);
 	add_optional_topic("external_ins_attitude");

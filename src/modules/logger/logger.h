@@ -237,6 +237,9 @@ private:
 	void write_header(LogType type);
 
 	void write_formats(LogType type);
+	// Kept off the logger task stack; expanded fields, topic name and reader
+	// leftovers can exceed 1600 bytes even when the tokenized format fits.
+	ulog_message_format_s _format_buffer{};
 
 	/**
 	 * write performance counters

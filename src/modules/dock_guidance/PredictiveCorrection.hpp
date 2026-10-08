@@ -74,11 +74,17 @@ inline ClosestApproach predict_closest_approach(const Vector3f &relative,
       minimum = i;
     }
   }
-  if (minimum == 0 || minimum == samples) {
-    return result;
+  // A near encounter can fall before half of the first sampling interval.
+  // The t=0 sample then beats t=step even though separation is initially
+  // decreasing. Bracket that first interval instead of declaring no crossing.
+  if (minimum == 0 && relative * initial_relative_velocity <= 0.f) { return result; }
+  if (minimum == samples) {
+    const Vector3f end_closure = initial_relative_velocity + command_change *
+        (1.f - expf(-horizon / response_time));
+    if (miss_at(horizon) * end_closure >= 0.f) { return result; }
   }
-  float lo = horizon * (minimum - 1) / samples;
-  float hi = horizon * (minimum + 1) / samples;
+  float lo = horizon * max(0, minimum - 1) / samples;
+  float hi = horizon * min(samples, minimum + 1) / samples;
   for (int i = 0; i < 22; ++i) {
     const float left = lo + (hi - lo) / 3.f;
     const float right = hi - (hi - lo) / 3.f;

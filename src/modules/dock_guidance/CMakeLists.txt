@@ -11,6 +11,10 @@ px4_add_module(
 		dock_guidance_main.cpp
 		DockGuidance.cpp
 		DockGuidanceDynamic.cpp
+		DockGuidanceRelative.cpp
+		RelativeMotion.hpp
+		RelativeResponse.hpp
+		RelativeGuidance.hpp
 		DockGuidance.hpp
 		CameraHistory.hpp
 		PredictiveCorrection.hpp

@@ -595,7 +595,7 @@ inline VelocityPlan plan_velocity(const Vector3f &desired_velocity, const Vector
     const Vector3f &previous_accel, const Limits &limits, float dt, float accel_limit, float jerk,
     const Vector3f &ray, const Vector3f &ray_rate, const matrix::Dcmf &camera_to_ned,
     float range, float half_x, float half_y, float soft, bool height_priority, bool no_descent,
-    float accel_up = INFINITY, float accel_down = INFINITY) {
+    float accel_up = INFINITY, float accel_down = INFINITY, bool evaluate_fov = true) {
   VelocityPlan result;
   dt = clamp(dt, .002f, .1f);
   const float jerk_step = max(.1f, jerk) * dt;
@@ -606,6 +606,22 @@ inline VelocityPlan plan_velocity(const Vector3f &desired_velocity, const Vector
   const Vector3f desired = constrain_acceleration(
       (constrained(desired_velocity, limits) - previous_velocity) / .5f,
       accel_limit, accel_up, accel_down);
+  // Prediction rollout uses the same full-step governor. Future camera attitude
+  // is unknown; only the live first step certifies FOV. Fall through to the
+  // candidate search when a speed boundary makes this full step infeasible.
+  if (!evaluate_fov && !height_priority) {
+    Vector3f delta = desired - previous_accel;
+    if (delta.norm() > jerk_step) { delta *= jerk_step / delta.norm(); }
+    const Vector3f velocity = constrained(previous_velocity + (previous_accel + delta) * dt, limits);
+    const Vector3f actual = (velocity - previous_velocity) / dt;
+    if ((!no_descent || velocity(2) <= 0.f) && actual.norm() <= accel_limit + .002f &&
+        (actual - previous_accel).norm() <= jerk_step + .002f &&
+        actual(2) >= -accel_up - .002f && actual(2) <= accel_down + .002f) {
+      result.velocity = velocity;
+      result.acceleration = actual;
+      return result;
+    }
+  }
   const float vertical_step = clamp(desired(2) - previous_accel(2), -.6f * jerk_step, .6f * jerk_step);
   const float horizontal_step = sqrtf(max(0.f, jerk_step * jerk_step - vertical_step * vertical_step));
   float best_score = INFINITY;
@@ -631,8 +647,8 @@ inline VelocityPlan plan_velocity(const Vector3f &desired_velocity, const Vector
             actual(2) < -accel_up - .002f || actual(2) > accel_down + .002f) {
           continue;
         }
-        const float risk = startup_fov_cost(ray, ray_rate, camera_to_ned,
-            actual - previous_accel, range, half_x, half_y);
+        const float risk = evaluate_fov ? startup_fov_cost(ray, ray_rate, camera_to_ned,
+            actual - previous_accel, range, half_x, half_y) : 0.f;
         const float violation = max(0.f, risk - soft);
         const float score = 10000.f * violation * violation +
             (actual - desired).norm_squared() / max(1.f, accel_limit * accel_limit);
@@ -655,8 +671,8 @@ inline VelocityPlan plan_velocity(const Vector3f &desired_velocity, const Vector
     result.velocity = constrained(previous_velocity + fallback_accel * dt, limits);
     if (no_descent) { result.velocity(2) = min(result.velocity(2), 0.f); }
     result.acceleration = (result.velocity - previous_velocity) / dt;
-    result.predicted_fov = startup_fov_cost(ray, ray_rate, camera_to_ned,
-        result.acceleration - previous_accel, range, half_x, half_y);
+    result.predicted_fov = evaluate_fov ? startup_fov_cost(ray, ray_rate, camera_to_ned,
+        result.acceleration - previous_accel, range, half_x, half_y) : 0.f;
     result.limits_override = true;
   }
   return result;

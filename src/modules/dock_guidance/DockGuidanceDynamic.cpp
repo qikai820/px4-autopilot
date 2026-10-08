@@ -6,7 +6,7 @@ using matrix::Dcmf;
 using matrix::Eulerf;
 using matrix::Vector3f;
 
-bool DockGuidance::delayed_position(hrt_abstime target, Vector3f &position) const {
+bool DockGuidance::delayed_position(hrt_abstime target, Vector3f &position, Vector3f *velocity) const {
   // 在曝光时刻插值本机 NED 位置；目标运动估计必须使用与图像同一时刻的机位。
   // 历史未覆盖、定位无效或相邻采样间隔过大时拒绝插值。
   if (!target || _state_history.count() == 0) {
@@ -19,6 +19,7 @@ bool DockGuidance::delayed_position(hrt_abstime target, Vector3f &position) cons
   }
   if (target >= _delay_time_buf[newest]) {
     position = _position_delay_buf[newest];
+    if (velocity) { *velocity = _velocity_delay_buf[newest]; }
     return _position_delay_valid[newest] && target - _delay_time_buf[newest] < 20_ms;
   }
   for (int n = 1; n < _state_history.count(); ++n) {
@@ -31,6 +32,7 @@ bool DockGuidance::delayed_position(hrt_abstime target, Vector3f &position) cons
       const float weight =
           float(target - _delay_time_buf[a]) / float(_delay_time_buf[b] - _delay_time_buf[a]);
       position = _position_delay_buf[a] * (1.f - weight) + _position_delay_buf[b] * weight;
+      if (velocity) { *velocity = _velocity_delay_buf[a] * (1.f - weight) + _velocity_delay_buf[b] * weight; }
       return position.isAllFinite();
     }
   }
@@ -47,11 +49,11 @@ void DockGuidance::update_target_motion(const viztra_observation_s &obs, const V
     return;
   }
   _target_motion_valid = false;
-  Vector3f own;
+  Vector3f own, own_velocity;
   vehicle_local_position_s local{};
   const hrt_abstime now = hrt_absolute_time();
   uint64_t position_time = 0;
-  if (!delayed_position(exposure, own) || !_local_pos_sub.copy(&local) || !local.xy_valid ||
+  if (!delayed_position(exposure, own, &own_velocity) || !_local_pos_sub.copy(&local) || !local.xy_valid ||
       !local.z_valid || !local.v_xy_valid || !local.v_z_valid ||
       !dock_motion::state_sample_time(local.timestamp_sample, local.timestamp, now, 100_ms, position_time)) {
     return;
@@ -94,6 +96,11 @@ void DockGuidance::update_target_motion(const viztra_observation_s &obs, const V
                               fy, camera_los(0), _param_dock_size_error.get(), range, sigma);
   }
   if (exposure) {
+    if (metric && !_relative_terminal_active) {
+      _relative_motion.update(exposure, own, own_velocity, los * range, sigma,
+          math::max(.0005f, 2.f / math::min(fx, fy)),
+          math::constrain(_param_dock_est_accel.get(), .1f, 20.f));
+    }
     // 本机位置噪声会直接进入目标位置差分；量测方差必须纳入 EKF 位置误差，
     // 避免把本机定位抖动识别为目标运动。
     const float own_error = std::isfinite(local.eph) && std::isfinite(local.epv)
@@ -130,6 +137,7 @@ dock_motion::Limits DockGuidance::dynamic_limits() const {
 void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vector3f &previous,
                                            const Dcmf &camera_to_ned, float dt, float align, float soft, bool hard,
                                            hrt_abstime now) {
+  _relative_guidance_active = false;
   // 动态路径将目标速度跟随、图像纠偏、沿目标视线的闭合速度叠加，
   // 最后统一经过速度/加速度/加加速度和预测视场约束。
   // trusted 需要新鲜的米制目标状态；部分速度跟随可更早启用，但不能提前放行高速闭合。
@@ -660,6 +668,7 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
 }
 
 bool DockGuidance::dynamic_terminal(hrt_abstime now, bool blind) {
+  if (_relative_terminal_active) { return relative_terminal(now, blind); }
   // 动态末段每次都重验本机定位、目标估计、穿越平面和总时长。
   // blind 为真时只允许在观测年龄限制内沿最后的末段速度继续，不能凭旧目标状态无限追踪。
   if (blind) { _miss_correction = {}; }

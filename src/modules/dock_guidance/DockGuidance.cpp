@@ -137,6 +137,14 @@ void DockGuidance::Run() {
     return;
   }
 
+  if (_dock_mode_active && _relative_terminal_active) {
+    // This bounded frozen plan already includes image loss. Check the pass
+    // plane and local state every watchdog tick, independently of new images
+    // or camera history availability at the encounter.
+    relative_terminal(now_us, true);
+    return;
+  }
+
   viztra_observation_s obs;
 
   if (!_viztra_sub.update(&obs)) {
@@ -344,9 +352,12 @@ void DockGuidance::push_delay_history(hrt_abstime timestamp) {
                            && Vector3f(lpos.x,lpos.y,lpos.z).isAllFinite()
                            && Vector3f(lpos.vx,lpos.vy,lpos.vz).isAllFinite();
   if (local_valid && _position_seen && (lpos.xy_reset_counter != _xy_reset_counter
-      || lpos.z_reset_counter != _z_reset_counter)) {
+      || lpos.z_reset_counter != _z_reset_counter || (relative_guidance_enabled() &&
+      (lpos.vxy_reset_counter != _vxy_reset_counter || lpos.vz_reset_counter != _vz_reset_counter)))) {
     // EKF 原点重置会使历史位置与新坐标系不连续；清空动态目标估计和延时历史。
     _target_motion.reset();
+    _relative_motion.reset();
+    _relative_response.reset();
     _target_motion_valid = false;
     _state_history.reset();
     _estimator_reset_reason = 4;
@@ -361,8 +372,11 @@ void DockGuidance::push_delay_history(hrt_abstime timestamp) {
     _position_seen = true;
     _xy_reset_counter = lpos.xy_reset_counter;
     _z_reset_counter = lpos.z_reset_counter;
+    _vxy_reset_counter = lpos.vxy_reset_counter;
+    _vz_reset_counter = lpos.vz_reset_counter;
     _position_delay_buf[slot] = Vector3f(lpos.x,lpos.y,lpos.z)
         + Vector3f(lpos.vx,lpos.vy,lpos.vz)*((timestamp-position_time)*1e-6f);
+    _velocity_delay_buf[slot] = Vector3f(lpos.vx,lpos.vy,lpos.vz);
   }
   _position_delay_valid[slot] = local_valid;
   _delay_time_buf[slot] = timestamp;
@@ -447,6 +461,13 @@ bool DockGuidance::get_delayed_state(hrt_abstime target_us,
 }
 
 void DockGuidance::reset_tracking_state() {
+  _relative_motion.reset();
+  _relative_response.reset();
+  _relative_context = {};
+  _relative_trajectory = {};
+  _relative_plan_time = 0;
+  _relative_plan_runtime_us = 0;
+  _relative_guidance_active = _relative_terminal_active = false;
   // 清理观测、滤波、捕获和末段状态；模式注册及故障锁存由调用方单独管理。
   _miss_correction = {};
   _closest_approach = {};
@@ -582,6 +603,8 @@ void DockGuidance::invalidate_setpoint(hrt_abstime timestamp,
   _prediction_pub.publish(prediction);
 
   reset_tracking_state();
+
+  publish_relative_status(timestamp, false);
 
   // 失效时先沿用最后一个有限的航向并发布零速度。若与模式故障同时释放航向，
   // Commander 接管前可能额外产生一次机头跳变。
@@ -1157,6 +1180,7 @@ void DockGuidance::publish_guidance_status(hrt_abstime timestamp, bool valid,
   prediction.motion_update_result = static_cast<uint8_t>(_target_motion.last_update_result());
   _prediction_pub.publish(prediction);
   _miss_correction.miss.copyTo(status.prediction_miss_ned);
+  publish_relative_status(timestamp, valid && !degraded);
   _miss_correction.correction.copyTo(status.prediction_dv_ned);
   status.yaw_setpoint_deg = std::isfinite(_yaw_setpoint_rad)
                                 ? math::degrees(_yaw_setpoint_rad)
@@ -1195,6 +1219,10 @@ void DockGuidance::publish_guidance_status(hrt_abstime timestamp, bool valid,
   status.target_velocity_error = _target_motion.initialized() ? _target_motion.velocity_sigma() : NAN;
   status.target_position_error = _target_position_error;
   status.relative_closing_speed = _target_motion_valid ? (_velocity_ned-_target_velocity)*_los_e_unit : NAN;
+  if (_relative_guidance_active) {
+    status.relative_closing_speed = _relative_motion.fresh(timestamp)
+        ? -_relative_context.relative_rate * _los_e_unit : NAN;
+  }
   status.commanded_relative_speed = _dynamic_closure;
   status.available_relative_speed = _dynamic_max_closure;
   _setpoint_pub.publish(status);
@@ -1708,7 +1736,7 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
   _fov_yaw_ratio = fabsf(_los_c_deg(0)) / half_fov_x;
   _fov_pitch_ratio = fabsf(_los_c_deg(1)) / half_fov_y;
   _fov_ratio = math::max(_fov_yaw_ratio, _fov_pitch_ratio);
-  if (_param_dock_dyn_enable.get() && !_terminal_ready) {
+  if (_param_dock_dyn_enable.get() && !_terminal_ready && !relative_guidance_enabled()) {
     _fov_ratio = math::max(_fov_ratio, _bbox_edge_ratio);
   }
 
@@ -1756,7 +1784,7 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
   }
 
   Vector3f approach_direction = _los_e_unit;
-  if (_param_dock_dyn_enable.get() && _target_motion_valid) {
+  if (_param_dock_dyn_enable.get() && _target_motion_valid && !relative_guidance_enabled()) {
     approach_direction = _estimated_relative.normalized();
   }
   if (_param_dock_dyn_enable.get() && _stage == Stage::TERMINAL_DASH) {
@@ -1866,8 +1894,13 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
   }
 
   if (_param_dock_dyn_enable.get()) {
-    compute_dynamic_control(approach_direction, previous_velocity_setpoint_ned, R_ned_cam, dt_s,
-                            align_ratio, soft_ratio, hard_fov_confirmed, now);
+    if (relative_guidance_enabled() || _relative_terminal_active) {
+      compute_relative_control(approach_direction, previous_velocity_setpoint_ned, R_ned_cam, dt_s,
+                               align_ratio, soft_ratio, hard_fov_confirmed, now);
+    } else {
+      compute_dynamic_control(approach_direction, previous_velocity_setpoint_ned, R_ned_cam, dt_s,
+                              align_ratio, soft_ratio, hard_fov_confirmed, now);
+    }
     return;
   }
 
@@ -2207,6 +2240,7 @@ void DockGuidance::update_parameters() {
   const bool camera_pitch_was_variable =
       _param_dock_cam_pitch_variable.get() != 0;
   const bool dynamic_was_enabled = _param_dock_dyn_enable.get() != 0;
+  const bool relative_was_enabled = relative_guidance_enabled();
   // parameter_update 是全局通知，不一定涉及 Dock 参数；只有观测几何或控制路径
   // 真的变化才重置滤波和捕获历史，避免无关参数更新打断引导。
   const float old_observation_config[] = {
@@ -2229,7 +2263,18 @@ void DockGuidance::update_parameters() {
     observation_changed |= !(fabsf(old_observation_config[i] - observation_config[i]) <= 1e-6f);
   }
   const bool dynamic_changed = dynamic_was_enabled != (_param_dock_dyn_enable.get() != 0);
+  _relative_plan_time = 0; // changed speed/acceleration limits also require a new rollout
+  if (relative_was_enabled != relative_guidance_enabled()) {
+    _terminal_candidate_since_us = 0;
+    _relative_trajectory = {};
+  }
+  if (_relative_terminal_active && relative_was_enabled != relative_guidance_enabled()) {
+    invalidate_setpoint(hrt_absolute_time(), "relative terminal configuration changed");
+  }
   if (observation_changed || dynamic_changed) {
+    _relative_motion.reset();
+    _relative_response.reset();
+    _relative_trajectory = {};
     _miss_correction = {};
     _capture_vertical_latch.reset();
     _early_vertical_bias = 0.f;

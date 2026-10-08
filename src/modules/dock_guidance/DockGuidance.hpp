@@ -42,6 +42,7 @@
 #include <uORB/topics/arming_check_request.h>
 #include <uORB/topics/dock_guidance_setpoint.h>
 #include <uORB/topics/dock_guidance_prediction.h>
+#include <uORB/topics/dock_guidance_relative.h>
 #include <uORB/topics/dock_guidance_thrust.h>
 #include <uORB/topics/gimbal_controls.h>
 #include <uORB/topics/parameter_update.h>
@@ -54,6 +55,8 @@
 #include <uORB/topics/vehicle_control_mode.h>
 #include <uORB/topics/vehicle_command.h>
 #include <uORB/topics/vehicle_local_position.h>
+#include <uORB/topics/vehicle_thrust_setpoint.h>
+#include <uORB/topics/hover_thrust_estimate.h>
 #include <uORB/topics/vehicle_status.h>
 #include <uORB/topics/vehicle_land_detected.h>
 #include <uORB/topics/viztra_observation.h>
@@ -65,6 +68,7 @@
 #include "CameraHistory.hpp"
 #include "PredictiveCorrection.hpp"
 #include "RecoveryHeading.hpp"
+#include "RelativeGuidance.hpp"
 
 using namespace time_literals;
 
@@ -179,13 +183,20 @@ private:
                             const matrix::Vector3f &att_deg,
                             float yaw_deg, float pitch_deg, hrt_abstime exposure,
                             const matrix::Dcmf &sample_camera_to_body);
-  bool delayed_position(hrt_abstime exposure, matrix::Vector3f &position) const;
+  bool delayed_position(hrt_abstime exposure, matrix::Vector3f &position,
+                        matrix::Vector3f *velocity = nullptr) const;
   void compute_dynamic_control(const matrix::Vector3f &direction,
                                const matrix::Vector3f &previous, const matrix::Dcmf &camera_to_ned, float dt,
                                float align, float soft, bool hard, hrt_abstime now);
   bool dynamic_terminal(hrt_abstime now, bool blind);
   void publish_predicted_pass(hrt_abstime now);
   dock_motion::Limits dynamic_limits() const;
+  bool relative_guidance_enabled() const;
+  void compute_relative_control(const matrix::Vector3f &direction,
+      const matrix::Vector3f &previous, const matrix::Dcmf &camera_to_ned,
+      float dt, float align, float soft, bool hard, hrt_abstime now);
+  bool relative_terminal(hrt_abstime now, bool blind);
+  void publish_relative_status(hrt_abstime now, bool valid);
 
   float low_pass_filter(float &state, float input, float cutoff_hz, float dt);
   float derivative_filter(const float *buf) const;
@@ -196,6 +207,8 @@ private:
   uORB::Subscription _att_sub{ORB_ID(vehicle_attitude)};
   uORB::Subscription _gyro_sub{ORB_ID(vehicle_angular_velocity)};
   uORB::Subscription _local_pos_sub{ORB_ID(vehicle_local_position)};
+  uORB::Subscription _vehicle_thrust_sub{ORB_ID(vehicle_thrust_setpoint)};
+  uORB::Subscription _hover_thrust_sub{ORB_ID(hover_thrust_estimate)};
   uORB::Subscription _vehicle_status_sub{ORB_ID(vehicle_status)};
   uORB::Subscription _land_sub{ORB_ID(vehicle_land_detected)};
   uORB::Subscription _register_ext_component_reply_sub{
@@ -209,6 +222,7 @@ private:
       ORB_ID(dock_guidance_setpoint)};
   uORB::Publication<dock_guidance_prediction_s> _prediction_pub{
       ORB_ID(dock_guidance_prediction)};
+  uORB::Publication<dock_guidance_relative_s> _relative_pub{ORB_ID(dock_guidance_relative)};
   uORB::Publication<dock_guidance_thrust_s> _thrust_pub{
       ORB_ID(dock_guidance_thrust)};
   uORB::Publication<gimbal_controls_s> _gimbal_controls_pub{
@@ -274,8 +288,10 @@ private:
   matrix::Vector3f _gyro_delay_buf[DELAY_BUF_SIZE]{};
   hrt_abstime _delay_time_buf[DELAY_BUF_SIZE]{};
   matrix::Vector3f _position_delay_buf[DELAY_BUF_SIZE]{};
+  matrix::Vector3f _velocity_delay_buf[DELAY_BUF_SIZE]{};
   bool _position_delay_valid[DELAY_BUF_SIZE]{};
   uint8_t _xy_reset_counter{0}, _z_reset_counter{0};
+  uint8_t _vxy_reset_counter{0}, _vz_reset_counter{0};
   bool _position_seen{false};
   float _history_attitude_age_ms{NAN};
   dock_motion::SampleHistoryIndex<DELAY_BUF_SIZE> _state_history{WATCHDOG_INTERVAL_US};
@@ -318,6 +334,13 @@ private:
   matrix::Vector3f _terminal_velocity_ned{0.0f, 0.0f, 0.0f};
   // 动态目标状态、捕获证据与末段预测彼此独立：某一证据有效不自动放行另一阶段。
   dock_motion::TargetMotion _target_motion;
+  dock_motion::RelativeMotion _relative_motion;
+  dock_motion::RelativeResponse _relative_response;
+  dock_motion::RelativeContext _relative_context{};
+  dock_motion::RelativeTrajectory _relative_trajectory{};
+  hrt_abstime _relative_plan_time{0};
+  uint32_t _relative_plan_runtime_us{0};
+  bool _relative_guidance_active{false}, _relative_terminal_active{false};
   matrix::Vector3f _target_velocity{}, _estimated_relative{}, _terminal_direction{};
   matrix::Vector3f _dynamic_acceleration{};
   dock_motion::MissCorrection _miss_correction{};
@@ -457,6 +480,10 @@ private:
       (ParamInt<px4::params::DOCK_VIS_GRACE>)_param_dock_vis_grace,
       (ParamInt<px4::params::DOCK_REL_TOUT>)_param_dock_rel_tout,
       (ParamFloat<px4::params::MPC_XY_VEL_MAX>)_param_mpc_xy_vel_max,
+      (ParamFloat<px4::params::MPC_THR_HOVER>)_param_mpc_hover,
+      (ParamFloat<px4::params::MPC_THR_MAX>)_param_mpc_thrust_max,
+      (ParamFloat<px4::params::MPC_THR_XY_MARG>)_param_mpc_thrust_xy_margin,
+      (ParamBool<px4::params::MPC_USE_HTE>)_param_mpc_use_hte,
       (ParamFloat<px4::params::MPC_ACC_UP_MAX>)_param_mpc_acc_up,
       (ParamFloat<px4::params::MPC_ACC_DOWN_MAX>)_param_mpc_acc_down,
       (ParamFloat<px4::params::MPC_Z_VEL_MAX_UP>)_param_mpc_z_vel_max_up,

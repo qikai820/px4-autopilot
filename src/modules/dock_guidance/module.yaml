@@ -369,19 +369,21 @@ parameters:
         decimal: 1
         default: 5.0
       DOCK_DYN_EN:
-        description: {short: Enable estimated moving-target following}
+        description:
+          short: Enable metric Dock guidance
+          long: With DOCK_TERM_EN and DOCK_PRED_EN enabled, uses relative position and relative rate for static and moving target interception. Otherwise retains estimated target following.
         type: boolean
         default: false
       DOCK_PRED_EN:
         description:
           short: Enable three-dimensional predicted miss correction
-          long: Requires dynamic guidance and a trusted target estimate. Rotates the desired velocity before existing speed, acceleration, jerk and FOV constraints. Does not add terminal braking.
+          long: With dynamic pass-through enabled, plans earliest feasible three-dimensional encounter from relative motion, aircraft response and command limits. Does not require absolute target velocity convergence. Blind permission separately checks the actual published velocity and uncertainty. Other modes retain predicted miss correction.
         type: boolean
         default: true
       DOCK_PRED_TAU:
         description:
           short: Predicted velocity response time constant
-          long: Approximate combined command planner and vehicle velocity response. Must be validated from logged command and actual velocity; not camera latency.
+          long: Aircraft velocity response time constant. Relative interception explicitly simulates the command acceleration and jerk governor in addition to this response. Must be validated from logged command and actual velocity; not camera latency.
         type: float
         unit: s
         min: 0.05
@@ -389,7 +391,7 @@ parameters:
         decimal: 2
         default: 0.5
       DOCK_PRED_TMAX:
-        description: {short: Maximum predicted time to plane for miss correction}
+        description: {short: Maximum three-dimensional encounter prediction horizon}
         type: float
         unit: s
         min: 0.2
@@ -583,7 +585,7 @@ parameters:
       DOCK_START_H:
         description:
           short: Dynamic Dock startup height gain
-          long: Climb above local height at airborne Dock engagement; zero disables the climb.
+          long: Climb above local height at airborne Dock engagement; zero disables the climb. With dynamic predicted pass-through, relative guidance takes over once scale and relative rate are available and climbs towards the encounter without settling at the startup height.
         type: float
         unit: m
         min: 0

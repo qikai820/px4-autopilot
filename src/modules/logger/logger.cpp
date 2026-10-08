@@ -1688,8 +1688,7 @@ void Logger::write_formats(LogType type)
 {
 	_writer.lock();
 
-	// This is large and thus we need to be careful in terms of stack size requirements
-	ulog_message_format_s msg;
+	ulog_message_format_s &msg = _format_buffer;
 
 	// Write all subscribed formats
 	int sub_count = _num_subscriptions;
@@ -1716,6 +1715,8 @@ void Logger::write_formats(LogType type)
 
 
 	static_assert(sizeof(msg.format) > uORB::orb_tokenized_fields_max_length, "uORB message definition too long");
+	static_assert(sizeof(msg.format) >= uORB::orb_untokenized_fields_max_length + 256,
+		      "Expanded uORB fields need space for the topic name and reader leftovers");
 	uORB::MessageFormatReader format_reader(msg.format, sizeof(msg.format));
 	bool done = false;
 
