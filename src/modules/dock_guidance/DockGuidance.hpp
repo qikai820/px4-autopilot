@@ -62,6 +62,7 @@
 #include <uORB/topics/viztra_observation.h>
 
 #include <matrix/matrix/math.hpp>
+#include <mathlib/math/filter/AlphaFilter.hpp>
 
 #include <cmath>
 #include "TargetMotion.hpp"
@@ -198,7 +199,6 @@ private:
   bool relative_terminal(hrt_abstime now, bool blind);
   void publish_relative_status(hrt_abstime now, bool valid);
 
-  float low_pass_filter(float &state, float input, float cutoff_hz, float dt);
   float derivative_filter(const float *buf) const;
 
   // 视觉观测为本模块的执行触发源；其余话题在每次视觉帧到达时读取最新值。
@@ -250,10 +250,8 @@ private:
   matrix::Vector3f _gyro_c_dps{0.0f, 0.0f, 0.0f};
   matrix::Vector3f _los_c_rate_dps{0.0f, 0.0f, 0.0f};
 
-  // 低通后的 LOS 分量，以及用于窗口差分的历史数据。
-  float _los_x_filt{0.0f};
-  float _los_y_filt{0.0f};
-  float _los_z_filt{0.0f};
+  // 单位 LOS 向量的一阶低通，以及用于窗口差分的历史数据。
+  AlphaFilter<matrix::Vector3f> _los_filter;
   bool _filt_initialized{false};
 
   float _los_x_deriv_buf[DERIV_SIZE]{};

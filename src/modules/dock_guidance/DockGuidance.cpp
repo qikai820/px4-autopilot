@@ -1611,18 +1611,16 @@ void DockGuidance::process_observation(float los_yaw_deg, float los_pitch_deg,
   }
 
   if (!_filt_initialized) {
-    _los_x_filt = _los_e_unit(0);
-    _los_y_filt = _los_e_unit(1);
-    _los_z_filt = _los_e_unit(2);
+    _los_filter.reset(_los_e_unit);
     _filt_initialized = true;
 
   } else {
-    _los_x_filt = low_pass_filter(_los_x_filt, _los_e_unit(0), filt_hz, dt_s);
-    _los_y_filt = low_pass_filter(_los_y_filt, _los_e_unit(1), filt_hz, dt_s);
-    _los_z_filt = low_pass_filter(_los_z_filt, _los_e_unit(2), filt_hz, dt_s);
+    // 单参数截止频率接口配合实际 dt，保持原一阶 RC 在变帧率下的行为。
+    _los_filter.setCutoffFreq(filt_hz);
+    _los_filter.update(_los_e_unit, dt_s);
   }
 
-  Vector3f los_e_filtered(_los_x_filt, _los_y_filt, _los_z_filt);
+  Vector3f los_e_filtered = _los_filter.getState();
 
   if (!los_e_filtered.isAllFinite() || (los_e_filtered.norm() < 0.5f)) {
     invalidate_setpoint(hrt_absolute_time(), "filter failure");
@@ -1631,14 +1629,13 @@ void DockGuidance::process_observation(float los_yaw_deg, float los_pitch_deg,
 
   los_e_filtered.normalize();
   _los_e_unit = los_e_filtered;
-  _los_x_filt = _los_e_unit(0);
-  _los_y_filt = _los_e_unit(1);
-  _los_z_filt = _los_e_unit(2);
+  // 下一帧仍从归一化后的 LOS 开始滤波，避免状态模长随转弯衰减。
+  _los_filter.reset(_los_e_unit);
 
   // 带 uint64 时间戳的环形窗口，避免微秒时间存入 float 后随运行时间丢失精度。
-  _los_x_deriv_buf[_deriv_idx] = _los_x_filt;
-  _los_y_deriv_buf[_deriv_idx] = _los_y_filt;
-  _los_z_deriv_buf[_deriv_idx] = _los_z_filt;
+  _los_x_deriv_buf[_deriv_idx] = _los_e_unit(0);
+  _los_y_deriv_buf[_deriv_idx] = _los_e_unit(1);
+  _los_z_deriv_buf[_deriv_idx] = _los_e_unit(2);
   _los_deriv_time_buf[_deriv_idx] = timestamp_sample;
   _deriv_idx = (_deriv_idx + 1) % DERIV_SIZE;
   _deriv_count = math::min(_deriv_count + 1, DERIV_SIZE);
@@ -2196,15 +2193,6 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
 }
 
 // ---------- 数值计算辅助函数 ----------
-
-float DockGuidance::low_pass_filter(float &state, float input, float cutoff_hz,
-                                    float dt) {
-  // 一阶 RC 低通：截止频率越低，视觉噪声抑制越强，但跟踪响应越慢。
-  const float rc = 1.0f / (2.0f * M_PI_F * math::max(cutoff_hz, 0.01f));
-  const float alpha = dt / (rc + dt);
-  state = state + alpha * (input - state);
-  return state;
-}
 
 float DockGuidance::derivative_filter(const float *buf) const {
   if (_deriv_count < 2) {
