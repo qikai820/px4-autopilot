@@ -18,10 +18,14 @@ UDP 使用 64 字节小端 `UavInfo` 帧：`EB 90` 同步头、长度 `64`、序
 
 `DOCK_PRE_EN` 默认开启。在进入 Dock 模式时，若目标消息与本机全局定位均新鲜，先进入 `PRE_POSITION`。预引导从目标历史轨迹沿运动方向反推 `DOCK_PRE_DIST`（默认 100 m），并按目标速度短时外推；速度、加速度和 jerk 受现有 DockGuidance 限制约束。目标速度为零且没有可用历史方向时保持安全减速，不猜测轨迹后方。
 
-连续有效视觉跟踪达到 `DOCK_PRE_VIS_T`（默认 0.3 s）即交接原有 `ALIGN` 对接逻辑；到达 100 m 参考点不是交接条件。预引导中相机舵机沿用原有图像俯仰误差控制，目标 GPS 不直接驱动舵机。目标流超过 `DOCK_PRE_TOUT`（默认 300 ms）后减速；持续中断会触发既有模式故障退出策略。预引导状态可从 `dock_preposition_status` uORB 与 ULog 查看。
+`DOCK_PRE_REAR` 默认开启：连续有效视觉跟踪达到 `DOCK_PRE_VIS_T`（默认 0.3 s），且本机进入移动后方参考点附近后，才交接原有 `ALIGN` 追击对接逻辑。接近阈值为 `DOCK_PRE_DIST` 的 25%，限制在 2～25 m；默认后方距离 100 m 时阈值为 25 m。交接还要求目标位置流新鲜、后方参考点有效且起飞爬升已结束。等待交接时继续跟随移动参考点并匹配目标速度，视觉暂时无效则继续留在目标后方。关闭 `DOCK_PRE_REAR` 恢复仅按视觉稳定时间交接的旧行为。
+
+`DOCK_PRE_RADIUS` 默认 150 m，限制预引导速度轨迹的水平曲率：水平速度达到 2 m/s 后，侧向加速度不超过速度平方除以设定半径；目标更急的转弯会被放缓。设为 0 可关闭此限制。该参数约束发布的速度轨迹，不保证实测航迹半径；实测还受位置控制器、机体响应和风影响。起步与接近停止时允许重新选择运动方向，避免低速锁死。
+
+预引导中有有效图像时，相机舵机沿用图像俯仰误差控制；没有有效图像而目标位置流与机体姿态新鲜时，先用目标位置预对准相机。目标位置不代替 Viztra 有效视觉，也不能单独触发交接。目标流超过 `DOCK_PRE_TOUT`（默认 300 ms）后减速；持续中断会触发既有模式故障退出策略。预引导状态可从 `dock_preposition_status` uORB 与 ULog 查看。
 
 ULog 默认以最高 50 Hz 记录 `dock_preposition_status`，并记录收到的 `viztra_target`。前者包含目标帧序号和源时间、目标与机体数据年龄、预测时长、目标预测位置与速度、后方参考点、机体位置与速度、参考点误差、限速前请求速度、最终指令速度、期望偏航及视觉稳定时间。状态码 0～4 依次为退出、等待、引导、目标流过期、视觉交接；5 表示本机定位无效，6 表示模式故障。`target_valid` 表示目标流新鲜，`reference_valid` 表示已经算出有效后方参考点；参考点无效时距离和误差记为 NaN，不把旧参考点误认为当前有效指令。可按时间戳对齐 `trajectory_setpoint` 和 `vehicle_local_position` 检查下层跟踪结果。
 
-参数：`DOCK_PRE_DIST` 后方距离，`DOCK_PRE_ZOFF` 相对后方轨迹点的高度偏移（正值表示更高），`DOCK_PRE_VIS_T` 视觉品质持续时间，`DOCK_PRE_TOUT` 目标流超时，`DOCK_PRE_PRED_T` 最大预测时间。关闭 `DOCK_PRE_EN` 后，下次进入 Dock 模式直接使用原对接流程。
+参数：`DOCK_PRE_DIST` 后方距离，`DOCK_PRE_REAR` 是否到达目标后方再交接，`DOCK_PRE_RADIUS` 引导速度轨迹最小转弯半径，`DOCK_PRE_ZOFF` 相对后方轨迹点的高度偏移（正值表示更高），`DOCK_PRE_VIS_T` 视觉品质持续时间，`DOCK_PRE_TOUT` 目标流超时，`DOCK_PRE_PRED_T` 最大预测时间。关闭 `DOCK_PRE_EN` 后，下次进入 Dock 模式直接使用原对接流程。
 
 飞行前确认 QGC 已连接使用 `viztra` dialect 的固件、飞行器链路为 MAVLink 2、Target 开关处于 `Sending`，并核对 `viztra_target` 与 `dock_preposition_status` 的位置和时间戳。编译通过不代表飞行闭环已验证。

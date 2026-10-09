@@ -65,6 +65,21 @@ static void test_fast_visual_handoff() {
   assert(!far_lookahead_direction(target, rear, target, direction));
 }
 
+static void test_preposition_turn_radius() {
+  const Vector3f velocity(20.f, 0.f, 0.f);
+  const Vector3f acceleration(1.f, 8.f, -2.f);
+  const Vector3f limited = limit_preposition_turn_acceleration(velocity, acceleration, 150.f);
+  assert(fabsf(limited(0) - 1.f) < .001f);
+  assert(fabsf(limited(1) - 400.f / 150.f) < .001f);
+  assert(fabsf(limited(2) + 2.f) < .001f);
+  assert((limit_preposition_turn_acceleration(velocity, acceleration, 0.f) - acceleration).norm() < .001f);
+  assert((limit_preposition_turn_acceleration(Vector3f(1.f, 0.f, 0.f), acceleration, 150.f) -
+      acceleration).norm() < .001f);
+  const Vector3f right_turn = limit_preposition_turn_acceleration(velocity,
+      Vector3f(0.f, -8.f, 0.f), 150.f);
+  assert(fabsf(right_turn(1) + 400.f / 150.f) < .001f);
+}
+
 static void test_far_rear_approach() {
   RelativeContext c;
   c.limits = {50.f, 100.f, 40.f, 4.f};
@@ -245,6 +260,7 @@ static void test_frozen_and_fov() {
 int main() {
   test_observer();
   test_fast_visual_handoff();
+  test_preposition_turn_radius();
   test_far_rear_approach();
   test_frozen_and_fov();
   for (const Vector3f &velocity : {Vector3f{}, Vector3f(10.f, 0.f, 0.f), Vector3f(-10.f, 0.f, 0.f),

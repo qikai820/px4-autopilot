@@ -242,6 +242,16 @@ void DockGuidance::run_preposition(hrt_abstime now) {
     return;
   }
 
+  const auto finish_visual_handoff = [&](hrt_abstime sample, bool target_fresh) {
+    _preposition_active = false;
+    _preposition_handoff_pending = true;
+    _last_sample_us = 0;
+    _last_observation_us = sample;
+    _vision_degraded = false;
+    set_stage(Stage::ALIGN);
+    publish_preposition_status(now, 4, target_fresh);
+  };
+  hrt_abstime visual_handoff_sample = 0;
   const uint64_t observation_timeout_us = static_cast<uint64_t>(math::constrain(
       _param_dock_obs_tout.get(), int32_t{20}, int32_t{5000})) * 1000ULL;
   viztra_observation_s observation{};
@@ -284,18 +294,15 @@ void DockGuidance::run_preposition(hrt_abstime now) {
       if (sample >= _pre_visual_since &&
           sample - _pre_visual_since >= static_cast<uint64_t>(
               math::constrain(_param_dock_pre_visual_time.get(), 0.05f, 5.f) * 1e6f)) {
-        _preposition_active = false;
-        _preposition_handoff_pending = true;
-        _last_sample_us = 0;
-        _last_observation_us = sample;
-        _vision_degraded = false;
-        set_stage(Stage::ALIGN);
-        const uint64_t target_timeout_us = static_cast<uint64_t>(math::constrain(
-            _param_dock_pre_timeout.get(), int32_t{100}, int32_t{5000})) * 1000ULL;
-        const bool target_fresh = _pre_target.timestamp > 0 && now >= _pre_target.timestamp &&
-            now - _pre_target.timestamp <= target_timeout_us && _pre_path_count > 0;
-        publish_preposition_status(now, 4, target_fresh);
-        return;
+        if (!_param_dock_pre_rear.get()) {
+          const uint64_t target_timeout_us = static_cast<uint64_t>(math::constrain(
+              _param_dock_pre_timeout.get(), int32_t{100}, int32_t{5000})) * 1000ULL;
+          const bool target_fresh = _pre_target.timestamp > 0 && now >= _pre_target.timestamp &&
+              now - _pre_target.timestamp <= target_timeout_us && _pre_path_count > 0;
+          finish_visual_handoff(sample, target_fresh);
+          return;
+        }
+        visual_handoff_sample = sample;
       }
     } else {
       _pre_visual_since = 0;
@@ -318,6 +325,16 @@ void DockGuidance::run_preposition(hrt_abstime now) {
   }
 
   const bool target_fresh = update_rear_reference(now, local);
+
+  if (visual_handoff_sample && target_fresh && _pre_reference_valid && !_startup_climb) {
+    const float rear_distance = math::constrain(_param_dock_pre_distance.get(), 1.f, 1000.f);
+    const float handoff_radius = math::constrain(0.25f * rear_distance, 2.f, 25.f);
+    const Vector3f reference_error = _pre_reference - Vector3f(local.x, local.y, local.z);
+    if (reference_error.norm() <= handoff_radius) {
+      finish_visual_handoff(visual_handoff_sample, true);
+      return;
+    }
+  }
 
   const float dt = _pre_last_control_us > 0 && now > _pre_last_control_us
       ? math::constrain((now - _pre_last_control_us) * 1e-6f, 0.002f, 0.1f) : LOOP_DT;
@@ -394,11 +411,18 @@ void DockGuidance::run_preposition(hrt_abstime now) {
   if (limited_acceleration.norm() > acceleration_limit) {
     limited_acceleration *= acceleration_limit / limited_acceleration.norm();
   }
+  const float turn_radius = math::constrain(_param_dock_pre_radius.get(), 0.f, 2000.f);
+  limited_acceleration = dock_motion::limit_preposition_turn_acceleration(
+      previous_velocity, limited_acceleration, turn_radius);
   const float max_acceleration_change = math::constrain(_param_dock_dynamic_jerk.get(), 0.1f, 100.f) * dt;
   const Vector3f acceleration_change = limited_acceleration - _pre_command_acceleration;
   _pre_command_acceleration += acceleration_change.norm() > max_acceleration_change
       ? acceleration_change * (max_acceleration_change / acceleration_change.norm())
       : acceleration_change;
+  // A speed reduction can lower the allowed lateral acceleration before the
+  // jerk ramp reaches it. Keep the actual command inside the curvature bound.
+  _pre_command_acceleration = dock_motion::limit_preposition_turn_acceleration(
+      previous_velocity, _pre_command_acceleration, turn_radius);
   _velocity_setpoint_ned = previous_velocity + _pre_command_acceleration * dt;
   constrain_velocity_setpoint(_velocity_setpoint_ned);
   if (_velocity_setpoint_ned.norm() > limits.total && limits.total > 0.f) {

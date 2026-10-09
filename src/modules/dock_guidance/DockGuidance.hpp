@@ -440,6 +440,8 @@ private:
   DEFINE_PARAMETERS(
       (ParamBool<px4::params::DOCK_PRE_EN>)_param_dock_pre_enable,
       (ParamFloat<px4::params::DOCK_PRE_DIST>)_param_dock_pre_distance,
+      (ParamBool<px4::params::DOCK_PRE_REAR>)_param_dock_pre_rear,
+      (ParamFloat<px4::params::DOCK_PRE_RADIUS>)_param_dock_pre_radius,
       (ParamFloat<px4::params::DOCK_PRE_ZOFF>)_param_dock_pre_z_offset,
       (ParamFloat<px4::params::DOCK_PRE_VIS_T>)_param_dock_pre_visual_time,
       (ParamInt<px4::params::DOCK_PRE_TOUT>)_param_dock_pre_timeout,

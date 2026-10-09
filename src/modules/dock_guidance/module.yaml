@@ -20,6 +20,21 @@ parameters:
         min: 1
         max: 1000
         default: 100.0
+      DOCK_PRE_REAR:
+        description:
+          short: Reach the rear reference before visual handoff
+          long: When enabled, stable visual tracking hands off only after the vehicle is close to the moving rear reference. Disable to hand off as soon as the image is stable.
+        type: boolean
+        default: true
+      DOCK_PRE_RADIUS:
+        description:
+          short: Minimum preposition horizontal turn radius
+          long: Limits curvature of the preposition velocity trajectory above 2 m/s. Zero disables this turn constraint. Aircraft path radius also depends on tracking and wind.
+        type: float
+        unit: m
+        min: 0
+        max: 2000
+        default: 250.0
       DOCK_PRE_ZOFF:
         description: {short: Height above rear trajectory point}
         type: float

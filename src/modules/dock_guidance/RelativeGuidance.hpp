@@ -36,6 +36,26 @@ inline float far_course_yaw(float visual_yaw, float course_yaw, float fov_ratio,
   return matrix::wrap_pi(visual_yaw + course_weight * matrix::wrap_pi(course_yaw - visual_yaw));
 }
 
+inline Vector3f limit_preposition_turn_acceleration(const Vector3f &velocity,
+    const Vector3f &acceleration, float radius_m) {
+  const float speed_squared = velocity(0) * velocity(0) + velocity(1) * velocity(1);
+  // At near-zero speed the aircraft can stop and select a new travel direction;
+  // curvature is not a useful constraint until it is moving horizontally.
+  if (!std::isfinite(radius_m) || radius_m <= 0.f || speed_squared < 4.f) {
+    return acceleration;
+  }
+
+  const float speed = sqrtf(speed_squared);
+  const float along_n = velocity(0) / speed;
+  const float along_e = velocity(1) / speed;
+  const float tangent = along_n * acceleration(0) + along_e * acceleration(1);
+  const float lateral = along_n * acceleration(1) - along_e * acceleration(0);
+  const float lateral_limit = speed_squared / radius_m;
+  const float limited_lateral = clamp(lateral, -lateral_limit, lateral_limit);
+  return Vector3f(along_n * tangent - along_e * limited_lateral,
+      along_e * tangent + along_n * limited_lateral, acceleration(2));
+}
+
 inline bool far_lookahead_direction(const Vector3f &own, const Vector3f &rear,
     const Vector3f &target, Vector3f &direction) {
   const Vector3f target_line = target - own;
