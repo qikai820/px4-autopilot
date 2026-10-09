@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<mavlink>
+  <include>development.xml</include>
+  <version>3</version>
+  <dialect>0</dialect>
+  <messages>
+    <message id="47001" name="VIZTRA_TARGET">
+      <description>Position and motion of the selected Viztra docking target. Private MAVLink 2 message.</description>
+      <field type="uint64_t" name="time_boot_ms" units="ms">QGC boot time when this sample was received.</field>
+      <field type="uint32_t" name="sequence">Monotonic target sample number within the simulation session.</field>
+      <field type="int32_t" name="lat" units="degE7">Target latitude, WGS84.</field>
+      <field type="int32_t" name="lon" units="degE7">Target longitude, WGS84.</field>
+      <field type="float" name="alt_msl" units="m">Target altitude above mean sea level.</field>
+      <field type="float[3]" name="vel" units="m/s">Target north, east and down velocity.</field>
+      <field type="uint8_t" name="target_system">Receiving flight controller system ID.</field>
+      <field type="uint8_t" name="target_id">Selected target ID; currently one.</field>
+      <field type="uint8_t" name="valid_flags">Bit 0: position valid; bit 1: velocity valid.</field>
+    </message>
+  </messages>
+</mavlink>

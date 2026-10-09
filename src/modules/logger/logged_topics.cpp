@@ -64,6 +64,8 @@ void LoggedTopics::add_default_topics()
 	add_topic("dock_guidance_setpoint", 20);
 	add_topic("dock_guidance_prediction", 20);
 	add_topic("dock_guidance_relative", 20);
+	add_topic("dock_preposition_status", 20);
+	add_topic("viztra_target", 20);
 	add_topic("dock_guidance_thrust", 20);
 	add_topic_multi("dronecan_node_status", 250);
 	add_optional_topic("external_ins_attitude");

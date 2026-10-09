@@ -9,6 +9,45 @@ parameters:
         description: {short: Enable Dock Guidance startup}
         type: boolean
         default: true
+      DOCK_PRE_EN:
+        description: {short: Enable moving target rear-position guidance before visual Dock}
+        type: boolean
+        default: true
+      DOCK_PRE_DIST:
+        description: {short: Distance behind target trajectory for visual acquisition}
+        type: float
+        unit: m
+        min: 1
+        max: 1000
+        default: 100.0
+      DOCK_PRE_ZOFF:
+        description: {short: Height above rear trajectory point}
+        type: float
+        unit: m
+        min: -100
+        max: 100
+        default: 0.0
+      DOCK_PRE_VIS_T:
+        description: {short: Continuous valid image tracking time for visual handoff}
+        type: float
+        unit: s
+        min: 0.05
+        max: 5
+        default: 0.3
+      DOCK_PRE_TOUT:
+        description: {short: Target-position stream timeout during rear guidance}
+        type: int32
+        unit: ms
+        min: 100
+        max: 5000
+        default: 300
+      DOCK_PRE_PRED_T:
+        description: {short: Maximum target-motion prediction horizon}
+        type: float
+        unit: s
+        min: 0
+        max: 3
+        default: 1.0
       DOCK_CAM_DLY:
         description:
           short: Camera delay compensation

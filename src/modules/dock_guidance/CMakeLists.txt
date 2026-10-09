@@ -12,6 +12,7 @@ px4_add_module(
 		DockGuidance.cpp
 		DockGuidanceDynamic.cpp
 		DockGuidanceRelative.cpp
+		DockGuidancePreposition.cpp
 		RelativeMotion.hpp
 		RelativeResponse.hpp
 		RelativeGuidance.hpp

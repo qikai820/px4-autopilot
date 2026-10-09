@@ -61,6 +61,7 @@
 #include <uORB/PublicationMulti.hpp>
 #include <uORB/SubscriptionInterval.hpp>
 #include <uORB/topics/actuator_armed.h>
+#include <uORB/topics/viztra_target.h>
 #include <uORB/topics/actuator_outputs.h>
 #include <uORB/topics/airspeed.h>
 #include <uORB/topics/autotune_attitude_control_status.h>
@@ -167,6 +168,9 @@ private:
 	void handle_message_command_long(mavlink_message_t *msg);
 	void handle_message_distance_sensor(mavlink_message_t *msg);
 	void handle_message_follow_target(mavlink_message_t *msg);
+#ifdef MAVLINK_MSG_ID_VIZTRA_TARGET
+	void handle_message_viztra_target(mavlink_message_t *msg);
+#endif
 	void handle_message_generator_status(mavlink_message_t *msg);
 	void handle_message_set_gps_global_origin(mavlink_message_t *msg);
 	void handle_message_gps_rtcm_data(mavlink_message_t *msg);
@@ -301,6 +305,7 @@ private:
 	uORB::Publication<cellular_status_s>			_cellular_status_pub{ORB_ID(cellular_status)};
 	uORB::Publication<differential_pressure_s>		_differential_pressure_pub{ORB_ID(differential_pressure)};
 	uORB::Publication<follow_target_s>			_follow_target_pub{ORB_ID(follow_target)};
+	uORB::Publication<viztra_target_s>			_viztra_target_pub{ORB_ID(viztra_target)};
 	uORB::Publication<gimbal_manager_set_attitude_s>	_gimbal_manager_set_attitude_pub{ORB_ID(gimbal_manager_set_attitude)};
 	uORB::Publication<gimbal_manager_set_manual_control_s>	_gimbal_manager_set_manual_control_pub{ORB_ID(gimbal_manager_set_manual_control)};
 	uORB::Publication<gimbal_device_information_s>		_gimbal_device_information_pub{ORB_ID(gimbal_device_information)};

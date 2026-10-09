@@ -129,6 +129,11 @@ void DockGuidance::Run() {
 
   push_delay_history(now_us);
 
+  if (_dock_mode_active && _preposition_active) {
+    run_preposition(now_us);
+    return;
+  }
+
   if (_dock_mode_active && _stage == Stage::PASS_PREDICTED) {
     publish_predicted_pass(now_us);
     if (_dock_mode_active && _stage == Stage::PASS_PREDICTED && _setpoint_valid) {
@@ -797,7 +802,8 @@ void DockGuidance::reply_to_arming_check(
   reply.registration_id = _arming_check_id;
   reply.health_component_index =
       arming_check_reply_s::HEALTH_COMPONENT_INDEX_NONE;
-  reply.can_arm_and_run = _setpoint_valid && !_mode_fault_latched;
+  reply.can_arm_and_run = !_mode_fault_latched &&
+      (_setpoint_valid || (_param_dock_pre_enable.get() && preposition_entry_ready(reply.timestamp)));
   reply.mode_req_angular_velocity = true;
   reply.mode_req_attitude = true;
   reply.mode_req_local_alt = true;
@@ -844,6 +850,16 @@ void DockGuidance::update_mode_state() {
     _exit_stable_since_us = 0;
     _last_exit_request_us = 0;
     _dock_activation_time = now;
+    _preposition_enabled_for_activation = _param_dock_pre_enable.get();
+    _preposition_active = _preposition_enabled_for_activation;
+    _preposition_handoff_pending = false;
+    _pre_reference_valid = false;
+    _pre_visual_since = _pre_last_visual_sample = _pre_last_control_us = 0;
+    _pre_last_source_ms = _pre_reference_timestamp = _pre_stale_since = 0;
+    _pre_path_count = 0;
+    _pre_command_acceleration.zero();
+    _pre_requested_velocity.zero();
+    _pre_prediction_horizon_s = NAN;
     _prediction_ready = _terminal_ready = _capture_terminal_plan = false;
     _prediction_candidate_since = _capture_terminal_candidate_since = _terminal_plan_deadline = 0;
     _capture_vertical_latch.reset();
@@ -858,7 +874,7 @@ void DockGuidance::update_mode_state() {
     _startup_settled_since = 0;
     _startup_target_z = NAN;
     PX4_INFO("Dock mode active");
-    set_stage(Stage::ALIGN);
+    set_stage(_preposition_active ? Stage::PRE_POSITION : Stage::ALIGN);
     _commanded_speed_ms = 0.0f;
     _aligned_since_us = 0;
     _last_control_update_us = 0;
@@ -868,7 +884,7 @@ void DockGuidance::update_mode_state() {
     _terminal_blind_since_us = 0;
     _terminal_velocity_ned.zero();
 
-    if (_param_dock_dyn_enable.get()) {
+    if (_param_dock_dyn_enable.get() || _preposition_active) {
       _dynamic_closure = 0.f;
       _dynamic_acceleration.zero();
       vehicle_local_position_s local{};
@@ -888,14 +904,20 @@ void DockGuidance::update_mode_state() {
 
     // mc_pos_control 需要不早于位置控制启用时刻的轨迹设定值。
     // 静态路径以零速度起步，动态路径先沿用测得的本机速度以避免设定值阶跃。
-    if (_param_dock_dyn_enable.get()) {
+    if (_param_dock_dyn_enable.get() || _preposition_active) {
       publish_velocity_setpoint(now, _velocity_setpoint_ned, _yaw_setpoint_rad);
     } else {
       publish_safe_velocity_setpoint(now);
     }
 
   } else if (!active && _dock_mode_active) {
+    if (_preposition_enabled_for_activation) {
+      publish_preposition_status(now, 0, false);
+    }
     _dock_mode_active = false;
+    _preposition_active = false;
+    _preposition_handoff_pending = false;
+    _preposition_enabled_for_activation = false;
     _dock_activation_time = 0;
     publish_thrust_request(now);
     _prediction_ready = _terminal_ready = _capture_terminal_plan = false;
@@ -1006,7 +1028,8 @@ void DockGuidance::publish_thrust_request(hrt_abstime timestamp) {
     request.brake_rate = math::radians(_param_dock_brake_rate.get());
     request.brake_speed = _param_dock_brake_speed.get();
   }
-  request.valid = _dock_mode_active && _airborne && _setpoint_valid &&
+  request.valid = _dock_mode_active && !_preposition_active && !_preposition_handoff_pending &&
+                  _airborne && _setpoint_valid &&
                   !_vision_degraded && !_mode_fault_latched;
   _thrust_pub.publish(request);
 }
@@ -1340,6 +1363,9 @@ void DockGuidance::set_stage(Stage stage) {
     break;
   case Stage::TRACK_CAPTURE:
     PX4_INFO("dock stage TRACK_CAPTURE");
+    break;
+  case Stage::PRE_POSITION:
+    PX4_INFO("dock stage PRE_POSITION");
     break;
   }
 }
@@ -1707,6 +1733,7 @@ void DockGuidance::process_observation(float los_yaw_deg, float los_pitch_deg,
 
 void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
                                    hrt_abstime now, const Dcmf &sample_camera_to_body) {
+  _preposition_handoff_pending = false;
   _miss_correction = {};
   _early_vertical_bias = 0.f;
   _capture_gate = CaptureGateDiagnostics{};

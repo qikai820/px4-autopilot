@@ -69,6 +69,8 @@ set(msg_files
 	DockGuidanceSetpoint.msg
 	DockGuidancePrediction.msg
 	DockGuidanceRelative.msg
+	DockPrepositionStatus.msg
+	ViztraTarget.msg
 	DockGuidanceThrust.msg
 	DronecanNodeStatus.msg
 	Ekf2Timestamps.msg

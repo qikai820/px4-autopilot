@@ -1,0 +1,21 @@
+uint64 timestamp
+uint64 target_source_time_boot_ms
+uint32 target_sequence
+float32 target_age_s
+float32 vehicle_age_s
+float32 prediction_horizon_s
+float32 visual_tracking_s
+float32 reference_distance_m
+float32 commanded_yaw_rad
+float32[3] target_position_ned
+float32[3] target_velocity_ned
+float32[3] reference_position_ned
+float32[3] reference_error_ned
+float32[3] vehicle_position_ned
+float32[3] vehicle_velocity_ned
+float32[3] requested_velocity_ned
+float32[3] commanded_velocity_ned
+uint8 state # 0 inactive, 1 waiting, 2 tracking, 3 target stale, 4 handed off, 5 local invalid, 6 mode fault
+bool target_valid
+bool reference_valid
+bool visual_stable

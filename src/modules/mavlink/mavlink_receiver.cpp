@@ -213,6 +213,12 @@ MavlinkReceiver::handle_message(mavlink_message_t *msg)
 		handle_message_follow_target(msg);
 		break;
 
+#ifdef MAVLINK_MSG_ID_VIZTRA_TARGET
+	case MAVLINK_MSG_ID_VIZTRA_TARGET:
+		handle_message_viztra_target(msg);
+		break;
+#endif
+
 	case MAVLINK_MSG_ID_LANDING_TARGET:
 		handle_message_landing_target(msg);
 		break;
@@ -2498,6 +2504,42 @@ MavlinkReceiver::handle_message_follow_target(mavlink_message_t *msg)
 
 	_follow_target_pub.publish(follow_target_topic);
 }
+
+#ifdef MAVLINK_MSG_ID_VIZTRA_TARGET
+void MavlinkReceiver::handle_message_viztra_target(mavlink_message_t *msg)
+{
+	mavlink_viztra_target_t incoming{};
+	mavlink_msg_viztra_target_decode(msg, &incoming);
+	if (incoming.target_system != _mavlink.get_system_id() ||
+	    msg->compid != MAV_COMP_ID_USER1 ||
+	    incoming.target_id != 1 ||
+	    (incoming.valid_flags & 3U) != 3U ||
+	    incoming.lat < -900000000 || incoming.lat > 900000000 ||
+	    incoming.lon < -1800000000 || incoming.lon > 1800000000 ||
+	    !PX4_ISFINITE(incoming.alt_msl) || incoming.alt_msl < -1000.f || incoming.alt_msl > 50000.f ||
+	    !PX4_ISFINITE(incoming.vel[0]) || !PX4_ISFINITE(incoming.vel[1]) ||
+	    !PX4_ISFINITE(incoming.vel[2]) ||
+	    fabsf(incoming.vel[0]) > 100.f || fabsf(incoming.vel[1]) > 100.f ||
+	    fabsf(incoming.vel[2]) > 100.f) {
+		return;
+	}
+	viztra_target_s target{};
+	target.timestamp = hrt_absolute_time();
+	target.source_time_boot_ms = incoming.time_boot_ms;
+	target.sequence = incoming.sequence;
+	target.source_system = msg->sysid;
+	target.source_component = msg->compid;
+	target.target_id = incoming.target_id;
+	target.valid_flags = incoming.valid_flags;
+	target.lat = incoming.lat * 1e-7;
+	target.lon = incoming.lon * 1e-7;
+	target.alt_msl = incoming.alt_msl;
+	target.vn = incoming.vel[0];
+	target.ve = incoming.vel[1];
+	target.vd = incoming.vel[2];
+	_viztra_target_pub.publish(target);
+}
+#endif
 
 void
 MavlinkReceiver::handle_message_landing_target(mavlink_message_t *msg)

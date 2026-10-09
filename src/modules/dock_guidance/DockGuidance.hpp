@@ -43,6 +43,7 @@
 #include <uORB/topics/dock_guidance_setpoint.h>
 #include <uORB/topics/dock_guidance_prediction.h>
 #include <uORB/topics/dock_guidance_relative.h>
+#include <uORB/topics/dock_preposition_status.h>
 #include <uORB/topics/dock_guidance_thrust.h>
 #include <uORB/topics/gimbal_controls.h>
 #include <uORB/topics/parameter_update.h>
@@ -60,9 +61,11 @@
 #include <uORB/topics/vehicle_status.h>
 #include <uORB/topics/vehicle_land_detected.h>
 #include <uORB/topics/viztra_observation.h>
+#include <uORB/topics/viztra_target.h>
 
 #include <matrix/matrix/math.hpp>
 #include <mathlib/math/filter/AlphaFilter.hpp>
+#include <lib/geo/geo.h>
 
 #include <cmath>
 #include "TargetMotion.hpp"
@@ -113,7 +116,8 @@ private:
     TERMINAL_DASH = 7,
     PASS_PREDICTED = 8,
     STARTUP_CLIMB = 9,
-    TRACK_CAPTURE = 10
+    TRACK_CAPTURE = 10,
+    PRE_POSITION = 11
   };
 
   // 调度入口：处理注册、模式状态、看门狗和新视觉帧；新轨迹通常由有效帧计算，
@@ -143,6 +147,9 @@ private:
   void update_camera_pitch_servo(float camera_pitch_error_deg, float dt_s,
                                  hrt_abstime timestamp_sample);
   void publish_camera_pitch_servo(hrt_abstime timestamp_sample);
+  bool preposition_entry_ready(hrt_abstime now);
+  void run_preposition(hrt_abstime now);
+  void publish_preposition_status(hrt_abstime now, uint8_t state, bool target_valid);
   void set_stage(Stage stage);
   // 图像纠偏速度垂直于视线；与沿视线的接近速度合成后共用三维速度预算。
   matrix::Vector3f compute_image_tracking_velocity(
@@ -207,6 +214,7 @@ private:
   uORB::Subscription _att_sub{ORB_ID(vehicle_attitude)};
   uORB::Subscription _gyro_sub{ORB_ID(vehicle_angular_velocity)};
   uORB::Subscription _local_pos_sub{ORB_ID(vehicle_local_position)};
+  uORB::Subscription _viztra_target_sub{ORB_ID(viztra_target)};
   uORB::Subscription _vehicle_thrust_sub{ORB_ID(vehicle_thrust_setpoint)};
   uORB::Subscription _hover_thrust_sub{ORB_ID(hover_thrust_estimate)};
   uORB::Subscription _vehicle_status_sub{ORB_ID(vehicle_status)};
@@ -223,6 +231,7 @@ private:
   uORB::Publication<dock_guidance_prediction_s> _prediction_pub{
       ORB_ID(dock_guidance_prediction)};
   uORB::Publication<dock_guidance_relative_s> _relative_pub{ORB_ID(dock_guidance_relative)};
+  uORB::Publication<dock_preposition_status_s> _preposition_pub{ORB_ID(dock_preposition_status)};
   uORB::Publication<dock_guidance_thrust_s> _thrust_pub{
       ORB_ID(dock_guidance_thrust)};
   uORB::Publication<gimbal_controls_s> _gimbal_controls_pub{
@@ -268,6 +277,26 @@ private:
   uint64_t _last_valid_observation_us{0};
   bool _setpoint_valid{false};
   bool _dock_mode_active{false};
+  bool _preposition_active{false};
+  bool _preposition_handoff_pending{false};
+  bool _preposition_enabled_for_activation{false};
+  bool _pre_reference_valid{false};
+  hrt_abstime _pre_visual_since{0};
+  hrt_abstime _pre_last_visual_sample{0};
+  hrt_abstime _pre_last_control_us{0};
+  uint64_t _pre_last_source_ms{0};
+  uint64_t _pre_reference_timestamp{0};
+  hrt_abstime _pre_stale_since{0};
+  viztra_target_s _pre_target{};
+  matrix::Vector3f _pre_command_acceleration{};
+  matrix::Vector3f _pre_requested_velocity{};
+  float _pre_prediction_horizon_s{NAN};
+  matrix::Vector3f _pre_reference{};
+  matrix::Vector3f _pre_target_position{};
+  matrix::Vector3f _pre_last_direction{};
+  static constexpr int PRE_PATH_CAPACITY = 1024;
+  matrix::Vector3f _pre_path[PRE_PATH_CAPACITY]{};
+  int _pre_path_count{0};
   hrt_abstime _dock_activation_time{0};
   bool _vision_degraded{false};
   bool _mode_fault_latched{false};
@@ -404,6 +433,12 @@ private:
   hrt_abstime _startup_ray_time{0};
 
   DEFINE_PARAMETERS(
+      (ParamBool<px4::params::DOCK_PRE_EN>)_param_dock_pre_enable,
+      (ParamFloat<px4::params::DOCK_PRE_DIST>)_param_dock_pre_distance,
+      (ParamFloat<px4::params::DOCK_PRE_ZOFF>)_param_dock_pre_z_offset,
+      (ParamFloat<px4::params::DOCK_PRE_VIS_T>)_param_dock_pre_visual_time,
+      (ParamInt<px4::params::DOCK_PRE_TOUT>)_param_dock_pre_timeout,
+      (ParamFloat<px4::params::DOCK_PRE_PRED_T>)_param_dock_pre_predict_time,
       (ParamInt<px4::params::DOCK_DYN_EN>)_param_dock_dyn_enable,
       (ParamInt<px4::params::DOCK_PRED_EN>)_param_dock_pred_enable,
       (ParamFloat<px4::params::DOCK_PRED_TAU>)_param_dock_pred_response,
