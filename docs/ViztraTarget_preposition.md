@@ -29,3 +29,5 @@ ULog 默认以最高 50 Hz 记录 `dock_preposition_status`，并记录收到的
 参数：`DOCK_PRE_DIST` 后方距离，`DOCK_PRE_REAR` 是否到达目标后方再交接，`DOCK_PRE_RADIUS` 引导速度轨迹最小转弯半径，`DOCK_PRE_ZOFF` 相对后方轨迹点的高度偏移（正值表示更高），`DOCK_PRE_VIS_T` 视觉品质持续时间，`DOCK_PRE_TOUT` 目标流超时，`DOCK_PRE_PRED_T` 最大预测时间。关闭 `DOCK_PRE_EN` 后，下次进入 Dock 模式直接使用原对接流程。
 
 飞行前确认 QGC 已连接使用 `viztra` dialect 的固件、飞行器链路为 MAVLink 2、Target 开关处于 `Sending`，并核对 `viztra_target` 与 `dock_preposition_status` 的位置和时间戳。编译通过不代表飞行闭环已验证。
+
+进入 `PASS_PREDICTED` 并首次发布减速设定值时，飞控向 QGC 消息栏发送一次 `Dock nearest 3D est X.XX m`，同时写入 ULog 消息；此前没有可信米制视觉距离时显示 `Dock nearest 3D distance N/A`。距离来自有效的 Viztra 米制观测、未裁剪目标框的标定距离及受限末段的相对状态估计，不使用有传输时延的目标 GPS 位置流冒充接触真值。该数字是减速开始前本次 Dock 过程的最近三维估计距离，`PASS_PREDICTED`、制动完成和这个数字均不代表实体接触确认。

@@ -114,6 +114,9 @@ void DockGuidance::compute_relative_control(const Vector3f &direction, const Vec
   _prediction_cross_sigma = _prediction_cross_velocity_sigma = INFINITY;
 
   const bool ready = _relative_motion.ready(now);
+  if (ready) {
+    record_closest_target_distance(c.relative.norm());
+  }
   const float capture_speed = math::constrain(_param_dock_capture_speed.get(), 0.f, 10.f);
   float far_speed_limit = capture_speed;
   Vector3f far_direction{};
@@ -295,6 +298,7 @@ bool DockGuidance::relative_terminal(hrt_abstime now, bool blind) {
     invalidate_setpoint(now, "relative terminal corridor/limits changed");
     return false;
   }
+  record_closest_target_distance(relative.norm());
   _relative_context.relative = relative;
   _relative_context.relative_rate = _relative_motion.rate(_velocity_ned);
   if (along + 2.f * along_sigma < -_param_dock_pass_distance.get()) {

@@ -635,6 +635,27 @@ void DockGuidance::invalidate_setpoint(hrt_abstime timestamp,
   }
 }
 
+void DockGuidance::record_closest_target_distance(float distance_m) {
+  if (_dock_mode_active && _airborne && std::isfinite(distance_m) && distance_m >= 0.f) {
+    _closest_target_distance_m = math::min(_closest_target_distance_m, distance_m);
+  }
+}
+
+void DockGuidance::report_closest_target_distance() {
+  if (_closest_target_distance_reported) {
+    return;
+  }
+
+  _closest_target_distance_reported = true;
+  if (std::isfinite(_closest_target_distance_m)) {
+    PX4_INFO("dock nearest 3D visual estimate: %.2f m", (double)_closest_target_distance_m);
+    mavlink_log_info(&_mavlink_log_pub, "Dock nearest 3D est %.2f m", (double)_closest_target_distance_m);
+  } else {
+    PX4_INFO("dock nearest 3D visual distance unavailable");
+    mavlink_log_info(&_mavlink_log_pub, "Dock nearest 3D distance N/A");
+  }
+}
+
 void DockGuidance::handle_visual_loss(hrt_abstime timestamp,
                                      const char *reason) {
   // 动态末段先走自身的目标穿越和盲飞时限判定；静态末段沿用已缓存的整条 NED 速度向量。
@@ -847,6 +868,8 @@ void DockGuidance::update_mode_state() {
 
   if (active && !_dock_mode_active) {
     _dock_mode_active = true;
+    _closest_target_distance_m = INFINITY;
+    _closest_target_distance_reported = false;
     _fault_hold_pending = false;
     _exit_stable_since_us = 0;
     _last_exit_request_us = 0;

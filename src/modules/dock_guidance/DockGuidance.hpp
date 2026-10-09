@@ -66,6 +66,7 @@
 #include <matrix/matrix/math.hpp>
 #include <mathlib/math/filter/AlphaFilter.hpp>
 #include <lib/geo/geo.h>
+#include <lib/systemlib/mavlink_log.h>
 
 #include <cmath>
 #include "TargetMotion.hpp"
@@ -154,6 +155,8 @@ private:
                                           float dt_s);
   void run_preposition(hrt_abstime now);
   void publish_preposition_status(hrt_abstime now, uint8_t state, bool target_valid);
+  void record_closest_target_distance(float distance_m);
+  void report_closest_target_distance();
   void set_stage(Stage stage);
   // 图像纠偏速度垂直于视线；与沿视线的接近速度合成后共用三维速度预算。
   matrix::Vector3f compute_image_tracking_velocity(
@@ -252,6 +255,7 @@ private:
   uORB::Publication<vehicle_command_s> _vehicle_command_pub{ORB_ID(vehicle_command)};
   uORB::Publication<arming_check_reply_s> _arming_check_reply_pub{
       ORB_ID(arming_check_reply)};
+  orb_advert_t _mavlink_log_pub{nullptr};
 
   // LOS 分别在相机系（c）和地理 NED 系（e）中的方向、导数与角速度。
   matrix::Vector3f _los_c_deg{0.0f, 0.0f, 0.0f};
@@ -281,6 +285,8 @@ private:
   uint64_t _last_valid_observation_us{0};
   bool _setpoint_valid{false};
   bool _dock_mode_active{false};
+  float _closest_target_distance_m{INFINITY};
+  bool _closest_target_distance_reported{false};
   bool _preposition_active{false};
   bool _preposition_handoff_pending{false};
   bool _preposition_enabled_for_activation{false};

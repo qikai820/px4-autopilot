@@ -95,6 +95,9 @@ void DockGuidance::update_target_motion(const viztra_observation_s &obs, const V
                               _param_dock_target_width.get(), _param_dock_target_height.get(), fx,
                               fy, camera_los(0), _param_dock_size_error.get(), range, sigma);
   }
+  if (metric && exposure) {
+    record_closest_target_distance(range);
+  }
   if (exposure) {
     if (metric && !_relative_terminal_active) {
       _relative_motion.update(exposure, own, own_velocity, los * range, sigma,
@@ -123,6 +126,9 @@ void DockGuidance::update_target_motion(const viztra_observation_s &obs, const V
     _target_position_error = _target_motion.position_sigma(_target_motion.age(now));
     _target_motion_valid = _target_motion.valid(now, _param_dock_est_velocity_error.get()) &&
                            _estimated_relative.norm() > .2f;
+    if (_target_motion_valid) {
+      record_closest_target_distance(_estimated_relative.norm());
+    }
   }
 }
 
@@ -711,6 +717,7 @@ bool DockGuidance::dynamic_terminal(hrt_abstime now, bool blind) {
       invalidate_setpoint(now, "capture terminal plan expired/uncertain");
       return false;
     }
+    record_closest_target_distance(_estimated_relative.norm());
     if (along + 2.f * _target_position_error < -_param_dock_pass_distance.get()) {
       _capture_terminal_plan = false;
       _terminal_ready = false;
@@ -750,6 +757,7 @@ bool DockGuidance::dynamic_terminal(hrt_abstime now, bool blind) {
     invalidate_setpoint(now, "dynamic terminal estimate invalid");
     return false;
   }
+  record_closest_target_distance(_estimated_relative.norm());
   if (pass == dock_motion::PassState::Predicted) {
     // 已预测越过锁定平面时转入减速保持；这只是几何判定，并非实体接触确认。
     set_stage(Stage::PASS_PREDICTED);
@@ -814,4 +822,5 @@ void DockGuidance::publish_predicted_pass(hrt_abstime now) {
   _vision_degraded = false;
   publish_guidance_status(now, true, false);
   publish_velocity_setpoint(now, _velocity_setpoint_ned, _yaw_setpoint_rad);
+  report_closest_target_distance();
 }
