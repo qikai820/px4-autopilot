@@ -187,6 +187,50 @@ bool DockGuidance::update_rear_reference(hrt_abstime now, const vehicle_local_po
   return true;
 }
 
+void DockGuidance::point_camera_to_preposition_target(
+    hrt_abstime now, const vehicle_local_position_s &local, float dt_s) {
+  if (!_camera_servo_armed || _param_dock_cam_pitch_variable.get() == 0 ||
+      _pre_visual_since != 0) {
+    return;
+  }
+
+  vehicle_attitude_s attitude{};
+  if (!_att_sub.copy(&attitude) || attitude.timestamp == 0 ||
+      now < attitude.timestamp || now - attitude.timestamp > 200_ms) {
+    return;
+  }
+
+  const Vector3f target_ned = _pre_target_position - Vector3f(local.x, local.y, local.z);
+  const Quatf q(attitude.q);
+  if (!target_ned.isAllFinite() || target_ned.norm() < 1.f || !q.isAllFinite()) {
+    return;
+  }
+
+  // The external target stream may point the gimbal before Viztra acquires it.
+  // This only changes the camera direction; visual handoff still requires a
+  // fresh valid Viztra frame inside the sensor's own range and FOV.
+  const Vector3f target_body = Dcmf(q).transpose() * target_ned;
+  const float yaw = math::radians(_param_dock_cam_yaw.get());
+  const float forward = cosf(yaw) * target_body(0) + sinf(yaw) * target_body(1);
+  if (forward <= 1.f) {
+    return;
+  }
+
+  const float desired_pitch = math::degrees(atan2f(-target_body(2), forward));
+  if (!std::isfinite(desired_pitch)) {
+    return;
+  }
+
+  const float minimum_pitch = math::min(_param_dock_cam_pitch_min.get(),
+                                        _param_dock_cam_pitch_max.get());
+  const float maximum_pitch = math::max(_param_dock_cam_pitch_min.get(),
+                                        _param_dock_cam_pitch_max.get());
+  const float max_step = math::constrain(_param_dock_cam_pitch_rate.get(), 0.1f, 30.f) * dt_s;
+  _camera_mount_pitch_deg = math::constrain(_camera_mount_pitch_deg + math::constrain(
+      desired_pitch - _camera_mount_pitch_deg, -max_step, max_step), minimum_pitch, maximum_pitch);
+  publish_camera_pitch_servo(now);
+}
+
 void DockGuidance::run_preposition(hrt_abstime now) {
   _course_yaw_active = false;
   _pre_requested_velocity.zero();
@@ -284,6 +328,7 @@ void DockGuidance::run_preposition(hrt_abstime now) {
 
   if (target_fresh) {
     _pre_stale_since = 0;
+    point_camera_to_preposition_target(now, local, dt);
     if (_pre_reference_valid) {
       const Vector3f velocity(_pre_target.vn, _pre_target.ve, _pre_target.vd);
       if (_startup_climb && std::isfinite(_startup_target_z)) {

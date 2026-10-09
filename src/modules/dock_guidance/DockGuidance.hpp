@@ -149,6 +149,9 @@ private:
   void publish_camera_pitch_servo(hrt_abstime timestamp_sample);
   bool preposition_entry_ready(hrt_abstime now);
   bool update_rear_reference(hrt_abstime now, const vehicle_local_position_s &local);
+  void point_camera_to_preposition_target(hrt_abstime now,
+                                          const vehicle_local_position_s &local,
+                                          float dt_s);
   void run_preposition(hrt_abstime now);
   void publish_preposition_status(hrt_abstime now, uint8_t state, bool target_valid);
   void set_stage(Stage stage);
