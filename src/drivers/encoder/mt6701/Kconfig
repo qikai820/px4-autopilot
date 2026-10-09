@@ -1,0 +1,5 @@
+menuconfig DRIVERS_ENCODER_MT6701
+	bool "MagnTek MT6701 I2C absolute angle encoder"
+	default n
+	---help---
+		Enable the MT6701 14-bit absolute angle encoder driver.
