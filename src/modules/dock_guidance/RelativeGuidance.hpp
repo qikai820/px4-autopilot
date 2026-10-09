@@ -30,6 +30,40 @@ struct RelativeTrajectory {
   bool valid{false};
 };
 
+inline float far_course_yaw(float visual_yaw, float course_yaw, float fov_ratio,
+    float align, float soft) {
+  const float course_weight = clamp((soft - fov_ratio) / max(.05f, soft - align), 0.f, 1.f);
+  return matrix::wrap_pi(visual_yaw + course_weight * matrix::wrap_pi(course_yaw - visual_yaw));
+}
+
+inline bool far_lookahead_direction(const Vector3f &own, const Vector3f &rear,
+    const Vector3f &target, Vector3f &direction) {
+  const Vector3f target_line = target - own;
+  const Vector3f rear_error = rear - own;
+  const Vector3f rear_axis = target - rear;
+  const float target_range = target_line.norm();
+  const float rear_distance = rear_error.norm();
+  if (!target_line.isAllFinite() || !rear_error.isAllFinite() || !rear_axis.isAllFinite() ||
+      target_range <= 1.f || rear_axis.norm() <= 1.f) { return false; }
+  const bool past_rear = (own - rear) * rear_axis >= 0.f;
+  const float blend = clamp((20.f - rear_distance) / 20.f, 0.f, 1.f);
+  const Vector3f rear_direction = rear_distance > 1.f ? rear_error / rear_distance :
+      target_line / target_range;
+  const Vector3f lookahead = past_rear ? target_line / target_range :
+      rear_direction * (1.f - blend) + target_line / target_range * blend;
+  if (!lookahead.isAllFinite() || lookahead.norm() <= .5f) { return false; }
+  direction = lookahead.normalized();
+  return true;
+}
+
+inline float rear_stop_speed(float distance, float closing_speed, const RelativeContext &c) {
+  // Without visual handoff, stop at the rear reference while allowing for
+  // response delay and the jerk-limited transition into braking.
+  const float braking = .7f * min(c.deceleration, min(c.up, c.down));
+  const float margin = closing_speed * c.response;
+  return min(c.limits.total, sqrtf(2.f * braking * max(0.f, distance - margin)));
+}
+
 inline VelocityPlan relative_step(const RelativeContext &c, const Vector3f &desired,
     const Vector3f &previous, const Vector3f &acceleration, float dt, bool fov) {
   // Lowering the acceleration budget must not itself make jerk infeasible.

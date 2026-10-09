@@ -148,6 +148,7 @@ private:
                                  hrt_abstime timestamp_sample);
   void publish_camera_pitch_servo(hrt_abstime timestamp_sample);
   bool preposition_entry_ready(hrt_abstime now);
+  bool update_rear_reference(hrt_abstime now, const vehicle_local_position_s &local);
   void run_preposition(hrt_abstime now);
   void publish_preposition_status(hrt_abstime now, uint8_t state, bool target_valid);
   void set_stage(Stage stage);
@@ -280,6 +281,7 @@ private:
   bool _preposition_active{false};
   bool _preposition_handoff_pending{false};
   bool _preposition_enabled_for_activation{false};
+  bool _course_yaw_active{false};
   bool _pre_reference_valid{false};
   hrt_abstime _pre_visual_since{0};
   hrt_abstime _pre_last_visual_sample{0};

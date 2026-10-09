@@ -36,6 +36,76 @@ static void test_observer() {
 
 struct Outcome { float miss{INFINITY}, time{0.f}, speed{0.f}; bool committed{false}, passed{false}; };
 
+static void test_fast_visual_handoff() {
+  const float visual = -33.f * 3.14159265f / 180.f;
+  const float course = 15.f * 3.14159265f / 180.f;
+  assert(fabsf(matrix::wrap_pi(far_course_yaw(visual, course, .03f, .30f, .65f) -
+      course)) < .001f);
+  assert(fabsf(matrix::wrap_pi(far_course_yaw(visual, course, .65f, .30f, .65f) -
+      visual)) < .001f);
+  assert(far_course_yaw(visual, course, .475f, .30f, .65f) > visual);
+  assert(far_course_yaw(visual, course, .475f, .30f, .65f) < course);
+  const float across_pi = far_course_yaw(3.12413936f, -3.12413936f,
+      .475f, .30f, .65f);
+  assert(fabsf(fabsf(across_pi) - 3.14159265f) < .01f);
+  Vector3f direction{};
+  const Vector3f rear(1050.f, 0.f, -100.f), target(1150.f, 0.f, -100.f);
+  for (float north : {0.f, 1030.f, 1049.f, 1050.f, 1051.f, 1100.f}) {
+    const Vector3f own(north, 0.f, -100.f);
+    assert(far_lookahead_direction(own, rear, target, direction));
+    assert(direction(0) > .99f); // no turn or stop at the rear reference
+  }
+  const Vector3f curved_target(1150.f, 80.f, -100.f);
+  Vector3f before{}, after{};
+  assert(far_lookahead_direction(Vector3f(1049.f, 0.f, -100.f), rear,
+      curved_target, before));
+  assert(far_lookahead_direction(Vector3f(1051.f, 0.f, -100.f), rear,
+      curved_target, after));
+  assert(before * after > .95f);
+  assert(!far_lookahead_direction(target, rear, target, direction));
+}
+
+static void test_far_rear_approach() {
+  RelativeContext c;
+  c.limits = {50.f, 100.f, 40.f, 4.f};
+  c.acceleration = 8.f;
+  c.deceleration = 3.f;
+  c.up = 4.f;
+  c.down = 3.f;
+  c.jerk = 8.f;
+  c.response = .5f;
+  c.soft = 100.f;
+  c.ray = Vector3f(1.f, 0.f, 0.f);
+  assert(rear_stop_speed(1000.f, 0.f, c) == 50.f);
+  assert(rear_stop_speed(0.f, 0.f, c) == 0.f);
+
+  // Independent first-order vehicle response: a 1 km rear-reference leg
+  // without visual handoff should use full speed far away, then stop at the point.
+  float position = 0.f, actual = 0.f;
+  Vector3f command{}, acceleration{};
+  bool reached_full_speed = false, arrived = false;
+  for (int i = 0; i < 3000; ++i) {
+    const float distance = fabsf(1000.f - position);
+    c.relative = Vector3f(distance + 100.f, 0.f, 0.f);
+    const float speed = min(.35f * distance,
+        rear_stop_speed(distance, fabsf(actual), c));
+    const float desired = position <= 1000.f ? speed : -speed;
+    const auto plan = relative_step(c, Vector3f(desired, 0.f, 0.f),
+        command, acceleration, .02f, false);
+    command = plan.velocity;
+    acceleration = plan.acceleration;
+    actual += (command(0) - actual) * (.02f / c.response);
+    position += actual * .02f;
+    reached_full_speed |= actual > 45.f;
+    if (distance < 2.f && fabsf(actual) < 1.f) {
+      assert(i * .02f < 45.f);
+      arrived = true;
+      break;
+    }
+  }
+  assert(reached_full_speed && arrived);
+}
+
 static Outcome scenario(const Vector3f &initial_target_velocity, bool estimated, float plant_response = .5f,
     Vector3f initial_relative = Vector3f(150.f, 0.f, -100.f), Vector3f initial_velocity = Vector3f{},
     bool stop_target = false, bool terminal = false, bool noisy_box = false) {
@@ -174,6 +244,8 @@ static void test_frozen_and_fov() {
 
 int main() {
   test_observer();
+  test_fast_visual_handoff();
+  test_far_rear_approach();
   test_frozen_and_fov();
   for (const Vector3f &velocity : {Vector3f{}, Vector3f(10.f, 0.f, 0.f), Vector3f(-10.f, 0.f, 0.f),
       Vector3f(0.f, 5.f, 0.f), Vector3f(5.f, 3.f, -2.f)}) {

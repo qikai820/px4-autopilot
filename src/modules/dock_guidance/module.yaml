@@ -10,11 +10,11 @@ parameters:
         type: boolean
         default: true
       DOCK_PRE_EN:
-        description: {short: Enable moving target rear-position guidance before visual Dock}
+        description: {short: Enable target rear-position guidance through visual handoff}
         type: boolean
         default: true
       DOCK_PRE_DIST:
-        description: {short: Distance behind target trajectory for visual acquisition}
+        description: {short: Distance behind target trajectory or stationary target approach line}
         type: float
         unit: m
         min: 1
@@ -632,7 +632,9 @@ parameters:
         decimal: 1
         default: 10.0
       DOCK_CAP_VMAX:
-        description: {short: Initial visual capture speed with uncertain target motion}
+        description:
+          short: Visual capture speed when metric range is unavailable
+          long: Fresh Viztra position and matching visual bearing keep the Dock speed limit through visual handoff and the rear reference. This capture limit applies when that position is unavailable; without visual handoff the rear guidance stops at the rear reference.
         type: float
         unit: m/s
         min: 0

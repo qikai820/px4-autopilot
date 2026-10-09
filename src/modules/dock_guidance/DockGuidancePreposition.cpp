@@ -82,7 +82,113 @@ void DockGuidance::publish_preposition_status(hrt_abstime now, uint8_t state, bo
   _preposition_pub.publish(status);
 }
 
+bool DockGuidance::update_rear_reference(hrt_abstime now, const vehicle_local_position_s &local) {
+  _pre_reference_valid = false;
+  _pre_prediction_horizon_s = NAN;
+  if (!local.xy_global || !local.z_global || !std::isfinite(local.ref_lat) ||
+      !std::isfinite(local.ref_lon) || !std::isfinite(local.ref_alt)) {
+    return false;
+  }
+  if (_pre_reference_timestamp != local.ref_timestamp) {
+    _pre_reference_timestamp = local.ref_timestamp;
+    _pre_path_count = 0;
+    _pre_last_source_ms = 0;
+    _pre_last_direction.zero();
+    _pre_target = {};
+  }
+
+  MapProjection projection(local.ref_lat, local.ref_lon, local.ref_timestamp);
+  viztra_target_s incoming{};
+  if (_viztra_target_sub.update(&incoming) &&
+      incoming.target_id == 1 && incoming.source_component == kDockTargetComponent &&
+      (incoming.valid_flags & 3U) == 3U && incoming.timestamp <= now &&
+      std::isfinite(incoming.lat) && std::isfinite(incoming.lon) &&
+      fabs(incoming.lat) <= 90.0 && fabs(incoming.lon) <= 180.0 &&
+      std::isfinite(incoming.alt_msl) &&
+      Vector3f(incoming.vn, incoming.ve, incoming.vd).isAllFinite() &&
+      (_pre_last_source_ms == 0 || incoming.source_time_boot_ms > _pre_last_source_ms)) {
+    Vector3f target_position{};
+    projection.project(incoming.lat, incoming.lon, target_position(0), target_position(1));
+    target_position(2) = local.ref_alt - incoming.alt_msl;
+    const bool discontinuity = _pre_path_count > 0 && target_position.isAllFinite() &&
+        (target_position - _pre_path[_pre_path_count - 1]).norm() >= 200.f;
+    if (discontinuity) {
+      // Do not bridge a target teleport with the old path or keep rejecting the new path forever.
+      _pre_path_count = 0;
+      _pre_last_source_ms = 0;
+      _pre_last_direction.zero();
+      _pre_target = {};
+    }
+    if (target_position.isAllFinite() && !discontinuity) {
+      _pre_target = incoming;
+      _pre_last_source_ms = incoming.source_time_boot_ms;
+      const Vector3f velocity(incoming.vn, incoming.ve, incoming.vd);
+      if (velocity.norm() > 0.5f) { _pre_last_direction = velocity.normalized(); }
+      if (_pre_path_count == 0 ||
+          (target_position - _pre_path[_pre_path_count - 1]).norm() >= kPathSampleDistance) {
+        if (_pre_path_count == PRE_PATH_CAPACITY) {
+          for (int i = 1; i < PRE_PATH_CAPACITY; ++i) { _pre_path[i - 1] = _pre_path[i]; }
+          --_pre_path_count;
+        }
+        _pre_path[_pre_path_count++] = target_position;
+      }
+    }
+  }
+
+  const uint64_t timeout_us = static_cast<uint64_t>(math::constrain(
+      _param_dock_pre_timeout.get(), int32_t{100}, int32_t{5000})) * 1000ULL;
+  const bool target_fresh = _pre_target.timestamp > 0 && now >= _pre_target.timestamp &&
+      now - _pre_target.timestamp <= timeout_us && _pre_path_count > 0;
+  if (!target_fresh) { return false; }
+
+  const float age = (now - _pre_target.timestamp) * 1e-6f;
+  const float horizon = math::min(age + 0.25f,
+      math::constrain(_param_dock_pre_predict_time.get(), 0.f, 3.f));
+  _pre_prediction_horizon_s = horizon;
+  const Vector3f velocity(_pre_target.vn, _pre_target.ve, _pre_target.vd);
+  _pre_target_position = _pre_path[_pre_path_count - 1] + velocity * horizon;
+
+  const float rear_distance = math::constrain(_param_dock_pre_distance.get(), 1.f, 1000.f);
+  float remaining = rear_distance;
+  Vector3f cursor = _pre_target_position;
+  bool reference_ready = false;
+  for (int i = _pre_path_count - 1; i >= 0; --i) {
+    const Vector3f segment = cursor - _pre_path[i];
+    const float length = segment.norm();
+    if (length > 0.001f) {
+      if (length >= remaining) {
+        _pre_reference = cursor - segment * (remaining / length);
+        reference_ready = true;
+        break;
+      }
+      remaining -= length;
+      cursor = _pre_path[i];
+    }
+  }
+  if (!reference_ready && _pre_last_direction.norm() > 0.5f) {
+    _pre_reference = cursor - _pre_last_direction * remaining;
+    reference_ready = true;
+  }
+  if (!reference_ready) {
+    // A stationary target has no track; use the approach line rather than its nose yaw.
+    const Vector2f approach(_pre_target_position(0) - local.x,
+                            _pre_target_position(1) - local.y);
+    const float approach_distance = approach.norm();
+    if (approach_distance > 1.f) {
+      _pre_reference = _pre_target_position - Vector3f(approach(0), approach(1), 0.f) *
+          (rear_distance / approach_distance);
+      reference_ready = true;
+    }
+  }
+  if (reference_ready) {
+    _pre_reference_valid = true;
+    _pre_reference(2) -= math::constrain(_param_dock_pre_z_offset.get(), -100.f, 100.f);
+  }
+  return true;
+}
+
 void DockGuidance::run_preposition(hrt_abstime now) {
+  _course_yaw_active = false;
   _pre_requested_velocity.zero();
   _pre_prediction_horizon_s = NAN;
   _pre_reference_valid = false;
@@ -167,99 +273,19 @@ void DockGuidance::run_preposition(hrt_abstime now) {
     return;
   }
 
-  if (_pre_reference_timestamp != local.ref_timestamp) {
-    _pre_reference_timestamp = local.ref_timestamp;
-    _pre_path_count = 0;
-    _pre_last_source_ms = 0;
-    _pre_last_direction.zero();
-  }
-
-  MapProjection projection(local.ref_lat, local.ref_lon, local.ref_timestamp);
-  viztra_target_s incoming{};
-  if (_viztra_target_sub.update(&incoming) &&
-      incoming.target_id == 1 &&
-      incoming.source_component == kDockTargetComponent &&
-      (incoming.valid_flags & 3U) == 3U &&
-      incoming.timestamp <= now &&
-      std::isfinite(incoming.lat) && std::isfinite(incoming.lon) &&
-      fabs(incoming.lat) <= 90.0 && fabs(incoming.lon) <= 180.0 &&
-      std::isfinite(incoming.alt_msl) &&
-      Vector3f(incoming.vn, incoming.ve, incoming.vd).isAllFinite() &&
-      (_pre_last_source_ms == 0 || incoming.source_time_boot_ms > _pre_last_source_ms)) {
-    Vector3f target_position{};
-    projection.project(incoming.lat, incoming.lon, target_position(0), target_position(1));
-    target_position(2) = local.ref_alt - incoming.alt_msl;
-    const bool discontinuity = _pre_path_count > 0 && target_position.isAllFinite() &&
-        (target_position - _pre_path[_pre_path_count - 1]).norm() >= 200.f;
-    if (discontinuity) {
-      // Do not bridge a target teleport with the old path or keep rejecting the new path forever.
-      _pre_path_count = 0;
-      _pre_last_source_ms = 0;
-      _pre_last_direction.zero();
-      _pre_target = {};
-    }
-    if (target_position.isAllFinite() && !discontinuity) {
-      _pre_target = incoming;
-      _pre_last_source_ms = incoming.source_time_boot_ms;
-      const Vector3f velocity(incoming.vn, incoming.ve, incoming.vd);
-      if (velocity.norm() > 0.5f) {
-        _pre_last_direction = velocity.normalized();
-      }
-      if (_pre_path_count == 0 ||
-          (target_position - _pre_path[_pre_path_count - 1]).norm() >= kPathSampleDistance) {
-        if (_pre_path_count == PRE_PATH_CAPACITY) {
-          for (int i = 1; i < PRE_PATH_CAPACITY; ++i) {
-            _pre_path[i - 1] = _pre_path[i];
-          }
-          --_pre_path_count;
-        }
-        _pre_path[_pre_path_count++] = target_position;
-      }
-    }
-  }
+  const bool target_fresh = update_rear_reference(now, local);
 
   const float dt = _pre_last_control_us > 0 && now > _pre_last_control_us
       ? math::constrain((now - _pre_last_control_us) * 1e-6f, 0.002f, 0.1f) : LOOP_DT;
   _pre_last_control_us = now;
-  const uint64_t timeout_us = static_cast<uint64_t>(math::constrain(
-      _param_dock_pre_timeout.get(), int32_t{100}, int32_t{5000})) * 1000ULL;
-  const bool target_fresh = _pre_target.timestamp > 0 && now >= _pre_target.timestamp &&
-      now - _pre_target.timestamp <= timeout_us && _pre_path_count > 0;
+  const auto limits = dynamic_limits();
   Vector3f desired_velocity{};
   uint8_t state = 1;
 
   if (target_fresh) {
     _pre_stale_since = 0;
-    const float age = (now - _pre_target.timestamp) * 1e-6f;
-    const float horizon = math::min(age + 0.25f,
-        math::constrain(_param_dock_pre_predict_time.get(), 0.f, 3.f));
-    _pre_prediction_horizon_s = horizon;
-    const Vector3f velocity(_pre_target.vn, _pre_target.ve, _pre_target.vd);
-    _pre_target_position = _pre_path[_pre_path_count - 1] + velocity * horizon;
-
-    float remaining = math::constrain(_param_dock_pre_distance.get(), 1.f, 1000.f);
-    Vector3f cursor = _pre_target_position;
-    bool reference_ready = false;
-    for (int i = _pre_path_count - 1; i >= 0; --i) {
-      const Vector3f segment = cursor - _pre_path[i];
-      const float length = segment.norm();
-      if (length > 0.001f) {
-        if (length >= remaining) {
-          _pre_reference = cursor - segment * (remaining / length);
-          reference_ready = true;
-          break;
-        }
-        remaining -= length;
-        cursor = _pre_path[i];
-      }
-    }
-    if (!reference_ready && _pre_last_direction.norm() > 0.5f) {
-      _pre_reference = cursor - _pre_last_direction * remaining;
-      reference_ready = true;
-    }
-    if (reference_ready) {
-      _pre_reference_valid = true;
-      _pre_reference(2) -= math::constrain(_param_dock_pre_z_offset.get(), -100.f, 100.f);
+    if (_pre_reference_valid) {
+      const Vector3f velocity(_pre_target.vn, _pre_target.ve, _pre_target.vd);
       if (_startup_climb && std::isfinite(_startup_target_z)) {
         if (local.z <= _startup_target_z + 0.5f) {
           _startup_climb = false;
@@ -269,7 +295,23 @@ void DockGuidance::run_preposition(hrt_abstime now) {
           _pre_reference(2) = math::min(_pre_reference(2), _startup_target_z);
         }
       }
-      desired_velocity = velocity + (_pre_reference - Vector3f(local.x, local.y, local.z)) * kPositionGain;
+      const Vector3f error = _pre_reference - Vector3f(local.x, local.y, local.z);
+      const float distance = error.norm();
+      desired_velocity = velocity;
+      if (distance > .01f) {
+        dock_motion::RelativeContext c{};
+        c.limits = limits;
+        c.deceleration = math::constrain(_param_dock_dec_max.get(), .1f, 20.f);
+        c.up = math::min(math::constrain(_param_dock_acc_max.get(), .1f, 20.f),
+            math::constrain(_param_mpc_acc_up.get(), .1f, 20.f));
+        c.down = math::min(c.deceleration,
+            math::constrain(_param_mpc_acc_down.get(), .1f, 20.f));
+        c.response = math::constrain(_param_dock_pred_response.get(), .05f, 2.f);
+        const float speed = math::min(kPositionGain * distance,
+            dock_motion::rear_stop_speed(distance,
+                (Vector3f(local.vx, local.vy, local.vz) - velocity).norm(), c));
+        desired_velocity += error * (speed / distance);
+      }
       state = 2;
       const Vector2f horizontal_to_target(_pre_target_position(0) - local.x,
                                           _pre_target_position(1) - local.y);
@@ -294,7 +336,6 @@ void DockGuidance::run_preposition(hrt_abstime now) {
 
   _pre_requested_velocity = desired_velocity;
   const Vector3f previous_velocity = _velocity_setpoint_ned;
-  const auto limits = dynamic_limits();
   _velocity_setpoint_ned = desired_velocity;
   constrain_velocity_setpoint(_velocity_setpoint_ned);
   if (_velocity_setpoint_ned.norm() > limits.total && limits.total > 0.f) {

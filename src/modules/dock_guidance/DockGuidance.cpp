@@ -536,6 +536,7 @@ void DockGuidance::reset_tracking_state() {
   _velocity_setpoint_ned.zero();
   _tracking_velocity_ned.zero();
   _yaw_setpoint_rad = NAN;
+  _course_yaw_active = false;
   _commanded_speed_ms = 0.0f;
   _fov_ratio = 0.0f;
   _fov_yaw_ratio = 0.0f;
@@ -853,6 +854,7 @@ void DockGuidance::update_mode_state() {
     _preposition_enabled_for_activation = _param_dock_pre_enable.get();
     _preposition_active = _preposition_enabled_for_activation;
     _preposition_handoff_pending = false;
+    _course_yaw_active = false;
     _pre_reference_valid = false;
     _pre_visual_since = _pre_last_visual_sample = _pre_last_control_us = 0;
     _pre_last_source_ms = _pre_reference_timestamp = _pre_stale_since = 0;
@@ -918,6 +920,7 @@ void DockGuidance::update_mode_state() {
     _preposition_active = false;
     _preposition_handoff_pending = false;
     _preposition_enabled_for_activation = false;
+    _course_yaw_active = false;
     _dock_activation_time = 0;
     publish_thrust_request(now);
     _prediction_ready = _terminal_ready = _capture_terminal_plan = false;
@@ -1885,6 +1888,18 @@ void DockGuidance::compute_control(const Vector3f &att_deg, float obs_dt_s,
     const float yaw_correction =
         matrix::wrap_pi(target_yaw - camera_yaw) * yaw_authority;
     raw_yaw_setpoint = matrix::wrap_pi(current_body_yaw + yaw_correction);
+  }
+
+  // Keep the fuselage along the commanded ground track across the transition
+  // from absolute guidance to visual relative guidance and terminal capture.
+  // Give image centering authority back near the camera FOV boundary.
+  const Vector2f commanded_horizontal(previous_velocity_setpoint_ned(0),
+                                      previous_velocity_setpoint_ned(1));
+  if (_course_yaw_active && !recovery_heading_hold &&
+      commanded_horizontal.norm() > 5.f && _fov_ratio < soft_ratio) {
+    const float course_yaw = atan2f(commanded_horizontal(1), commanded_horizontal(0));
+    raw_yaw_setpoint = dock_motion::far_course_yaw(raw_yaw_setpoint, course_yaw,
+        _fov_ratio, align_ratio, soft_ratio);
   }
 
   const float maximum_yaw_delta = math::radians(

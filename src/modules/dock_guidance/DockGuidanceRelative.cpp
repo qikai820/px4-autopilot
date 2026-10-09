@@ -13,7 +13,12 @@ bool DockGuidance::relative_guidance_enabled() const {
 void DockGuidance::compute_relative_control(const Vector3f &direction, const Vector3f &previous,
     const Dcmf &camera_to_ned, float dt, float align, float soft, bool hard, hrt_abstime now) {
   _relative_guidance_active = true;
-  if (_relative_terminal_active) { relative_terminal(now, false); return; }
+  if (_relative_terminal_active) {
+    _course_yaw_active = _preposition_enabled_for_activation && _airborne;
+    relative_terminal(now, false);
+    return;
+  }
+  _course_yaw_active = false;
   vehicle_local_position_s local{};
   uint64_t sample = 0;
   if (!_local_pos_sub.copy(&local) || !local.xy_valid || !local.z_valid ||
@@ -109,11 +114,42 @@ void DockGuidance::compute_relative_control(const Vector3f &direction, const Vec
   _prediction_cross_sigma = _prediction_cross_velocity_sigma = INFINITY;
 
   const bool ready = _relative_motion.ready(now);
+  const float capture_speed = math::constrain(_param_dock_capture_speed.get(), 0.f, 10.f);
+  float far_speed_limit = capture_speed;
+  Vector3f far_direction{};
+  Vector3f far_target_velocity{};
+  bool far_reference_valid = false;
+  if (_preposition_enabled_for_activation && !ready && _relative_motion.updates() < 4 &&
+      update_rear_reference(now, local) && _pre_reference_valid) {
+    const Vector3f target_line = _pre_target_position - own;
+    const float target_range = target_line.norm();
+    // The ground station position and the image must refer to the same target.
+    // The absolute fix is only a far-field range source; it never makes the
+    // relative observer ready or permits a terminal dash.
+    if (target_line.isAllFinite() && target_range > 1.f &&
+        target_line * direction > 0.82f * target_range &&
+        dock_motion::far_lookahead_direction(own, _pre_reference, _pre_target_position,
+            far_direction)) {
+      far_target_velocity = Vector3f(_pre_target.vn, _pre_target.ve, _pre_target.vd);
+      c.relative = target_line;
+      c.relative_rate = far_target_velocity - _velocity_ned;
+      // The rear point shapes the approach path; it is not a stopping point
+      // after visual handoff. Look ahead to the target across that point so
+      // an early quality-based handoff keeps accelerating without a speed dip.
+      far_speed_limit = c.limits.total;
+      far_reference_valid = true;
+    }
+  }
   // Momentary soft-FOV excursions inhibit further acceleration but do not
   // restart ALIGN or wait for target-speed matching. Sustained hard-FOV
   // excursions retain explicit recovery and the existing yaw protection.
   const bool recovering = _dynamic_recovery.update(now, hard,
       _fov_ratio <= align, _param_dock_recovery_time.get());
+  // Once visual scale is established, keep course-aligned yaw at speed.
+  // Dropping this flag at metric handoff makes the camera-centering yaw turn
+  // the fuselage sideways even while the requested ground track stays straight.
+  _course_yaw_active = _preposition_enabled_for_activation && _airborne && !recovering &&
+      (far_reference_valid || _relative_motion.updates() >= 4);
   Vector3f desired{};
   if (!_airborne) {
     _relative_plan_time = 0;
@@ -140,7 +176,7 @@ void DockGuidance::compute_relative_control(const Vector3f &direction, const Vec
   } else {
     _relative_plan_time = 0;
     _relative_trajectory = {};
-    set_stage(Stage::TRACK_CAPTURE);
+    set_stage(far_reference_valid ? Stage::ACCELERATE : Stage::TRACK_CAPTURE);
     if (_relative_motion.updates() >= 4) {
       // A short loss of metric scale cannot authorize new acceleration or a
       // blind terminal. Preserve continuity while fresh angles can recover it.
@@ -150,12 +186,21 @@ void DockGuidance::compute_relative_control(const Vector3f &direction, const Vec
         return;
       }
     } else {
-      // Entering Dock at speed must not inject a 3 m/s target while the first
-      // relative-rate samples accumulate. Do not demand further acceleration.
-      desired = direction * math::max(previous.norm(),
-          math::constrain(_param_dock_capture_speed.get(), 0.f, 10.f)) +
-          _tracking_velocity_ned;
-      if (_startup_height_hold && std::isfinite(_startup_target_z)) {
+      if (far_reference_valid) {
+        desired = far_target_velocity + far_direction * far_speed_limit +
+            _tracking_velocity_ned;
+        if (_fov_ratio >= soft && desired.norm() > previous.norm() && desired.norm() > .001f) {
+          desired *= previous.norm() / desired.norm();
+        }
+        _startup_climb = _startup_height_hold = false;
+      } else {
+        // Without a fresh absolute fix, brake back to visual capture speed.
+        // Without rear guidance, retain the original fast-entry continuity.
+        const float speed = _preposition_enabled_for_activation ? capture_speed :
+            math::max(previous.norm(), capture_speed);
+        desired = direction * speed + _tracking_velocity_ned;
+      }
+      if (!far_reference_valid && _startup_height_hold && std::isfinite(_startup_target_z)) {
         desired(2) = dock_motion::height_capture_velocity(local.z - _startup_target_z, local.vz,
             c.limits.up, c.down, c.jerk, hard ? 0.f : 1.f);
       }
@@ -168,10 +213,10 @@ void DockGuidance::compute_relative_control(const Vector3f &direction, const Vec
   _velocity_limits_override = plan.limits_override;
   _predicted_fov_ratio = plan.predicted_fov;
   _capture_evidence_valid = _capture_acceleration_ready = ready && !recovering && _airborne;
-  _capture_speed_limit = ready ? c.limits.total : math::constrain(_param_dock_capture_speed.get(), 0.f, 10.f);
+  _capture_speed_limit = ready ? c.limits.total : far_reference_valid ? far_speed_limit : capture_speed;
   _dynamic_reachable = ready && _relative_trajectory.valid;
   _dynamic_closure = (plan.velocity - _velocity_ned - c.relative_rate) * direction;
-  _dynamic_max_closure = ready ? c.limits.total : 0.f;
+  _dynamic_max_closure = ready ? c.limits.total : far_reference_valid ? far_speed_limit : 0.f;
   _prediction_reject = ready ? dock_motion::PredictionReject::NoCrossing : dock_motion::PredictionReject::NoScale;
   if (ready && _airborne && !recovering && !plan.limits_override) {
     _closest_approach = dock_motion::relative_frozen_approach(c, plan.velocity);

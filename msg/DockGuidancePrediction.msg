@@ -8,9 +8,25 @@ float32 point_miss_m                  # predicted three-dimensional closest dist
 float32 point_error_bound_m           # point_miss_m plus twice transverse position uncertainty [m]
 float32 point_time_upper_s            # closest approach time plus a conservative depth-time margin [s]
 float32 height_brake_velocity_m_s     # maximum permitted NED upward velocity after height braking [m/s]
+float32 height_intercept_time_s        # time needed to close target height with limited Z response [s]
+float32 horizontal_arrival_time_s      # time to target horizontal position at measured speed [s]
+float32 height_intercept_speed_m_s     # maximum forward horizontal speed consistent with Z arrival [m/s]
+bool height_intercept_limited          # desired horizontal closure was reduced for height arrival
+bool height_brake_priority             # vertical arrest gets acceleration budget before horizontal braking
+bool trajectory_guidance_active        # bounded 3-D rollout selected the published velocity step
+float32 trajectory_miss_m              # closest distance along the selected constrained rollout [m]
+float32 trajectory_tgo_s               # time to closest point along that rollout [s]
+float32 static_position_error_m        # fixed-target position error including metric scale floor [m]
+float32 static_age_s                   # age of latest accepted fixed-target metric sample [s]
+bool static_target_valid               # automatic stationary hypothesis passed fresh metric and drift gates
+float32 static_speed_bound_m_s         # residual target drift bound retained in stationary predictions [m/s]
+uint8 target_model                     # 0: uncertain/partial estimate, 1: stationary, 2: valid velocity model
 float32 vertical_accel_up_m_s2        # dynamic planner upward acceleration limit [m/s^2]
 float32 vertical_accel_down_m_s2      # dynamic planner downward acceleration limit [m/s^2]
-float32 history_attitude_age_ms       # bounded attitude sample propagation to latest history slot [ms]
+float32 history_attitude_age_ms       # age of attitude snapshot, including samples rejected as stale [ms]
+float32 history_rate_age_ms # age of angular velocity snapshot, including stale samples [ms]
+uint8 hist_update          # 0 ready, 1 no attitude, 2 no angular velocity, 3 attitude time, 4 rate time, 5 propagation
+uint8 hist_align       # 0 ready, 1 invalid exposure, 2 state history unavailable, 3 camera history unavailable, 4 not checked
 float32 radial_velocity_sigma_m_s    # target velocity uncertainty along latest LOS [m/s]
 float32 lateral_velocity_sigma_m_s   # target velocity uncertainty perpendicular to latest LOS [m/s]
 float32 early_vertical_dv_m_s          # vertical capture bias after speed limits, before acceleration/FOV planner [m/s]

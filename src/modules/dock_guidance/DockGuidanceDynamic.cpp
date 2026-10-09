@@ -138,6 +138,7 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
                                            const Dcmf &camera_to_ned, float dt, float align, float soft, bool hard,
                                            hrt_abstime now) {
   _relative_guidance_active = false;
+  _course_yaw_active = false;
   // 动态路径将目标速度跟随、图像纠偏、沿目标视线的闭合速度叠加，
   // 最后统一经过速度/加速度/加加速度和预测视场约束。
   // trusted 需要新鲜的米制目标状态；部分速度跟随可更早启用，但不能提前放行高速闭合。
