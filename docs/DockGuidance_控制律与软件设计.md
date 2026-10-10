@@ -1,5 +1,7 @@
 # Dock Guidance 控制律与软件设计
 
+上机配置、模式进入、参数速查和诊断步骤见 [DockGuidance 用户使用说明](DockGuidance_用户使用说明.md)。
+
 ## 1. 设计目标
 
 Dock Guidance 同时支持固定安装相机和单轴俯仰舵机相机。正常高速阶段以 `DOCK_VEL_MAX` 为三维速度预算，目标居中时速度方向沿目标 LOS。固定相机用垂直平移修正图像误差；俯仰舵机相机用慢速机身相对角度调整保持构图，舵机不承担姿态增稳。
@@ -20,7 +22,12 @@ viztra_observation
     -> mc_att_control
     -> mc_rate_control
     -> control_allocator
+
+MT6701 (I2C) -> sensor_encoder -> DockGuidance 相机角度历史
+DockGuidance -> gimbal_controls -> Gimbal Pitch (421) 舵机输出
 ```
+
+编码器只提供相机相对机体的**实测俯仰角**，参与视觉 LOS 的坐标变换；舵机仍由视觉俯仰误差生成原有命令，编码器不进入舵机控制律。`DOCK_CAM_ENC_EN=0` 时继续使用命令角历史。
 
 Dock 外部模式使能：
 
@@ -46,6 +53,7 @@ flag_control_allocation_enabled
 | `vehicle_angular_velocity` | 延迟对齐历史和模式健康检查 |
 | `vehicle_local_position` | EKF 融合速度、接近速度和位置有效性 |
 | `vehicle_status` | Dock 模式激活状态 |
+| `sensor_encoder` | MT6701 原始绝对角、采样时间和设备 ID；启用编码器后用于曝光时刻的相机俯仰角 |
 
 ### 3.2 输出
 
@@ -54,6 +62,7 @@ flag_control_allocation_enabled
 | `trajectory_setpoint` | NED 三维速度和偏航设定值 |
 | `dock_guidance_setpoint` | 阶段、速度向量、距离、FOV 余量和有效位 |
 | `config_control_setpoints` | 声明 Dock 模式使用 PX4 位置/姿态/角速度控制链 |
+| `gimbal_controls` | 单轴相机舵机的俯仰命令；不接受编码器角度反馈 |
 
 ## 4. LOS 与相对位置
 
@@ -76,6 +85,8 @@ l_c=\begin{bmatrix}
 \]
 
 通过相机安装矩阵和机体姿态转换到 NED，并对单位向量低通滤得到 `los_ned_unit`。
+
+相机安装矩阵使用 `DOCK_CAM_ROLL`、**曝光时刻俯仰角**、`DOCK_CAM_YAW` 构造。曝光时刻为 `viztra_observation.timestamp_sample - DOCK_CAM_DLY`。关闭 `DOCK_CAM_ENC_EN` 时，俯仰角来自历史舵机命令（固定相机时为 `DOCK_CAM_PITCH`）；开启时，来自 `sensor_encoder.raw_angle` 经零位、方向换算后的实测历史。机体姿态、本机位置和相机角度在同一个曝光时刻取样；实测历史不足时拒绝该帧，不把当前角或舵机命令代入旧图像。详细换算、时序与故障条件见 [MT6701 相机角度使用说明](DockGuidance_MT6701_相机角度使用说明.md)。
 
 `relative_n_m/e_m/d_m` 用于计算斜距：
 
@@ -126,9 +137,9 @@ v_{track}=-d K_{img}e_{remaining}
 
 `DOCK_CAM_SERVO=1` 时，垂直图像居中改由相机俯仰舵机负责，飞行器不再同时生成垂直图像平移修正，避免两个执行机构争抢同一误差。水平误差仍由机体 yaw 设定值处理。
 
-舵机只使用相机坐标系中的持续俯仰误差：误差先经过 `DOCK_CAM_P_DB` 死区，再除以 `DOCK_CAM_P_TC` 得到慢速角度变化率，并受 `DOCK_CAM_P_RATE` 限制。舵机指令不使用机体姿态或角速度，因此不是增稳云台。当前舵机指令角同时更新相机到机体的安装矩阵，用于下一帧 LOS 转换。
+舵机只使用相机坐标系中的持续俯仰误差：误差先经过 `DOCK_CAM_P_DB` 死区，再除以 `DOCK_CAM_P_TC` 得到慢速角度变化率，并受 `DOCK_CAM_P_RATE` 限制。舵机指令不使用机体姿态、角速度或编码器反馈，因此不是增稳云台。`DOCK_CAM_ENC_EN=0` 时，曝光时刻的舵机命令历史用于相机到机体矩阵；`DOCK_CAM_ENC_EN=1` 时改用 MT6701 实测角历史，舵机命令本身不变。
 
-将一个未使用的 PWM 输出功能设置为 `Gimbal Pitch (421)`。`DOCK_CAM_P_MIN/MAX` 分别映射到归一化输出 -1/+1；方向相反时使用该 PWM 通道的反向参数。该直接输出方式不需要启动 PX4 gimbal 模块，建议保持 `MNT_MODE_IN=-1`，避免多个发布者同时控制同一个输出。
+将一个未使用的 PWM 输出功能设置为 `Gimbal Pitch (421)`。`DOCK_CAM_P_MIN/MAX` 中较小/较大角度分别映射到归一化输出 -1/+1；方向相反时使用该 PWM 通道的反向参数。该直接输出方式不需要启动 PX4 gimbal 模块，建议保持 `MNT_MODE_IN=-1`，避免多个发布者同时控制同一个输出。
 
 ### 6.2 对准阶段
 
@@ -280,6 +291,10 @@ s_{target}=\max\left(
 |---|---:|---|
 | `DOCK_CAM_DLY` | 0 ms | 相机延迟补偿 |
 | `DOCK_CAM_SERVO` | 0 | 0=固定镜头，1=单轴俯仰舵机镜头 |
+| `DOCK_CAM_ROLL/PITCH/YAW` | -90/0/0 deg | 相机到机体安装欧拉角；启用编码器时俯仰分量由实测角替换，`DOCK_CAM_PITCH` 不与实测值相加 |
+| `DOCK_CAM_ENC_EN` | 0 | 1=用 MT6701 实测俯仰角计算相机到机体矩阵；需要有效零位和新鲜数据 |
+| `DOCK_CAM_ENC_Z` | -1 count | 相机相对机体零度时的 MT6701 原始计数；-1 表示未标定 |
+| `DOCK_CAM_ENC_REV` | 0 | 1=反转实测俯仰角符号；与舵机 PWM 反向设置无关 |
 | `DOCK_CAM_P_MIN/MAX` | 0/90 deg | 舵机机械角度范围，对应输出 -1/+1 |
 | `DOCK_CAM_P_RATE` | 5 deg/s | 舵机最大慢速转动速率 |
 | `DOCK_CAM_P_TC` | 2 s | 图像俯仰误差到舵机角速度的时间常数 |
@@ -307,6 +322,8 @@ s_{target}=\max\left(
 | `DOCK_STOP_DIST` | 2.0 m | 速度包络降为零的距离 |
 | `DOCK_VIS_GRACE` | 300 ms | 短时视觉丢失宽限 |
 
+相机与编码器参数的取值范围、标定命令、启用步骤、诊断字段及故障处理见 [MT6701 相机角度使用说明](DockGuidance_MT6701_相机角度使用说明.md)。
+
 ### 11.1 终端冲刺参数
 
 | 参数 | 建议初值 | 说明 |
@@ -325,6 +342,7 @@ s_{target}=\max\left(
 
 ```text
 listener viztra_observation -n 5
+listener sensor_encoder -n 5
 listener dock_guidance_setpoint -n 5
 listener trajectory_setpoint -n 5
 listener vehicle_local_position -n 5
@@ -333,4 +351,4 @@ listener vehicle_attitude_setpoint -n 5
 listener vehicle_status -n 5
 ```
 
-ULog 必须包含 `viztra_observation`、`dock_guidance_setpoint`、`trajectory_setpoint`、`vehicle_local_position`、`vehicle_local_position_setpoint`、`vehicle_attitude_setpoint` 和 `vehicle_status`。实现终端冲刺后还必须记录终端进入原因、终端计时器、最后有效 LOS、视觉丢失计时和对接完成输入。编译通过只证明软件接口正确，不代表 40 m/s 高速飞行已经通过仿真或实飞验证。
+启用编码器时，检查 ULog 的 `sensor_encoder`、`dock_guidance_setpoint.exposure_timestamp`、`sample_mount_pitch_deg` 和 `camera_time_aligned`；`camera_mount_pitch_deg` 是舵机命令角，可与实测角对照。其余高速测试所需 ULog 包含 `viztra_observation`、`trajectory_setpoint`、`vehicle_local_position`、`vehicle_local_position_setpoint`、`vehicle_attitude_setpoint` 和 `vehicle_status`。实现终端冲刺后还必须记录终端进入原因、终端计时器、最后有效 LOS、视觉丢失计时和对接完成输入。编译通过只证明软件接口正确，不代表高速飞行已经通过仿真或实飞验证。

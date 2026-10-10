@@ -43,3 +43,30 @@ selected address by reading the angle registers, so a successful probe
 confirms communication but cannot identify the chip if another device uses
 that address. Failed reads are counted in `mt6701 status` and do not publish
 new angle samples.
+
+## DockGuidance camera pitch feedback
+
+DockGuidance can use this encoder for the actual body-relative camera pitch.
+It assumes one MT6701 with direct 1:1 drive and a camera range shorter than
+180 degrees. Start the driver on the wired bus before enabling feedback.
+
+With the vehicle disarmed, put the camera at its body-relative zero pitch and
+run `dock_guidance calib_zero`. This stores the current raw count in
+`DOCK_CAM_ENC_Z`; it does not program the MT6701 EEPROM. Move the camera a
+known amount in the positive pitch direction. If the reported calibrated
+angle moves negative, set `DOCK_CAM_ENC_REV` to 1. At 90 degrees, the raw
+reading should be about 4096 counts from zero, allowing for wrap at 16383.
+The 90-degree point is a check, not a second calibration point.
+
+Set `DOCK_CAM_ENC_EN` to 1 only after this check. When enabled, DockGuidance
+time-aligns measured pitch to the image exposure and uses it in the
+camera-to-body rotation. The encoder does not close the servo control loop;
+the existing image-error-based servo command is unchanged. `camera_mount_pitch_deg` in
+`dock_guidance_setpoint` remains the servo command;
+`sample_mount_pitch_deg` is the pitch used for the image. If a fresh valid
+sample is unavailable, DockGuidance invalidates guidance instead of using
+the commanded angle. `dock_guidance status` prints the encoder raw count,
+calibrated pitch, sample age and readiness.
+
+For parameter defaults, limits, calibration steps and failure handling, see
+[DockGuidance MT6701 camera pitch guide](../../../../docs/DockGuidance_MT6701_相机角度使用说明.md).

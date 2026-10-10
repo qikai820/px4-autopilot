@@ -8,9 +8,12 @@
 flowchart LR
     V[Viztra 视觉板] --> O[viztra_observation]
     O --> D[DockGuidance]
+    M[MT6701 I2C] --> E[sensor_encoder]
+    E --> D
     A[vehicle_attitude] --> D
     P[vehicle_local_position] --> D
     D --> S[dock_guidance_setpoint]
+    D --> G[gimbal_controls / 舵机命令]
     D --> T[trajectory_setpoint]
     T --> PC[mc_pos_control]
     PC --> AC[mc_att_control]
@@ -20,6 +23,8 @@ flowchart LR
 
 DockGuidance 不再直接把接近速度误差加到油门。它生成 NED 三维速度设定值，推力、高度和姿态耦合由 PX4 标准多旋翼位置控制器处理。
 
+`sensor_encoder` 仅提供相机真实俯仰角供坐标变换使用；`gimbal_controls` 的视觉误差舵机控制律保持不变。使用和标定见 [MT6701 相机角度使用说明](DockGuidance_MT6701_相机角度使用说明.md)。
+
 ## 单帧处理
 
 ```mermaid
@@ -27,8 +32,14 @@ flowchart TD
     A[新视觉帧] --> B{时间戳和 valid 有效?}
     B -->|no| LOSS[视觉丢失处理]
     B -->|yes| C[像素/角度 -> 相机 LOS]
-    C --> D[延迟对齐姿态]
-    D --> E[LOS -> NED 并滤波]
+    C --> D[确定曝光时刻并对齐机体姿态]
+    D --> P{DOCK_CAM_ENC_EN?}
+    P -->|0| CMD[取曝光时刻舵机命令角历史]
+    P -->|1| ENC[取曝光时刻 MT6701 实测角历史]
+    CMD --> CAM_HIST{角度历史可用?}
+    ENC --> CAM_HIST
+    CAM_HIST -->|yes| E[相机安装矩阵: LOS -> NED 并滤波]
+    CAM_HIST -->|no| INV[setpoint invalid]
     E --> F{本地速度有效?}
     F -->|no| INV[setpoint invalid]
     F -->|yes| R{相对 NED 位置有效?}

@@ -20,7 +20,7 @@ float32 camera_pitch_deg             # camera-frame pitch error [deg] (up-positi
 float32 camera_mount_pitch_deg       # commanded body-relative camera pitch [deg]
 float32 yaw_setpoint_deg             # slew-limited vehicle yaw setpoint [deg]
 
-uint8 stage                          # 0=NONE 1=ALIGN 2=ACCEL 3=MAX_SPEED 4=BRAKE 5=RECOVERY 6=EMERGENCY_RECOVERY 7=TERMINAL_DASH 8=PASS_PREDICTED 9=STARTUP_CLIMB 10=TRACK_CAPTURE
+uint8 stage                          # 0=NONE 1=ALIGN 2=ACCEL 3=MAX_SPEED 4=BRAKE 5=RECOVERY 6=EMERGENCY_RECOVERY 7=TERMINAL_DASH 8=PASS_PREDICTED 9=STARTUP_CLIMB 10=TRACK_CAPTURE 11=PRE_POSITION
 bool velocity_valid                  # fused local velocity is fresh and finite
 bool relative_position_valid         # fresh finite target-relative NED position is available
 bool camera_servo_enabled            # true when slow camera pitch-servo tracking is enabled
@@ -57,9 +57,9 @@ float32[3] capture_command_ned
 float32[3] desired_velocity_ned       # before final acceleration/FOV planning
 float32[3] command_acceleration_ned   # difference of actual published velocity commands
 
-# Exposure alignment uses camera COMMAND history, not measured mount feedback.
+# Exposure alignment selects servo command history or MT6701 measured history.
 uint64 exposure_timestamp             # timestamp_sample minus DOCK_CAM_DLY, microseconds
-float32 sample_mount_pitch_deg        # command angle in effect at exposure [deg]
+float32 sample_mount_pitch_deg        # camera pitch selected for exposure-time transform [deg]
 bool camera_time_aligned              # supporting camera/body history found, no visual dropout
 bool prediction_valid                 # trusted approaching state within correction horizon
 float32 prediction_tgo_s              # time to approach plane under nominal first-order response [s]

@@ -414,6 +414,8 @@ Viztra 驱动的 `timestamp_sample` 是完整串口帧接收时刻。统一曝�
 相机指令按发布时刻入历史；曝光时刻早于历史覆盖范围则拒绝该次引导。
 相机标定、舵机范围或延迟改变时清除相关观测历史。
 
+当前可选的 MT6701 路径使曝光时刻的相机俯仰角改取编码器实测历史；关闭 `DOCK_CAM_ENC_EN` 时，上述命令角历史逻辑仍适用。舵机命令不受编码器控制。启用、零位和时间有效性规则见 [MT6701 相机角度使用说明](DockGuidance_MT6701_相机角度使用说明.md)。
+
 log_86 暴露了单帧历史缺失直接锁存 RTL 的问题。随后把历史缺口直接送入普通
 视觉恢复，又会清空捕获确认并进入 `RECOVERY`，使恢复后重新受 3 m/s 初始限速，
 或在可信接近路径中先减速再对准。短暂历史缺口现在单独处理：
@@ -514,7 +516,7 @@ XY/升降速度限制、三维加速度、jerk 和预测 FOV 规划。这些原�
 
 `dock_guidance_setpoint` 增加以下字段，已有 UDP 通用序列化会一并输出：
 
-- `exposure_timestamp`、`sample_mount_pitch_deg`、`camera_time_aligned`：实际采用的曝光时间与历史指令角。
+- `exposure_timestamp`、`sample_mount_pitch_deg`、`camera_time_aligned`：实际采用的曝光时间、所选角度来源在该时刻的俯仰角及对齐状态；编码器启用时角度来自实测历史，否则来自命令角历史。
 - `prediction_valid`、`prediction_tgo_s`：预测修正是否有可信输入及预测时间。
 - `prediction_miss_ned[3]`：使用原期望速度和一阶响应得到的三维残差（米）。
 - `prediction_dv_ned[3]`：速度限制后、加速度/FOV 规划前的修正量（m/s）；不是最终实速变化。
