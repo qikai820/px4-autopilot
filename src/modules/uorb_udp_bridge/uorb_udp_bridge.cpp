@@ -442,10 +442,12 @@ private:
 	{
 		char text[192];
 		const bool valid = std::isfinite(value) && fabs(value) <= VALUE_LIMIT;
+		// Keep eight significant digits and a stable JSON floating-point type,
+		// including at zero and integer values, for typed parsers such as PlotJuggler 4.
 		const int length = valid
 				  ? ((array_size > 1)
-				     ? snprintf(text, sizeof(text), ",\"%s/%s%u\":%.8g", _topic, name, index, value)
-				     : snprintf(text, sizeof(text), ",\"%s/%s\":%.8g", _topic, name, value))
+				     ? snprintf(text, sizeof(text), ",\"%s/%s%u\":%.7e", _topic, name, index, value)
+				     : snprintf(text, sizeof(text), ",\"%s/%s\":%.7e", _topic, name, value))
 				  : ((array_size > 1)
 				     ? snprintf(text, sizeof(text), ",\"%s/%s%u\":null", _topic, name, index)
 				     : snprintf(text, sizeof(text), ",\"%s/%s\":null", _topic, name));
