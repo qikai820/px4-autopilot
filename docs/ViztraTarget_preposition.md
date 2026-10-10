@@ -12,7 +12,7 @@
 
 以下二进制格式只用于 `9872` QGC 输入，与调试 JSON 相互独立。
 
-UDP `9872` 的修订目标仍使用 64 字节小端 `UavInfo` 帧：`EB 90` 同步头、长度 `64`、序号、帧 ID `0x30`，经纬度原始 `int32 × 1e-6°`，MSL 高度原始 `uint16 × 0.1 m`，水平地速原始 `uint16 × 0.1 m/s`，目标机头航向原始 `uint16 × 0.1°`；其余字节沿用现有布局，结尾为 `90 EB`。**目前只更新文档，仿真发送端与 QGC 接收端源码仍使用旧系数，须同步改完两端后才能按此格式运行。**完整字节偏移、示例和可表示范围见 [仿真到 QGC 的目标位置协议与使用说明](Viztra_仿真到QGC目标协议与使用说明.md)。协议不校验 checksum，也不从 `recv[35]` 解析速度。QGC 从连续位置估计航迹方向，结合地速形成 NED 速度，再通过当前飞行器主链路发送 MAVLink 2 `VIZTRA_TARGET`（ID 47001，源 component 25）。PX4 只接收发给本机且源 component 为 25 的有效消息，并发布 `viztra_target` uORB。此消息的 XML 定义在 PX4 与 QGC 的 `src/modules/mavlink/viztra.xml`、`src/MAVLink/viztra.xml`，两份必须保持一致。
+UDP `9872` 使用 64 字节小端 `UavInfo` 帧：`EB 90` 同步头、长度 `64`、序号、帧 ID `0x30`，经纬度原始 `int32 × 1e-6°`，MSL 高度原始 `uint16 × 0.1 m`，水平地速原始 `uint16 × 0.1 m/s`，目标机头航向原始 `uint16 × 0.1°`；其余字节沿用现有布局，结尾为 `90 EB`。**仿真发送端与 QGC 接收端源码已同步，运行前仍须确认两端都使用新构建程序。**完整字节偏移、示例和可表示范围见 [仿真到 QGC 的目标位置协议与使用说明](Viztra_仿真到QGC目标协议与使用说明.md)。协议不校验 checksum，也不从 `recv[35]` 解析速度。QGC 从连续位置估计航迹方向，结合地速形成 NED 速度，再通过当前飞行器主链路发送 MAVLink 2 `VIZTRA_TARGET`（ID 47001，源 component 25）。PX4 只接收发给本机且源 component 为 25 的有效消息，并发布 `viztra_target` uORB。此消息的 XML 定义在 PX4 与 QGC 的 `src/modules/mavlink/viztra.xml`、`src/MAVLink/viztra.xml`，两份必须保持一致。
 
 ## DockGuidance 行为
 
