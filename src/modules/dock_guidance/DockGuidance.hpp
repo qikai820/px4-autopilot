@@ -49,6 +49,7 @@
 #include <uORB/topics/parameter_update.h>
 #include <uORB/topics/register_ext_component_reply.h>
 #include <uORB/topics/register_ext_component_request.h>
+#include <uORB/topics/sensor_encoder.h>
 #include <uORB/topics/trajectory_setpoint.h>
 #include <uORB/topics/unregister_ext_component.h>
 #include <uORB/topics/vehicle_angular_velocity.h>
@@ -148,6 +149,8 @@ private:
   void update_camera_pitch_servo(float camera_pitch_error_deg, float dt_s,
                                  hrt_abstime timestamp_sample);
   void publish_camera_pitch_servo(hrt_abstime timestamp_sample);
+  void update_camera_encoder(hrt_abstime now);
+  bool camera_encoder_ready(hrt_abstime now) const;
   bool preposition_entry_ready(hrt_abstime now);
   bool update_rear_reference(hrt_abstime now, const vehicle_local_position_s &local);
   void point_camera_to_preposition_target(hrt_abstime now,
@@ -222,6 +225,7 @@ private:
   uORB::Subscription _gyro_sub{ORB_ID(vehicle_angular_velocity)};
   uORB::Subscription _local_pos_sub{ORB_ID(vehicle_local_position)};
   uORB::Subscription _viztra_target_sub{ORB_ID(viztra_target)};
+  uORB::Subscription _camera_encoder_sub{ORB_ID(sensor_encoder)};
   uORB::Subscription _vehicle_thrust_sub{ORB_ID(vehicle_thrust_setpoint)};
   uORB::Subscription _hover_thrust_sub{ORB_ID(hover_thrust_estimate)};
   uORB::Subscription _vehicle_status_sub{ORB_ID(vehicle_status)};
@@ -359,6 +363,13 @@ private:
   bool _camera_servo_armed{false};
   hrt_abstime _last_camera_pitch_publish_us{0};
   dock_motion::CameraHistory<1024> _camera_history;
+  dock_motion::EncoderPitchHistory<601> _camera_encoder_history;
+  hrt_abstime _encoder_last_sample_us{0};
+  hrt_abstime _encoder_pitch_sample_us{0};
+  uint32_t _encoder_device_id{0};
+  uint16_t _encoder_raw_angle{0};
+  float _encoder_pitch_deg{NAN};
+  bool _encoder_fault{false};
   hrt_abstime _observation_exposure_us{0};
   float _sample_camera_pitch_deg{NAN};
   bool _camera_time_aligned{false};
@@ -478,6 +489,9 @@ private:
       (ParamFloat<px4::params::DOCK_CAM_ROLL>)_param_dock_cam_roll,
       (ParamFloat<px4::params::DOCK_CAM_PITCH>)_param_dock_cam_pitch,
       (ParamInt<px4::params::DOCK_CAM_SERVO>)_param_dock_cam_pitch_variable,
+      (ParamInt<px4::params::DOCK_CAM_ENC_EN>)_param_dock_cam_encoder_enable,
+      (ParamInt<px4::params::DOCK_CAM_ENC_Z>)_param_dock_cam_encoder_zero,
+      (ParamInt<px4::params::DOCK_CAM_ENC_REV>)_param_dock_cam_encoder_reverse,
       (ParamFloat<px4::params::DOCK_CAM_P_MIN>)_param_dock_cam_pitch_min,
       (ParamFloat<px4::params::DOCK_CAM_P_MAX>)_param_dock_cam_pitch_max,
       (ParamFloat<px4::params::DOCK_CAM_P_RATE>)_param_dock_cam_pitch_rate,

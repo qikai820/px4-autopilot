@@ -100,6 +100,60 @@ private:
   int _next{0}, _count{0};
 };
 
+// MT6701 is single-turn. The camera is limited to less than 180 degrees, so
+// the shortest signed distance from the mechanical zero needs no turn count.
+inline bool encoder_pitch_deg(uint16_t raw, int32_t zero, bool reverse,
+                              float minimum, float maximum, float &pitch) {
+  if (raw >= 16384 || zero < 0 || zero >= 16384 ||
+      !std::isfinite(minimum) || !std::isfinite(maximum)) { return false; }
+  const int32_t delta = (int32_t(raw) - zero + 16384 + 8192) % 16384 - 8192;
+  pitch = (reverse ? -1.f : 1.f) * delta * (360.f / 16384.f);
+  // A small allowance covers sensor noise at the mechanical end stops.
+  return pitch >= minimum - 5.f && pitch <= maximum + 5.f;
+}
+
+// Unlike a servo command, a measured angle has a sample time and must never
+// be held indefinitely. Interpolate only across a short valid sample gap.
+template<int Capacity> class EncoderPitchHistory {
+public:
+  void reset() { _next = _count = 0; }
+  void record(uint64_t time, float pitch) {
+    if (!time || !std::isfinite(pitch)) { return; }
+    if (_count && time <= _times[(_next + Capacity - 1) % Capacity]) { reset(); }
+    _times[_next] = time;
+    _pitches[_next] = pitch;
+    _next = (_next + 1) % Capacity;
+    if (_count < Capacity) { ++_count; }
+  }
+  bool at(uint64_t exposure, float &pitch) const {
+    if (!_count) { return false; }
+    const int oldest = (_next + Capacity - _count) % Capacity;
+    if (exposure < _times[oldest]) { return false; }
+    for (int n = 0; n < _count; ++n) {
+      const int i = (_next + Capacity - 1 - n) % Capacity;
+      if (_times[i] <= exposure) {
+        if (n == 0) {
+          if (exposure - _times[i] > 20000) { return false; }
+          pitch = _pitches[i];
+          return true;
+        }
+        const int next = (i + 1) % Capacity;
+        const uint64_t gap = _times[next] - _times[i];
+        if (gap == 0 || gap > 40000) { return false; }
+        const float fraction = float(exposure - _times[i]) / float(gap);
+        pitch = _pitches[i] + fraction * (_pitches[next] - _pitches[i]);
+        return true;
+      }
+    }
+    return false;
+  }
+private:
+  static_assert(Capacity > 1, "encoder history needs two samples");
+  uint64_t _times[Capacity]{};
+  float _pitches[Capacity]{};
+  int _next{0}, _count{0};
+};
+
 inline bool exposure_time(uint64_t received, uint64_t delay, uint64_t &exposure) {
   // Viztra 时间戳为接收时刻；仅在可减去标定延迟时给出合法曝光时刻。
   if (!received || received <= delay) { return false; }

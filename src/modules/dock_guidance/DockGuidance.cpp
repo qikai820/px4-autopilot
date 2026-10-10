@@ -34,9 +34,13 @@
 #include "ImageTracking.hpp"
 
 #include <drivers/drv_hrt.h>
+#include <drivers/drv_sensor.h>
+#include <lib/drivers/device/Device.hpp>
 #include <mathlib/math/Functions.hpp>
 #include <mathlib/math/Limits.hpp>
+#include <parameters/param.h>
 #include <px4_platform_common/log.h>
+#include <px4_platform_common/tasks.h>
 
 #include <cmath>
 #include <cstring>
@@ -95,6 +99,7 @@ void DockGuidance::Run() {
   }
 
   const uint64_t now_us = hrt_absolute_time();
+  update_camera_encoder(now_us);
 
   if (_mode_id < 0 || _arming_check_id < 0) {
     if ((_last_registration_request_us == 0) ||
@@ -120,7 +125,7 @@ void DockGuidance::Run() {
     maybe_request_exit_mode(now_us);
   }
 
-  // 首帧到达前也定期重发相机俯仰命令；先同步解锁状态，避免重发未解锁前的旧角度。
+  // 舵机仍按原视觉控制律发命令；编码器只用于相机坐标变换。
   if ((_param_dock_cam_pitch_variable.get() != 0) &&
       ((_last_camera_pitch_publish_us == 0) ||
        (now_us - _last_camera_pitch_publish_us >= CAMERA_SERVO_PUBLISH_INTERVAL_US))) {
@@ -128,6 +133,16 @@ void DockGuidance::Run() {
   }
 
   push_delay_history(now_us);
+
+  if (_dock_mode_active && _param_dock_cam_encoder_enable.get() &&
+      (_mode_fault_latched || !camera_encoder_ready(now_us))) {
+    if (!_mode_fault_latched) {
+      invalidate_setpoint(now_us, "camera encoder unavailable");
+    } else {
+      publish_safe_velocity_setpoint(now_us);
+    }
+    return;
+  }
 
   if (_dock_mode_active && _preposition_active) {
     run_preposition(now_us);
@@ -217,7 +232,7 @@ void DockGuidance::Run() {
     return;
   }
 
-  // 同一个曝光时刻同时查询机体姿态、本机位置和云台命令历史。
+  // 同一个曝光时刻同时查询机体姿态、本机位置和相机角度历史。
   // Viztra 的 timestamp_sample 表示接收时刻，只减一次 DOCK_CAM_DLY；
   // 任一历史缺失就不以不同时刻的数据拼接出控制指令。
   Vector3f att_deg;
@@ -226,9 +241,15 @@ void DockGuidance::Run() {
   const uint64_t delay_us = static_cast<uint64_t>(math::constrain(
       _param_dock_cam_dly.get(), int32_t{0}, int32_t{5000})) * 1000ULL;
   if (!dock_motion::exposure_time(sample_us, delay_us, _observation_exposure_us) ||
-      !get_delayed_state(_observation_exposure_us, att_deg, gyro_dps) ||
-      !_camera_history.at(_observation_exposure_us, _sample_camera_pitch_deg)) {
+      !get_delayed_state(_observation_exposure_us, att_deg, gyro_dps)) {
     invalidate_setpoint(now_us, "exposure state/camera history unavailable");
+    return;
+  }
+  const bool pitch_available = _param_dock_cam_encoder_enable.get()
+      ? _camera_encoder_history.at(_observation_exposure_us, _sample_camera_pitch_deg)
+      : _camera_history.at(_observation_exposure_us, _sample_camera_pitch_deg);
+  if (!pitch_available) {
+    invalidate_setpoint(now_us, "exposure camera pitch unavailable");
     return;
   }
   _camera_time_aligned = true;
@@ -825,6 +846,7 @@ void DockGuidance::reply_to_arming_check(
   reply.health_component_index =
       arming_check_reply_s::HEALTH_COMPONENT_INDEX_NONE;
   reply.can_arm_and_run = !_mode_fault_latched &&
+      (!_param_dock_cam_encoder_enable.get() || camera_encoder_ready(reply.timestamp)) &&
       (_setpoint_valid || (_param_dock_pre_enable.get() && preposition_entry_ready(reply.timestamp)));
   reply.mode_req_angular_velocity = true;
   reply.mode_req_attitude = true;
@@ -1337,6 +1359,58 @@ void DockGuidance::publish_camera_pitch_servo(hrt_abstime timestamp_sample) {
   // 历史记录采用命令实际发布时刻，不回填到触发命令的图像时刻；
   // 硬件传输和机械滞后没有反馈，不能在历史中假装已补偿。
   _camera_history.record(controls.timestamp, _camera_mount_pitch_deg);
+}
+
+void DockGuidance::update_camera_encoder(hrt_abstime now) {
+  sensor_encoder_s encoder{};
+  if (!_camera_encoder_sub.update(&encoder)) { return; }
+
+  device::Device::DeviceId id{};
+  id.devid = encoder.device_id;
+  const hrt_abstime sample = encoder.timestamp_sample;
+  if (id.devid_s.devtype != DRV_ENC_DEVTYPE_MT6701 ||
+      encoder.raw_angle >= 16384 || sample == 0 ||
+      sample > encoder.timestamp || encoder.timestamp > now ||
+      now - sample > 50_ms ||
+      (_encoder_last_sample_us && sample <= _encoder_last_sample_us) ||
+      (_encoder_device_id && encoder.device_id != _encoder_device_id)) {
+    _encoder_fault = true;
+    return;
+  }
+
+  _encoder_device_id = encoder.device_id;
+  _encoder_last_sample_us = sample;
+  _encoder_raw_angle = encoder.raw_angle;
+
+  const float minimum = math::min(_param_dock_cam_pitch_min.get(), _param_dock_cam_pitch_max.get());
+  const float maximum = math::max(_param_dock_cam_pitch_min.get(), _param_dock_cam_pitch_max.get());
+  float pitch = NAN;
+  if (!dock_motion::encoder_pitch_deg(encoder.raw_angle, _param_dock_cam_encoder_zero.get(),
+      _param_dock_cam_encoder_reverse.get(), minimum, maximum, pitch)) {
+    _encoder_fault = true;
+    return;
+  }
+
+  // The servo is rate limited; a much faster apparent jump indicates an
+  // unusable reading, not a camera movement to interpolate through.
+  if (_encoder_pitch_sample_us && sample > _encoder_pitch_sample_us &&
+      sample - _encoder_pitch_sample_us < 100_ms &&
+      fabsf(pitch - _encoder_pitch_deg) >
+          5.f + 90.f * (sample - _encoder_pitch_sample_us) * 1e-6f) {
+    _encoder_fault = true;
+    return;
+  }
+
+  _encoder_pitch_deg = pitch;
+  _encoder_pitch_sample_us = sample;
+  _encoder_fault = false;
+  _camera_encoder_history.record(sample, pitch);
+}
+
+bool DockGuidance::camera_encoder_ready(hrt_abstime now) const {
+  return _param_dock_cam_encoder_zero.get() >= 0 &&
+         !_encoder_fault && _encoder_last_sample_us != 0 &&
+         now >= _encoder_last_sample_us && now - _encoder_last_sample_us <= 50_ms;
 }
 
 void DockGuidance::set_stage(Stage stage) {
@@ -2299,6 +2373,8 @@ void DockGuidance::update_parameters() {
   const float old_observation_config[] = {
       _param_dock_cam_roll.get(), _param_dock_cam_pitch.get(), _param_dock_cam_yaw.get(),
       float(_param_dock_cam_dly.get()), float(_param_dock_cam_pitch_variable.get()),
+      float(_param_dock_cam_encoder_enable.get()), float(_param_dock_cam_encoder_zero.get()),
+      float(_param_dock_cam_encoder_reverse.get()),
       _param_dock_res_x.get(), _param_dock_res_y.get(),
       _param_dock_fov_x.get(), _param_dock_fov_y.get(),
       _param_dock_target_width.get(), _param_dock_target_height.get(), _param_dock_size_error.get(),
@@ -2307,6 +2383,8 @@ void DockGuidance::update_parameters() {
   const float observation_config[] = {
       _param_dock_cam_roll.get(), _param_dock_cam_pitch.get(), _param_dock_cam_yaw.get(),
       float(_param_dock_cam_dly.get()), float(_param_dock_cam_pitch_variable.get()),
+      float(_param_dock_cam_encoder_enable.get()), float(_param_dock_cam_encoder_zero.get()),
+      float(_param_dock_cam_encoder_reverse.get()),
       _param_dock_res_x.get(), _param_dock_res_y.get(),
       _param_dock_fov_x.get(), _param_dock_fov_y.get(),
       _param_dock_target_width.get(), _param_dock_target_height.get(), _param_dock_size_error.get(),
@@ -2333,6 +2411,10 @@ void DockGuidance::update_parameters() {
     _early_vertical_bias = 0.f;
     if (observation_changed) {
       _camera_history.reset();
+      _camera_encoder_history.reset();
+      _encoder_last_sample_us = _encoder_pitch_sample_us = 0;
+      _encoder_pitch_deg = NAN;
+      _encoder_fault = false;
       _camera_time_aligned = false;
       _filt_initialized = false;
       _deriv_count = 0;
@@ -2408,6 +2490,77 @@ int DockGuidance::task_spawn(int argc, char *argv[]) {
 }
 
 int DockGuidance::custom_command(int argc, char *argv[]) {
+  if (argc > 0 && !strcmp(argv[0], "calib_zero")) {
+    uORB::Subscription status_sub{ORB_ID(vehicle_status)};
+    uORB::Subscription encoder_sub{ORB_ID(sensor_encoder)};
+    vehicle_status_s status{};
+    const hrt_abstime start = hrt_absolute_time();
+    if (!status_sub.copy(&status) || status.timestamp == 0 ||
+        status.timestamp > start || start - status.timestamp > 500_ms ||
+        status.arming_state != vehicle_status_s::ARMING_STATE_DISARMED) {
+      PX4_ERR("disarm before camera zero calibration");
+      return PX4_ERROR;
+    }
+
+    int32_t first = -1;
+    int32_t sum = 0;
+    int count = 0;
+    hrt_abstime last_sample = 0;
+    uint32_t device_id = 0;
+    for (int attempt = 0; attempt < 60 && count < 16; ++attempt) {
+      px4_usleep(15000);
+      const hrt_abstime now = hrt_absolute_time();
+      if (!status_sub.copy(&status) || status.timestamp == 0 ||
+          status.timestamp > now || now - status.timestamp > 500_ms ||
+          status.arming_state != vehicle_status_s::ARMING_STATE_DISARMED) {
+        PX4_ERR("camera zero calibration interrupted by arming");
+        return PX4_ERROR;
+      }
+      sensor_encoder_s encoder{};
+      if (!encoder_sub.update(&encoder)) { continue; }
+      device::Device::DeviceId id{};
+      id.devid = encoder.device_id;
+      if (id.devid_s.devtype != DRV_ENC_DEVTYPE_MT6701 || encoder.raw_angle >= 16384 ||
+          encoder.timestamp_sample == 0 || encoder.timestamp_sample <= last_sample ||
+          encoder.timestamp_sample > encoder.timestamp || encoder.timestamp > now ||
+          now - encoder.timestamp_sample > 50_ms ||
+          (device_id && encoder.device_id != device_id)) {
+        PX4_ERR("invalid MT6701 sample during camera zero calibration");
+        return PX4_ERROR;
+      }
+      device_id = encoder.device_id;
+      last_sample = encoder.timestamp_sample;
+      if (first < 0) { first = encoder.raw_angle; }
+      const int32_t delta = (int32_t(encoder.raw_angle) - first + 16384 + 8192) % 16384 - 8192;
+      if (abs(delta) > 20) {
+        PX4_ERR("camera moved during zero calibration");
+        return PX4_ERROR;
+      }
+      sum += delta;
+      ++count;
+    }
+    if (count < 16) {
+      PX4_ERR("not enough fresh MT6701 samples for zero calibration");
+      return PX4_ERROR;
+    }
+    const hrt_abstime end = hrt_absolute_time();
+    if (!status_sub.copy(&status) || status.timestamp == 0 ||
+        status.timestamp > end || end - status.timestamp > 500_ms ||
+        status.arming_state != vehicle_status_s::ARMING_STATE_DISARMED) {
+      PX4_ERR("camera zero calibration interrupted by arming");
+      return PX4_ERROR;
+    }
+    const int32_t zero = (first + int32_t(lroundf(float(sum) / count)) + 16384) % 16384;
+    const param_t handle = param_find("DOCK_CAM_ENC_Z");
+    if (handle == PARAM_INVALID || param_set(handle, &zero) != PX4_OK ||
+        param_save_default(true) != PX4_OK) {
+      PX4_ERR("failed to save camera encoder zero");
+      return PX4_ERROR;
+    }
+    PX4_INFO("camera encoder zero: raw=%ld; check sign using a known positive pitch",
+             (long)zero);
+    return PX4_OK;
+  }
   return print_usage("unknown command");
 }
 
@@ -2436,6 +2589,17 @@ int DockGuidance::print_status() {
            (double)(std::isfinite(_yaw_setpoint_rad)
                         ? math::degrees(_yaw_setpoint_rad)
                         : NAN));
+  const hrt_abstime now = hrt_absolute_time();
+  PX4_INFO("encoder: %s, zero=%ld, reverse=%d, raw=%u, measured=%.2f deg, age=%.0f ms, ready=%d",
+           _param_dock_cam_encoder_enable.get() ? "enabled" : "disabled",
+           (long)_param_dock_cam_encoder_zero.get(), (int)_param_dock_cam_encoder_reverse.get(),
+           (unsigned)_encoder_raw_angle, (double)_encoder_pitch_deg,
+           _encoder_last_sample_us && now >= _encoder_last_sample_us
+               ? (double)(now - _encoder_last_sample_us) * 1e-3 : (double)NAN,
+           camera_encoder_ready(now));
+  PX4_INFO("encoder device: 0x%08lx, fault=%d, exposure pitch=%.2f deg",
+           (unsigned long)_encoder_device_id, (int)_encoder_fault,
+           (double)_sample_camera_pitch_deg);
 
   if (_setpoint_valid && !_relative_position_valid) {
     PX4_INFO("range unavailable: %s",
@@ -2469,11 +2633,13 @@ for coupled thrust and altitude control.
 
 $ dock_guidance start
 $ dock_guidance status
+$ dock_guidance calib_zero  # disarmed, camera at body-relative zero pitch
 $ dock_guidance stop
 )DESCR_STR");
 
   PRINT_MODULE_USAGE_NAME("dock_guidance", "controller");
   PRINT_MODULE_USAGE_COMMAND("start");
+  PRINT_MODULE_USAGE_COMMAND_DESCR("calib_zero", "Save MT6701 raw count at camera zero pitch");
   PRINT_MODULE_USAGE_DEFAULT_COMMANDS();
   return 0;
 }

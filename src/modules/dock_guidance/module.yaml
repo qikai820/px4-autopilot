@@ -66,7 +66,7 @@ parameters:
       DOCK_CAM_DLY:
         description:
           short: Camera delay compensation
-          long: Delay from image exposure to timestamp_sample reception. Applied once to body attitude, local position and camera command history. Does not measure servo mechanical lag.
+          long: Delay from image exposure to timestamp_sample reception. Applied once to body attitude, local position and the selected camera pitch history (servo command or encoder measurement). Does not measure servo mechanical lag.
         type: int32
         unit: ms
         min: 0
@@ -85,7 +85,9 @@ parameters:
         max: 180
         default: -90.0
       DOCK_CAM_PITCH:
-        description: {short: Camera-to-body pitch rotation}
+        description:
+          short: Camera-to-body pitch rotation
+          long: Fixed mounting pitch or initial servo command. When MT6701 feedback is enabled, measured pitch replaces this rotation; it is not added to the measurement.
         type: float
         min: -180
         max: 180
@@ -93,18 +95,42 @@ parameters:
       DOCK_CAM_SERVO:
         description:
           short: Enable variable camera pitch servo
-          long: Assign an unused output to Gimbal Pitch (function 421).
+          long: Assign an unused output to Gimbal Pitch (function 421). The servo command follows visual pitch error and does not use encoder feedback.
+        type: boolean
+        default: false
+      DOCK_CAM_ENC_EN:
+        description:
+          short: Use MT6701 measured camera pitch
+          long: Use time-aligned encoder feedback for camera-to-body rotation without changing servo control. Requires a calibrated zero and a fresh sensor_encoder stream. Sensor failure invalidates Dock guidance.
+        type: boolean
+        default: false
+      DOCK_CAM_ENC_Z:
+        description:
+          short: MT6701 raw count at camera zero pitch
+          long: Set with dock_guidance calib_zero while disarmed and the camera is at body-relative zero pitch. Minus one means uncalibrated.
+        type: int32
+        min: -1
+        max: 16383
+        default: -1
+      DOCK_CAM_ENC_REV:
+        description:
+          short: Reverse MT6701 camera pitch direction
+          long: Set when positive body-relative camera pitch makes the calibrated angle negative. This reverses measurement sign, not servo PWM direction.
         type: boolean
         default: false
       DOCK_CAM_P_MIN:
-        description: {short: Camera pitch servo minimum angle}
+        description:
+          short: Camera pitch servo minimum angle
+          long: One servo travel endpoint. The lower of P_MIN and P_MAX maps to output -1 and bounds valid MT6701 camera pitch with a 5 degree margin.
         type: float
         min: -180
         max: 180
         decimal: 1
         default: 0.0
       DOCK_CAM_P_MAX:
-        description: {short: Camera pitch servo maximum angle}
+        description:
+          short: Camera pitch servo maximum angle
+          long: Other servo travel endpoint. The higher of P_MIN and P_MAX maps to output +1 and bounds valid MT6701 camera pitch with a 5 degree margin.
         type: float
         min: -180
         max: 180

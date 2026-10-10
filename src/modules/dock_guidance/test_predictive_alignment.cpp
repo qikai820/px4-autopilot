@@ -109,6 +109,28 @@ static void test_camera_history() {
   assert(exposure_time(180000, 80000, exposure) && exposure == 100000);
 }
 
+static void test_encoder_pitch_alignment() {
+  float pitch = NAN;
+  assert(encoder_pitch_deg(15000, 15000, false, 0.f, 90.f, pitch) && pitch == 0.f);
+  assert(encoder_pitch_deg(2712, 15000, false, 0.f, 90.f, pitch) && pitch == 90.f);
+  assert(encoder_pitch_deg(10904, 15000, true, 0.f, 90.f, pitch) && pitch == 90.f);
+  assert(!encoder_pitch_deg(2712, -1, false, 0.f, 90.f, pitch));
+  assert(!encoder_pitch_deg(6144, 0, false, 0.f, 90.f, pitch));
+
+  EncoderPitchHistory<4> history;
+  assert(!history.at(1000000, pitch));
+  history.record(1000000, 0.f);
+  history.record(1010000, 10.f);
+  assert(history.at(1005000, pitch) && fabsf(pitch - 5.f) < 1e-5f);
+  assert(history.at(1020000, pitch) && pitch == 10.f);
+  assert(!history.at(1040001, pitch)); // no indefinite hold
+  assert(!history.at(999999, pitch)); // no future-only sample
+  history.record(1070000, 70.f);
+  assert(!history.at(1040000, pitch)); // missing samples cannot bridge 60 ms
+  history.reset();
+  assert(!history.at(1010000, pitch));
+}
+
 static void test_delayed_rotating_camera() {
   CameraHistory<1024> history;
   const Vector3f target(150, 30, -100);
@@ -315,6 +337,7 @@ int main() {
   test_estimator_sample_alignment();
   test_fresh_state_history();
   test_camera_history();
+  test_encoder_pitch_alignment();
   test_delayed_rotating_camera();
   test_predictive_geometry();
   test_three_dimensional_closest_approach();
