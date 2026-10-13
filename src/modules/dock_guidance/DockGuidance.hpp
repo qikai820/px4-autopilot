@@ -152,6 +152,7 @@ private:
   void update_camera_encoder(hrt_abstime now);
   bool camera_encoder_ready(hrt_abstime now) const;
   bool preposition_entry_ready(hrt_abstime now);
+  void report_qgc_guidance_state(hrt_abstime now);
   bool update_rear_reference(hrt_abstime now, const vehicle_local_position_s &local);
   void point_camera_to_preposition_target(hrt_abstime now,
                                           const vehicle_local_position_s &local,
@@ -292,6 +293,7 @@ private:
   float _closest_target_distance_m{INFINITY};
   bool _closest_target_distance_reported{false};
   bool _preposition_active{false};
+  bool _qgc_guidance_live{false};
   bool _preposition_handoff_pending{false};
   bool _preposition_enabled_for_activation{false};
   bool _course_yaw_active{false};

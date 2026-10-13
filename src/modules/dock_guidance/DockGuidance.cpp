@@ -121,6 +121,7 @@ void DockGuidance::Run() {
   }
 
   update_mode_state();
+  report_qgc_guidance_state(now_us);
   if (_fault_hold_pending) {
     maybe_request_exit_mode(now_us);
   }

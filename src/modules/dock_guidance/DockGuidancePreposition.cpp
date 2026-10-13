@@ -10,6 +10,30 @@ constexpr float kPathSampleDistance = 1.f;
 constexpr float kPositionGain = 0.35f;
 }
 
+void DockGuidance::report_qgc_guidance_state(hrt_abstime now) {
+  viztra_target_s target{};
+  const uint64_t timeout_us = static_cast<uint64_t>(math::constrain(
+      _param_dock_pre_timeout.get(), int32_t{100}, int32_t{5000})) * 1000ULL;
+  // copy() leaves the update flag intact for update_rear_reference().
+  const bool fresh = _viztra_target_sub.copy(&target) &&
+      target.target_id == 1 && target.source_component == kDockTargetComponent &&
+      (target.valid_flags & 3U) == 3U && target.timestamp > 0 &&
+      now >= target.timestamp && now - target.timestamp <= timeout_us &&
+      std::isfinite(target.lat) && std::isfinite(target.lon) &&
+      fabs(target.lat) <= 90.0 && fabs(target.lon) <= 180.0 &&
+      std::isfinite(target.alt_msl) &&
+      Vector3f(target.vn, target.ve, target.vd).isAllFinite();
+
+  if (fresh && !_qgc_guidance_live) {
+    _qgc_guidance_live = true;
+    mavlink_log_info(&_mavlink_log_pub, "Dock QGC guidance received, seq=%lu",
+                     static_cast<unsigned long>(target.sequence));
+  } else if (!fresh && _qgc_guidance_live) {
+    _qgc_guidance_live = false;
+    mavlink_log_warning(&_mavlink_log_pub, "Dock QGC guidance lost");
+  }
+}
+
 bool DockGuidance::preposition_entry_ready(hrt_abstime now) {
   viztra_target_s target{};
   vehicle_local_position_s local{};
