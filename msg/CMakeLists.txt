@@ -246,6 +246,7 @@ set(msg_files
 	VehicleThrustSetpoint.msg
 	VehicleTorqueSetpoint.msg
 	VelocityLimits.msg
+	ViztraDetection.msg
 	ViztraObservation.msg
 	ViztraStatus.msg
 	WheelEncoders.msg

@@ -39,10 +39,17 @@ class ViztraParser
 public:
 	static constexpr uint8_t LEGACY_FRAME_LENGTH{21};
 	static constexpr uint8_t EXTENDED_FRAME_LENGTH{33};
+	static constexpr uint8_t MAX_DETECTIONS_PER_PACKET{22};
+	static constexpr uint8_t MAX_DETECTION_FRAME_LENGTH{252};
 
 	enum class Result : uint8_t {
 		None,
 		Frame,
+		Detection,
+		Heartbeat,
+		DetectionAck,
+		AutoLockAck,
+		TrackAck,
 		ChecksumError,
 		FormatError,
 	};
@@ -60,7 +67,24 @@ public:
 		bool has_relative_position;
 	};
 
-	Result parse(uint8_t byte, Frame &frame)
+	struct DetectedTarget {
+		uint8_t id;
+		uint8_t type;
+		uint8_t confidence;
+		uint16_t x;
+		uint16_t y;
+		uint16_t width;
+		uint16_t height;
+	};
+
+	struct Detection {
+		uint8_t frame_id;
+		uint8_t total_targets;
+		uint8_t count;
+		DetectedTarget targets[MAX_DETECTIONS_PER_PACKET];
+	};
+
+	Result parse(uint8_t byte, Frame &frame, Detection &detection)
 	{
 		switch (_index) {
 		case 0:
@@ -87,13 +111,25 @@ public:
 		}
 
 		if (_index == 5) {
-			if ((_buffer[2] != kCommand0) || (_buffer[3] != kCommand1)
-			    || ((_buffer[4] != kLegacyPayloadLength) && (_buffer[4] != kExtendedPayloadLength))) {
+			const uint8_t command = _buffer[3];
+			const uint8_t payload_length = _buffer[4];
+			const bool tracking = command == kTrackingCommand
+					      && (payload_length == kLegacyPayloadLength || payload_length == kExtendedPayloadLength);
+			const bool detection_packet = command == kDetectionCommand && payload_length >= 3
+						      && payload_length <= 3 + 11 * MAX_DETECTIONS_PER_PACKET
+						      && (payload_length - 3) % 11 == 0;
+			const bool heartbeat = command == kHeartbeatCommand && payload_length == 6;
+			const bool detection_ack = _buffer[2] == 0x03 && command == 0x81 && payload_length == 2;
+			const bool auto_lock_ack = _buffer[2] == 0x03 && command == 0x85 && payload_length == 4;
+			const bool track_ack = _buffer[2] == 0x03 && command == 0x91 && payload_length == 4;
+
+			if (!detection_ack && !auto_lock_ack && !track_ack &&
+			    (_buffer[2] != kCommand0 || (!tracking && !detection_packet && !heartbeat))) {
 				reset();
 				return Result::FormatError;
 			}
 
-			_expected_length = static_cast<uint8_t>(_buffer[4] + 7U);
+			_expected_length = static_cast<uint8_t>(payload_length + 7U);
 		}
 
 		if (_index < _expected_length) {
@@ -111,7 +147,7 @@ public:
 
 		const bool valid_checksum = checksum == _buffer[checksum_index];
 
-		if (valid_end && valid_checksum) {
+		if (valid_end && valid_checksum && _buffer[2] == kCommand0 && _buffer[3] == kTrackingCommand) {
 			frame.status = _buffer[5];
 			frame.channel = _buffer[6];
 
@@ -135,6 +171,53 @@ public:
 			return Result::Frame;
 		}
 
+		if (valid_end && valid_checksum && _buffer[2] == kCommand0 && _buffer[3] == kDetectionCommand) {
+			detection.frame_id = _buffer[5];
+			detection.total_targets = _buffer[6];
+			detection.count = _buffer[7];
+
+			if (detection.total_targets > 64 || detection.count > detection.total_targets
+			    || detection.count != (_buffer[4] - 3) / 11) {
+				reset();
+				return Result::FormatError;
+			}
+
+			for (uint8_t i = 0; i < detection.count; i++) {
+				const uint8_t *target = &_buffer[8 + 11 * i];
+				detection.targets[i] = {target[0], target[1], target[2], read_le_u16(&target[3]),
+							read_le_u16(&target[5]), read_le_u16(&target[7]), read_le_u16(&target[9])};
+			}
+
+			reset();
+			return Result::Detection;
+		}
+
+		if (valid_end && valid_checksum && _buffer[2] == kCommand0 && _buffer[3] == kHeartbeatCommand) {
+			reset();
+			return Result::Heartbeat;
+		}
+
+		if (valid_end && valid_checksum && _buffer[2] == 0x03 && _buffer[3] == 0x81) {
+			_detection_ack_result = _buffer[5];
+			_detection_ack_state = _buffer[6];
+			reset();
+			return Result::DetectionAck;
+		}
+
+		if (valid_end && valid_checksum && _buffer[2] == 0x03 && _buffer[3] == 0x85) {
+			_auto_lock_ack_result = _buffer[5];
+			_auto_lock_ack_mode = _buffer[6];
+			reset();
+			return Result::AutoLockAck;
+		}
+
+		if (valid_end && valid_checksum && _buffer[2] == 0x03 && _buffer[3] == 0x91) {
+			_track_ack_result = _buffer[5];
+			_track_ack_state = _buffer[6];
+			reset();
+			return Result::TrackAck;
+		}
+
 		reset();
 		return valid_checksum ? Result::FormatError : Result::ChecksumError;
 	}
@@ -145,11 +228,20 @@ public:
 		_expected_length = EXTENDED_FRAME_LENGTH;
 	}
 
+	uint8_t track_ack_result() const { return _track_ack_result; }
+	uint8_t track_ack_state() const { return _track_ack_state; }
+	uint8_t detection_ack_result() const { return _detection_ack_result; }
+	uint8_t detection_ack_state() const { return _detection_ack_state; }
+	uint8_t auto_lock_ack_result() const { return _auto_lock_ack_result; }
+	uint8_t auto_lock_ack_mode() const { return _auto_lock_ack_mode; }
+
 private:
 	static constexpr uint8_t kHeader0{0x78};
 	static constexpr uint8_t kHeader1{0x07};
 	static constexpr uint8_t kCommand0{0x00};
-	static constexpr uint8_t kCommand1{0x81};
+	static constexpr uint8_t kTrackingCommand{0x81};
+	static constexpr uint8_t kDetectionCommand{0x82};
+	static constexpr uint8_t kHeartbeatCommand{0x83};
 	static constexpr uint8_t kLegacyPayloadLength{0x0e};
 	static constexpr uint8_t kExtendedPayloadLength{0x1a};
 	static constexpr uint8_t kEnd{0x79};
@@ -159,7 +251,13 @@ private:
 		return static_cast<uint16_t>(data[0]) | (static_cast<uint16_t>(data[1]) << 8);
 	}
 
-	uint8_t _buffer[EXTENDED_FRAME_LENGTH] {};
+	uint8_t _buffer[MAX_DETECTION_FRAME_LENGTH] {};
 	uint8_t _index{0};
 	uint8_t _expected_length{EXTENDED_FRAME_LENGTH};
+	uint8_t _track_ack_result{0xff};
+	uint8_t _track_ack_state{0xff};
+	uint8_t _detection_ack_result{0xff};
+	uint8_t _detection_ack_state{0xff};
+	uint8_t _auto_lock_ack_result{0xff};
+	uint8_t _auto_lock_ack_mode{0xff};
 };

@@ -25,3 +25,10 @@ parameters:
             max: 5000
             default: 500
             reboot_required: true
+        VIZTRA_AUTO:
+            description:
+                short: Enable cyclic Viztra auto-lock at startup
+                long: After board data arrives, enable AI detection with multi-target tracking, then enable the board's cyclic highest-confidence auto-lock. Retry until acknowledged. The board reacquires after target loss.
+            type: boolean
+            default: 1
+            reboot_required: true
