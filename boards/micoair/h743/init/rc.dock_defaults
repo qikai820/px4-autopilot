@@ -1,0 +1,14 @@
+#!/bin/sh
+#
+# Dock camera defaults for the dedicated micoair_h743_dock target.
+# Function 421 maps the camera pitch command to AUX1, as in cuav_7-nano_test.
+#------------------------------------------------------------------------------
+param set-default PWM_AUX_FUNC1 421
+param set-default DOCK_CAM_SERVO 1
+param set-default DOCK_CAM_PITCH 0
+param set-default DOCK_CAM_P_MIN 0
+param set-default DOCK_CAM_P_MAX 90
+param set-default DOCK_START_H 0
+
+# MT6701 camera-angle feedback on MicoAir H743's external I2C bus 1.
+mt6701 start -X -b 1
