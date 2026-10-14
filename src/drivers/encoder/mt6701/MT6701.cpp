@@ -37,6 +37,7 @@
 #include <lib/perf/perf_counter.h>
 #include <px4_platform_common/i2c_spi_buses.h>
 #include <px4_platform_common/module.h>
+#include <px4_platform_common/px4_work_queue/WorkItemSingleShot.hpp>
 #include <uORB/PublicationMulti.hpp>
 #include <uORB/topics/sensor_encoder.h>
 
@@ -106,33 +107,7 @@ public:
 		perf_print_counter(_comms_errors);
 	}
 
-	void custom_method(const BusCLIArguments &) override
-	{
-		// Run on the driver's work queue so this read cannot overlap RunImpl().
-		I2CSPIDriverBase::print_status();
-		uint16_t raw_angle = 0;
-		uint8_t msb = 0;
-		uint8_t lsb = 0;
-
-		if (read_angle(raw_angle, &msb, &lsb) == PX4_OK) {
-			PX4_INFO("registers: 0x03=0x%02x, 0x04=0x%02x", (unsigned)msb, (unsigned)lsb);
-			PX4_INFO("angle: raw=%u, %.4f rad, %.2f deg", (unsigned)raw_angle,
-				 (double)(raw_angle * RAD_PER_COUNT), (double)(raw_angle * 360.f / 16384.f));
-
-		} else {
-			perf_count(_comms_errors);
-			PX4_ERR("failed to read angle registers");
-		}
-
-		if (_last_sample != 0) {
-			PX4_INFO("last published sample: %.3f s ago", (double)(hrt_absolute_time() - _last_sample) / 1e6);
-
-		} else {
-			PX4_INFO("no sample published yet");
-		}
-
-		perf_print_counter(_comms_errors);
-	}
+	static int module_info(BusInstanceIterator &iterator);
 
 	static void print_usage()
 	{
@@ -158,6 +133,17 @@ $ listener sensor_encoder
 	}
 
 private:
+	struct InfoResult {
+		MT6701 *driver;
+		int result{PX4_ERROR};
+		uint16_t raw_angle{0};
+		uint8_t msb{0};
+		uint8_t lsb{0};
+		hrt_abstime last_sample{0};
+	};
+
+	static void read_info_on_work_queue(void *argument);
+
 	int probe() override
 	{
 		uint16_t raw_angle = 0;
@@ -198,6 +184,66 @@ private:
 	float _last_angle{0.f};
 };
 
+void MT6701::read_info_on_work_queue(void *argument)
+{
+	auto &info = *static_cast<InfoResult *>(argument);
+	info.result = info.driver->read_angle(info.raw_angle, &info.msb, &info.lsb);
+	info.last_sample = info.driver->_last_sample;
+
+	if (info.result != PX4_OK) {
+		perf_count(info.driver->_comms_errors);
+	}
+}
+
+int MT6701::module_info(BusInstanceIterator &iterator)
+{
+	bool found = false;
+	bool success = false;
+
+	while (iterator.next()) {
+		auto *driver = static_cast<MT6701 *>(iterator.instance());
+
+		if (driver == nullptr) {
+			continue;
+		}
+
+		found = true;
+		InfoResult info{driver};
+		// The register read stays on the driver's work queue; only printing runs
+		// on the NSH command thread, where the result is visible to the caller.
+		px4::WorkItemSingleShot reader(*driver, read_info_on_work_queue, &info);
+		reader.ScheduleNow();
+		reader.wait();
+
+		driver->I2CSPIDriverBase::print_status();
+
+		if (info.result == PX4_OK) {
+			success = true;
+			PX4_INFO("registers: 0x03=0x%02x, 0x04=0x%02x", (unsigned)info.msb, (unsigned)info.lsb);
+			PX4_INFO("angle: raw=%u, %.4f rad, %.2f deg", (unsigned)info.raw_angle,
+				 (double)(info.raw_angle * RAD_PER_COUNT), (double)(info.raw_angle * 360.f / 16384.f));
+
+		} else {
+			PX4_ERR("failed to read angle registers");
+		}
+
+		if (info.last_sample != 0) {
+			PX4_INFO("last published sample: %.3f s ago", (double)(hrt_absolute_time() - info.last_sample) / 1e6);
+
+		} else {
+			PX4_INFO("no sample published yet");
+		}
+
+		perf_print_counter(driver->_comms_errors);
+	}
+
+	if (!found) {
+		PX4_ERR("Not running");
+	}
+
+	return success ? PX4_OK : PX4_ERROR;
+}
+
 extern "C" __EXPORT int mt6701_main(int argc, char *argv[])
 {
 	BusCLIArguments cli{true, false};
@@ -226,7 +272,7 @@ extern "C" __EXPORT int mt6701_main(int argc, char *argv[])
 	}
 
 	if (!strcmp(verb, "info")) {
-		return MT6701::module_custom_method(cli, iterator);
+		return MT6701::module_info(iterator);
 	}
 
 	MT6701::print_usage();
