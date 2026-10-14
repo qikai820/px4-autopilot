@@ -17,6 +17,15 @@ param set-default BAT1_A_PER_V 24
 
 param set-default USB_MAV_MODE 5
 
+# Dock simulation camera: an AUX gimbal-pitch output drives the JSBSim Viztra
+# camera, which starts pointed forward and can track upward targets.
+param set-default PWM_AUX_FUNC1 421
+param set-default DOCK_CAM_SERVO 1
+param set-default DOCK_CAM_PITCH 0
+param set-default DOCK_CAM_P_MIN 0
+param set-default DOCK_CAM_P_MAX 90
+param set-default DOCK_START_H 0
+
 safety_button start
 
 mavlink stream -u 14550 -s HIL_ACTUATOR_CONTROLS -r 200
