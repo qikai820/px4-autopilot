@@ -50,12 +50,14 @@ parameters:
         max: 5
         default: 0.3
       DOCK_PRE_TOUT:
-        description: {short: Target-position stream timeout during rear guidance}
+        description:
+          short: Target-position stream timeout during rear guidance
+          long: Allows a nominal 2 Hz target stream with bounded jitter. A missing sample still makes rear guidance stale before the next normal sample.
         type: int32
         unit: ms
         min: 100
         max: 5000
-        default: 300
+        default: 800
       DOCK_PRE_PRED_T:
         description: {short: Maximum target-motion prediction horizon}
         type: float

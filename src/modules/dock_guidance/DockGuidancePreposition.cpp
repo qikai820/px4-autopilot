@@ -14,7 +14,8 @@ void DockGuidance::report_qgc_guidance_state(hrt_abstime now) {
   viztra_target_s target{};
   const uint64_t timeout_us = static_cast<uint64_t>(math::constrain(
       _param_dock_pre_timeout.get(), int32_t{100}, int32_t{5000})) * 1000ULL;
-  // copy() leaves the update flag intact for update_rear_reference().
+  // Both status reporting and preposition read the latest sample. copy()
+  // advances this subscription's generation, so preposition must not rely on update().
   const bool fresh = _viztra_target_sub.copy(&target) &&
       target.target_id == 1 && target.source_component == kDockTargetComponent &&
       (target.valid_flags & 3U) == 3U && target.timestamp > 0 &&
@@ -123,7 +124,9 @@ bool DockGuidance::update_rear_reference(hrt_abstime now, const vehicle_local_po
 
   MapProjection projection(local.ref_lat, local.ref_lon, local.ref_timestamp);
   viztra_target_s incoming{};
-  if (_viztra_target_sub.update(&incoming) &&
+  // Status reporting reads the same subscription every Run(). Read the latest
+  // target here as well, then use the source timestamp below to avoid repeats.
+  if (_viztra_target_sub.copy(&incoming) &&
       incoming.target_id == 1 && incoming.source_component == kDockTargetComponent &&
       (incoming.valid_flags & 3U) == 3U && incoming.timestamp <= now &&
       std::isfinite(incoming.lat) && std::isfinite(incoming.lon) &&

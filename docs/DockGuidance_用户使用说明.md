@@ -135,7 +135,7 @@ param show DOCK_CAM_ENC_EN
 | `DOCK_PRE_RADIUS` | 250 m | 预置路径水平转弯半径下界 |
 | `DOCK_PRE_ZOFF` | 0 m | 后方参考点相对目标轨迹的高度偏置 |
 | `DOCK_PRE_VIS_T` | 0.3 s | 视觉连续有效达到此时间后允许交接 |
-| `DOCK_PRE_TOUT` | 300 ms | 外部目标位置/速度流的超时门槛 |
+| `DOCK_PRE_TOUT` | 800 ms | 外部目标位置/速度流的超时门槛，适配约 2 Hz 输入；已有保存值需手动确认 |
 | `DOCK_PRE_PRED_T` | 1 s | 外部目标运动外推时间上限 |
 
 ### 相机、视觉与传感器

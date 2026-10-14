@@ -20,7 +20,7 @@ JSBSim SensorViztraPlugin
 
 `9872` 是仿真到 QGC 的**自定义 UDP 二进制协议**；QGC 到 PX4 才是 MAVLink。`9870`、`9871` 仅用于诊断，QGC 的目标转发器不读取它们。PX4 与 JSBSim 之间的 HIL 链路、QGC 与 PX4 的常规遥测链路也各自独立，不能用 `9872` 代替。
 
-当前 `px4_jsbsim/px4-jsbsim-bridge/configs/h7_viztra.xml` 设置 `qgc_target_udp_enable=1`、目标地址 `127.0.0.1`、端口 `9872`、发送频率 `20 Hz`。QGC 默认监听 IPv4 `0.0.0.0:9872`。仿真和 QGC 在不同主机时，将 `qgc_target_udp_address` 改为 **QGC 主机可达的 IPv4 地址**；`127.0.0.1` 只适合同机。若改端口，QGC 的 `listenPort` 也要一致。目标地址是发送目的地址，QGC 的 `0.0.0.0` 是本机监听地址，两者含义不同。
+当前 `px4_jsbsim/px4-jsbsim-bridge/configs/h7_viztra.xml` 设置 `qgc_target_udp_enable=1`、目标地址 `127.0.0.1`、端口 `9872`、发送频率 `2 Hz`。QGC 默认监听 IPv4 `0.0.0.0:9872`。仿真和 QGC 在不同主机时，将 `qgc_target_udp_address` 改为 **QGC 主机可达的 IPv4 地址**；`127.0.0.1` 只适合同机。若改端口，QGC 的 `listenPort` 也要一致。目标地址是发送目的地址，QGC 的 `0.0.0.0` 是本机监听地址，两者含义不同。
 
 ## 2. UDP 9872 帧格式
 
@@ -69,9 +69,9 @@ PX4 仅接受目标系统匹配、源 component 为 `25`、`target_id=1`、位�
    PATH="$PWD/build:$PATH" HEADLESS=1 ./build/jsbsim_bridge h7_viztra -s scene/LSZH.xml
    ```
 
-   启动输出应出现 `[ViztraSim] QGC target UDP output: ...:9872 at 20 Hz`。仿真目标的**运动**要等本机上升速度和离地高度同时达到配置阈值才开始；目标静止时也可发送位置帧。若沿用其他启动器，应确认实际加载的仍是 `h7_viztra.xml`，且启动的是含 `SensorViztraPlugin` 的新 `jsbsim_server`。
+   启动输出应出现 `[ViztraSim] QGC target UDP output: ...:9872 at 2 Hz`。仿真目标的**运动**要等本机上升速度和离地高度同时达到配置阈值才开始；目标静止时也可发送位置帧。若沿用其他启动器，应确认实际加载的仍是 `h7_viztra.xml`，且启动的是含 `SensorViztraPlugin` 的新 `jsbsim_server`。
 3. **启动本地定制 QGC 并连接飞行器。**当前本机构建可运行 `/home/qikai820/src/qgroundcontrol/build-3dgqt/Release/run-qgc.sh`；其他机器应运行包含 `DockTargetForwarder` 的 QGC 构建。确认 QGC 能看见目标 PX4、该主链路使用 MAVLink 2。QGC 默认监听 `0.0.0.0:9872`；若自定义了 `listenAddress` 或 `listenPort`，要与发送地址、端口匹配。
-4. **在飞行视图的工具栏打开 `Target`。**地图目标标记由 `Show target on map` 设置控制，即使 Target 开关未打开也可显示接收位置；只有打开开关才会向当前飞行器转发。看到 `Waiting` 时先等连续有效位置形成速度；`Sending` 表示 QGC 已把消息交给飞行器主链路的发送接口；`Stale` 表示目标 UDP 超过约 `300 ms` 未更新。停止约 `2 s` 后地图标记隐藏。`Sending` 本身不证明 PX4 已接收或 DockGuidance 已采用目标。
+4. **在飞行视图的工具栏打开 `Target`。**地图目标标记由 `Show target on map` 设置控制，即使 Target 开关未打开也可显示接收位置；只有打开开关才会向当前飞行器转发。看到 `Waiting` 时先等连续有效位置形成速度；`Sending` 表示 QGC 已把消息交给飞行器主链路的发送接口；`Stale` 表示目标 UDP 超过约 `800 ms` 未更新。停止约 `2 s` 后地图标记隐藏。`Sending` 本身不证明 PX4 已接收或 DockGuidance 已采用目标。
 5. **在 PX4 核对接收。**在 PX4 控制台执行 `listener viztra_target`，确认时间戳、位置和速度随目标更新；需要检查预引导时，再看 `listener dock_preposition_status` 或对应 ULog。进入 Dock 模式前还需满足该模式自身的定位、参数和视觉交接条件，详见 [Viztra 目标位置预引导](ViztraTarget_preposition.md)。
 
 ## 5. 快速排查
@@ -84,7 +84,7 @@ PX4 仅接受目标系统匹配、源 component 为 `25`、`target_id=1`、位�
 | 没有地图目标、一直 `Waiting` | 仿真是否加载 `h7_viztra`、`jsbsim_server` 是否含新插件、目的 IP/端口、QGC 监听端口，以及是否持续收到合法 64 字节帧 |
 | 收到目标但仍 `Waiting` | 等待至少 800 ms 的连续样本；检查位置是否跳变、地速与轨迹是否一致，以及主链路是否为 MAVLink 2 |
 | `Sending`，但 `listener viztra_target` 无更新 | 检查选中的飞行器、PX4 `viztra` dialect、系统 ID、主链路是否真正通到 PX4；不要把 QGC 发送状态当成 PX4 接收确认 |
-| 很快变 `Stale` | 仿真发送是否停止、跨主机路由/防火墙、QGC 是否收到连续数据；QGC 按接收时间约 300 ms 判过期 |
+| 很快变 `Stale` | 仿真发送是否停止、跨主机路由/防火墙、QGC 是否收到连续数据；QGC 按接收时间约 800 ms 判过期 |
 | 目标位置正常而 Dock 不进入预引导 | 检查 `DOCK_PRE_EN`、本机全局定位、目标流新鲜度和 Dock 状态；`9872` 目标流不能替代有效视觉观测 |
 
 ## 6. 实现位置与验证边界
