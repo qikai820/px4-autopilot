@@ -251,6 +251,97 @@ parameters:
             terminal approach. Disable to omit this thrust brake during fault RTL.
         type: boolean
         default: 1
+      DOCK_BRK_MODE:
+        description:
+          short: Dock high-speed braking method
+          long: >
+            Method 0 retains the existing thrust-direction brake. Method 1 uses
+            a bounded climb to exchange kinetic energy for height, then levels
+            and arrests vertical speed. Both methods serve predicted-pass and
+            verified automatic Dock guidance-fault braking when aircraft state
+            and attitude estimates remain valid. Method 1 requests Hold after
+            a normal predicted pass; fault exits still follow DOCK_EXIT_MODE.
+        type: enum
+        values:
+          0: Thrust-direction braking
+          1: Climb braking
+        default: 0
+      DOCK_CLB_P_RATE:
+        description: {short: Maximum climb-brake tilt rotation rate}
+        type: float
+        unit: deg/s
+        min: 5
+        max: 90
+        decimal: 1
+        default: 30
+      DOCK_CLB_TILT:
+        description:
+          short: Maximum climb-brake tilt angle
+          long: Bounded further by MPC_TILTMAX_AIR and available thrust.
+        type: float
+        unit: deg
+        min: 5
+        max: 80
+        decimal: 1
+        default: 45
+      DOCK_CLB_DH_MAX:
+        description:
+          short: Maximum extra height during climb braking
+          long: >
+            Relative to the aircraft local altitude when the shared braking
+            session first starts. It is not an absolute AMSL or home altitude.
+            A Dock-to-RTL fault handoff retains the consumed height budget.
+            The controller starts collecting angle before the limit; physical
+            overshoot can still occur if the airframe cannot arrest its climb.
+        type: float
+        unit: m
+        min: 2
+        max: 100
+        decimal: 1
+        default: 20
+      DOCK_CLB_VMAX:
+        description:
+          short: Maximum commanded climb speed during braking
+          long: Zero inherits MPC_Z_VEL_MAX_UP. Vehicle constraints can lower it.
+        type: float
+        unit: m/s
+        min: 0
+        max: 20
+        decimal: 1
+        default: 0
+      DOCK_CLB_A_UP:
+        description:
+          short: Maximum climb command acceleration
+          long: >
+            Zero inherits MPC_ACC_UP_MAX. This limits the velocity target ramp;
+            DOCK_DYN_JERK limits changes in commanded acceleration.
+        type: float
+        unit: m/s^2
+        min: 0
+        max: 15
+        decimal: 1
+        default: 0
+      DOCK_CLB_A_DN:
+        description:
+          short: Climb speed arrest acceleration
+          long: >
+            Zero inherits MPC_ACC_DOWN_MAX. Used for early level-out planning and
+            the velocity target ramp; DOCK_DYN_JERK also applies. Actual vertical
+            authority can be lower.
+        type: float
+        unit: m/s^2
+        min: 0
+        max: 15
+        decimal: 1
+        default: 0
+      DOCK_CLB_TMAX:
+        description: {short: Maximum active climb-braking duration}
+        type: float
+        unit: s
+        min: 1
+        max: 30
+        decimal: 1
+        default: 10
       DOCK_BRK_THR:
         description:
           short: Dock recovery braking thrust floor
@@ -272,7 +363,11 @@ parameters:
             DOCK_BRK_TVEL. Applies immediately on entry, including the pitch/roll
             transition, even if DOCK_THR_RATE would otherwise delay an increase.
             MPC_THR_MAX takes priority. Below DOCK_BRK_TVEL, normal throttle slew
-            resumes from the last output. This does not guarantee any individual
+            resumes from the last output for method 0. During method 1 pull-up,
+            the floor remains active until early angle capture; capture releases
+            the high floor and final slew so vertical speed can be arrested.
+            DOCK_BRK_THR can remain as a lower floor until the aircraft levels.
+            This does not guarantee any individual
             motor output or altitude hold.
         type: float
         min: 0

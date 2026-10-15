@@ -78,15 +78,19 @@ void PositionControl::setDockBraking(bool enabled, float thrust, float rate, flo
 		  && PX4_ISFINITE(rate) && rate > 0.f && PX4_ISFINITE(speed) && speed >= 2.f;
 
 	if (enabled && !_dock_braking) {
-		// Start the rotation from the previous commanded attitude, including forward tilt.
-		_dock_brake_body_z = _thr_sp.isAllFinite() && _thr_sp.norm() > .001f
-				     ? -_thr_sp.normalized() : Vector3f(0.f, 0.f, 1.f);
+		if (!_dock_brake_resume) {
+			// Start the rotation from the previous commanded attitude, including forward tilt.
+			_dock_brake_body_z = _thr_sp.isAllFinite() && _thr_sp.norm() > .001f
+					     ? -_thr_sp.normalized() : Vector3f(0.f, 0.f, 1.f);
+		}
 		// The approach can leave a large forward velocity integral. It must not
 		// become the normal-control direction blended into low-speed braking.
 		_vel_int.xy() = Vector2f();
 	}
 
 	_dock_braking = enabled;
+	_dock_brake_resume = false;
+	if (!enabled) { _dock_climb = false; }
 	_dock_brake_thrust = thrust;
 	_dock_brake_rate = rate;
 	_dock_brake_speed = speed;
@@ -252,7 +256,12 @@ bool PositionControl::_dockBrakeControl(float dt)
 			normal_body_z.xy() -= direction * normal_along_motion;
 			normal_body_z.normalize();
 		}
-		const float tilt = math::constrain(_lim_tilt, 0.f, math::radians(89.f));
+		const float tilt_limit = _dock_climb ? math::min(_lim_tilt, _dock_climb_tilt) : _lim_tilt;
+		// Collect the braking angle as soon as the height preview enters capture.
+		// Keep a modest horizontal brake while vertical speed is arrested.
+		const float tilt = math::constrain(_dock_climb && _dock_climb_capture
+					? math::min(tilt_limit, math::radians(15.f)) : tilt_limit,
+					 0.f, math::radians(89.f));
 		const Vector3f brake_body_z(_vel(0) / speed * sinf(tilt), _vel(1) / speed * sinf(tilt), cosf(tilt));
 		desired_body_z = (normal_body_z * (1.f - weight) + brake_body_z * weight).normalized();
 		// Reserve speed for leveling out. A large tilt cannot disappear instantly and otherwise
@@ -278,10 +287,12 @@ bool PositionControl::_dockBrakeControl(float dt)
 		_dock_brake_body_z = desired_body_z;
 	}
 
-	ControlMath::limitTilt(_dock_brake_body_z, Vector3f(0.f, 0.f, 1.f), _lim_tilt);
+	ControlMath::limitTilt(_dock_brake_body_z, Vector3f(0.f, 0.f, 1.f),
+			       _dock_climb ? math::min(_lim_tilt, _dock_climb_tilt) : _lim_tilt);
 	// At speed, do not cut throttle to immediately cancel climb. At least preserve tilt-compensated
 	// hover thrust (or the configured floor). Height is allowed to change until braking fades.
-	const float floor = math::max(_dock_brake_thrust, _hover_thrust / math::max(_dock_brake_body_z(2), .1f));
+	const float floor = _dock_climb && _dock_climb_capture ? 0.f
+			    : math::max(_dock_brake_thrust, _hover_thrust / math::max(_dock_brake_body_z(2), .1f));
 	const float thrust = math::constrain(automatic_thrust + weight * math::max(0.f, floor - automatic_thrust),
 					  _lim_thr_min, _lim_thr_max);
 	_thr_sp = -_dock_brake_body_z * thrust;

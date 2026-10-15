@@ -72,6 +72,7 @@ set(msg_files
 	DockPrepositionStatus.msg
 	ViztraTarget.msg
 	DockGuidanceThrust.msg
+	DockBrakeStatus.msg
 	DronecanNodeStatus.msg
 	Ekf2Timestamps.msg
 	EscReport.msg

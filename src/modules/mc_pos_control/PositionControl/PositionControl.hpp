@@ -113,6 +113,19 @@ public:
 
 	/** Post-pass braking: retain thrust, tilt against motion, and relax height control at speed. */
 	void setDockBraking(bool enabled, float thrust = 0.f, float rate = 0.f, float speed = 0.f);
+	void suspendDockBraking()
+	{
+		_dock_brake_resume = _dock_braking || _dock_brake_resume;
+		_dock_braking = false;
+		_dock_climb = false;
+	}
+	void setDockClimb(bool enabled, bool capture, float max_tilt)
+	{
+		_dock_climb = enabled;
+		_dock_climb_capture = capture;
+		_dock_climb_tilt = max_tilt;
+	}
+	float dockBrakeTilt() const { return acosf(math::constrain(_dock_brake_body_z(2), -1.f, 1.f)); }
 
 	/**
 	 * Set margin that is kept for horizontal control when prioritizing vertical thrust
@@ -226,6 +239,10 @@ private:
 	float _hover_thrust{}; ///< Thrust [HOVER_THRUST_MIN, HOVER_THRUST_MAX] with which the vehicle hovers not accelerating down or up with level orientation
 	bool _hold_velocity_integral{false}; ///< Prevent windup while Dock overrides collective throttle downstream
 	bool _dock_braking{false};
+	bool _dock_brake_resume{false};
+	bool _dock_climb{false};
+	bool _dock_climb_capture{false};
+	float _dock_climb_tilt{0.f};
 	float _dock_brake_thrust{0.f};
 	float _dock_brake_rate{0.f};
 	float _dock_brake_speed{0.f};

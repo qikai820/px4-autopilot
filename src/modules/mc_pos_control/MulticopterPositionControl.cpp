@@ -414,6 +414,9 @@ void MulticopterPositionControl::Run()
 
 		_vehicle_land_detected_sub.update(&_vehicle_land_detected);
 		_dock_thrust_sub.update(&_dock_thrust);
+		_vehicle_attitude_sub.update(&_vehicle_attitude);
+		_vehicle_angular_velocity_sub.update(&_vehicle_angular_velocity);
+		_control_allocator_status_sub.update(&_control_allocator_status);
 		_vehicle_status_sub.update(&_vehicle_status);
 
 		if (_param_mpc_use_hte.get()) {
@@ -429,7 +432,8 @@ void MulticopterPositionControl::Run()
 		PositionControlStates states{set_vehicle_states(vehicle_local_position, dt)};
 		const hrt_abstime control_now = hrt_absolute_time();
 		if (_dock_fault_transfer.update(control_now, _vehicle_control_mode, _vehicle_status, _dock_thrust,
-						   !_vehicle_land_detected.landed && !_vehicle_land_detected.ground_contact)) {
+						   !_vehicle_land_detected.landed && !_vehicle_land_detected.ground_contact,
+						   _param_dock_brake_enable.get() && _param_dock_brake_mode.get() == 1)) {
 			_dock_failsafe_yaw.latch(states.yaw, vehicle_local_position.heading_reset_counter);
 			_dock_rtl_velocity_ramp.reset();
 			PX4_WARN("dock fault RTL: brake, then align yaw before return at %.1f m/s",
@@ -565,6 +569,90 @@ void MulticopterPositionControl::Run()
 						&& control_now - vehicle_local_position.timestamp <= 100_ms;
 			const float speed = valid_velocity ? Vector3f(vehicle_local_position.vx, vehicle_local_position.vy,
 									      vehicle_local_position.vz).norm() : NAN;
+			const float speed_xy = valid_velocity ? Vector2f(vehicle_local_position.vx, vehicle_local_position.vy).norm() : NAN;
+			const bool thrust_override_allowed = _vehicle_control_mode.flag_armed
+					&& !_vehicle_control_mode.flag_control_termination_enabled && flying
+					&& !_vehicle_land_detected.landed && !_vehicle_land_detected.ground_contact;
+			const auto thrust_request = _dock_thrust_control.update(_dock_thrust, control_now,
+					_vehicle_control_mode.source_id, thrust_override_allowed, speed);
+			const bool climb_selected = _param_dock_brake_enable.get() && _param_dock_brake_mode.get() == 1;
+			const bool climb_requested = climb_selected && (thrust_request.braking || _dock_fault_transfer.active());
+			const bool attitude_fresh = _vehicle_attitude.timestamp != 0
+					&& control_now >= _vehicle_attitude.timestamp
+					&& control_now - _vehicle_attitude.timestamp <= 100_ms
+					&& Quatf(_vehicle_attitude.q).isAllFinite();
+			const bool gyro_fresh = _vehicle_angular_velocity.timestamp != 0
+					&& control_now >= _vehicle_angular_velocity.timestamp
+					&& control_now - _vehicle_angular_velocity.timestamp <= 100_ms
+					&& Vector3f(_vehicle_angular_velocity.xyz).isAllFinite();
+			const float actual_tilt = attitude_fresh
+					? acosf(math::constrain(Dcmf(Quatf(_vehicle_attitude.q))(2, 2), -1.f, 1.f)) : NAN;
+			const bool attitude_settled = attitude_fresh && gyro_fresh
+					&& actual_tilt < math::radians(5.f)
+					&& hypotf(_vehicle_angular_velocity.xyz[0], _vehicle_angular_velocity.xyz[1])
+					< math::radians(10.f);
+			const bool climb_eligible = thrust_override_allowed && valid_velocity
+					&& vehicle_local_position.xy_valid && vehicle_local_position.z_valid
+					&& PX4_ISFINITE(vehicle_local_position.z) && PX4_ISFINITE(states.yaw)
+					&& attitude_fresh && gyro_fresh;
+			DockClimbBrake::Output climb{};
+
+			if (climb_requested && climb_eligible) {
+				const float configured_up = _param_dock_climb_speed.get() > 0.f
+					? _param_dock_climb_speed.get() : _param_mpc_z_vel_max_up.get();
+				const float configured_acc_up = _param_dock_climb_accel_up.get() > 0.f
+					? _param_dock_climb_accel_up.get() : _param_mpc_acc_up_max.get();
+				const float configured_acc_down = _param_dock_climb_accel_down.get() > 0.f
+					? _param_dock_climb_accel_down.get() : _param_mpc_acc_down_max.get();
+				const DockClimbBrake::Limits limits{
+					_param_dock_climb_height.get(),
+					math::min(configured_up, math::min(speed_up, _param_mpc_z_vel_max_up.get())),
+					math::min(configured_acc_up, _param_mpc_acc_up_max.get()),
+					math::min(configured_acc_down, _param_mpc_acc_down_max.get()),
+					_param_dock_dynamic_jerk.get(),
+					_param_dock_climb_duration.get(),
+					math::radians(_param_dock_climb_pitch_rate.get())};
+				climb = _dock_climb_brake.update(vehicle_local_position.z, vehicle_local_position.vz,
+						speed_xy, _control.dockBrakeTilt(), vehicle_local_position.z_reset_counter,
+						vehicle_local_position.delta_z, dt, attitude_settled, limits);
+				if (climb.active && !climb.complete) {
+					const bool allocator_fresh = _control_allocator_status.timestamp != 0
+						&& control_now >= _control_allocator_status.timestamp
+						&& control_now - _control_allocator_status.timestamp <= 100_ms;
+					const bool bad_allocation = allocator_fresh
+						&& (_control_allocator_status.handled_motor_failure_mask != 0
+						    || (!_control_allocator_status.torque_setpoint_achieved
+							&& hypotf(_control_allocator_status.unallocated_torque[0],
+								  _control_allocator_status.unallocated_torque[1]) > .05f));
+					const bool bad_attitude = fabsf(actual_tilt - _control.dockBrakeTilt())
+							  > math::radians(15.f);
+					_dock_climb_allocation_bad_since = bad_allocation
+						? (_dock_climb_allocation_bad_since == 0 ? control_now : _dock_climb_allocation_bad_since) : 0;
+					_dock_climb_attitude_bad_since = bad_attitude
+						? (_dock_climb_attitude_bad_since == 0 ? control_now : _dock_climb_attitude_bad_since) : 0;
+					if ((_dock_climb_allocation_bad_since != 0
+					     && control_now - _dock_climb_allocation_bad_since > 200_ms)
+					    || (_dock_climb_attitude_bad_since != 0
+						&& control_now - _dock_climb_attitude_bad_since > 300_ms)) {
+						_dock_climb_brake.abort();
+						climb = {};
+					}
+				}
+
+				if (!climb.active && _dock_fault_transfer.active()) {
+					_dock_fault_transfer.cancel();
+				}
+
+			} else if (climb_requested) {
+				_dock_climb_brake.abort();
+				if (_dock_fault_transfer.active()) { _dock_fault_transfer.cancel(); }
+			} else if (!(_dock_fault_transfer.pending() && climb_selected
+				     && (_dock_climb_brake.active() || _dock_climb_brake.failed()))) {
+				_dock_climb_brake.reset();
+				_dock_climb_allocation_bad_since = 0;
+				_dock_climb_attitude_bad_since = 0;
+			}
+
 			const bool dock_fault_to_hold = _param_dock_exit_mode.get() == 1
 					&& _dock_fault_transfer.active() && PX4_ISFINITE(speed)
 					&& vehicle_local_position.xy_valid && vehicle_local_position.z_valid
@@ -573,9 +661,12 @@ void MulticopterPositionControl::Run()
 				// Without a fresh position, velocity and heading, leave the native RTL failsafe in charge.
 				_dock_fault_transfer.cancel();
 			}
+			const float yaw_release_speed = dock_fault_to_hold ? .1f
+					: math::constrain(_param_dock_recovery_yaw_speed.get(), .1f, 20.f);
+			const float yaw_guard_speed = climb.active && !climb.complete && PX4_ISFINITE(speed)
+					? math::max(speed, yaw_release_speed) : speed;
 			const auto yaw_guard = _dock_failsafe_yaw.update(_dock_fault_transfer.active(),
-						speed, states.yaw, _setpoint.yaw,
-						dock_fault_to_hold ? .1f : math::constrain(_param_dock_recovery_yaw_speed.get(), .1f, 20.f),
+						yaw_guard_speed, states.yaw, _setpoint.yaw, yaw_release_speed,
 						math::radians(math::constrain(_param_mpc_yawrauto_max.get(), 1.f, 90.f)), dt,
 						vehicle_local_position.heading_reset_counter, vehicle_local_position.delta_heading);
 			if (yaw_guard.release_to_rtl && !dock_fault_to_hold) {
@@ -600,6 +691,7 @@ void MulticopterPositionControl::Run()
 					control_setpoint.acceleration[axis] = NAN;
 					control_setpoint.jerk[axis] = NAN;
 				}
+				if (climb.active) { control_setpoint.velocity[2] = climb.velocity_z; }
 			} else if (_dock_rtl_velocity_ramp.active()) {
 				const Vector3f target_velocity(control_setpoint.velocity);
 				const Vector3f ramped_velocity = _dock_rtl_velocity_ramp.update(target_velocity,
@@ -612,6 +704,13 @@ void MulticopterPositionControl::Run()
 						control_setpoint.jerk[axis] = NAN;
 					}
 				}
+			}
+			if (climb.active && !yaw_guard.hold_translation && !dock_fault_to_hold) {
+				// Normal predicted pass: use the same vertical braking trajectory.
+				control_setpoint.position[2] = NAN;
+				control_setpoint.velocity[2] = climb.velocity_z;
+				control_setpoint.acceleration[2] = NAN;
+				control_setpoint.jerk[2] = NAN;
 			}
 			_control.setInputSetpoint(control_setpoint);
 
@@ -637,27 +736,26 @@ void MulticopterPositionControl::Run()
 
 			_control.setState(states);
 
-			const hrt_abstime now = hrt_absolute_time();
-
-			const bool thrust_override_allowed = _vehicle_control_mode.flag_armed
-					&& !_vehicle_control_mode.flag_control_termination_enabled && flying
-					&& !_vehicle_land_detected.landed && !_vehicle_land_detected.ground_contact;
-			const bool speed_valid = vehicle_local_position.v_xy_valid && vehicle_local_position.v_z_valid
-					&& now >= vehicle_local_position.timestamp && now - vehicle_local_position.timestamp <= 100_ms;
-			const float measured_speed = speed_valid ? Vector3f(vehicle_local_position.vx, vehicle_local_position.vy,
-						    vehicle_local_position.vz).norm() : NAN;
-			const auto thrust_request = _dock_thrust_control.update(_dock_thrust, now,
-					_vehicle_control_mode.source_id, thrust_override_allowed, measured_speed);
 			_control.setVelocityIntegralHold(thrust_request.slew_rate > 0.f && !thrust_request.braking);
 			const bool fault_brake = (yaw_guard.braking || (dock_fault_to_hold && speed >= .5f))
 					&& _param_dock_brake_enable.get();
-			_control.setDockBraking(fault_brake || thrust_request.braking,
+			const bool brake_enabled = climb_selected ? climb.active && !climb.complete
+					: fault_brake || thrust_request.braking;
+			if (_dock_fault_transfer.pending() && climb_selected && _dock_climb_brake.active()) {
+				_control.suspendDockBraking();
+			} else {
+				_control.setDockBraking(brake_enabled,
 					       fault_brake ? _param_dock_brake_thrust.get() : thrust_request.thrust,
-					       fault_brake ? math::radians(_param_dock_brake_rate.get()) : thrust_request.brake_rate,
+					       climb.active ? math::radians(_param_dock_climb_pitch_rate.get())
+					       : (fault_brake ? math::radians(_param_dock_brake_rate.get()) : thrust_request.brake_rate),
 					       fault_brake ? _param_dock_brake_speed.get() : thrust_request.brake_speed);
+			}
+			_control.setDockClimb(climb.active && !climb.complete, climb.capture,
+					      math::radians(_param_dock_climb_tilt.get()));
 
 			// Run position control
-			if (_control.update(dt)) {
+			const bool control_update_success = _control.update(dt);
+			if (control_update_success) {
 
 				// Valid control update - store for fallback
 				_last_valid_setpoint = control_setpoint;
@@ -667,9 +765,11 @@ void MulticopterPositionControl::Run()
 				// Fallback/failsafe must be able to change thrust immediately.
 				_control.setVelocityIntegralHold(false);
 				_control.setDockBraking(false);
+				_dock_climb_brake.abort();
+				if (_dock_fault_transfer.active()) { _dock_fault_transfer.cancel(); }
 
 				// Initial update failed - Try fallback if within timeout
-				if (now < _last_valid_setpoint.timestamp + 200_ms) {
+				if (control_now < _last_valid_setpoint.timestamp + 200_ms) {
 					// Use last valid setpoint
 					adjustSetpointForEKFResets(vehicle_local_position, _last_valid_setpoint);
 					_control.setInputSetpoint(_last_valid_setpoint);
@@ -700,10 +800,26 @@ void MulticopterPositionControl::Run()
 			_control.getAttitudeSetpoint(attitude_setpoint);
 			attitude_setpoint.timestamp = hrt_absolute_time();
 			_vehicle_attitude_setpoint_pub.publish(attitude_setpoint);
+			dock_brake_status_s brake_status{};
+			brake_status.timestamp = hrt_absolute_time();
+			brake_status.active = control_update_success && climb.active;
+			brake_status.climb = brake_status.active;
+			brake_status.capture = brake_status.active && climb.capture;
+			brake_status.complete = brake_status.active && climb.complete;
+			brake_status.allow_floor = brake_status.active && climb.allow_floor;
+			brake_status.capture_floor = brake_status.capture
+					&& math::max(actual_tilt, _control.dockBrakeTilt()) > math::radians(5.f)
+					? _param_dock_brake_thrust.get() : 0.f;
+			brake_status.height_used = brake_status.active ? climb.height_used : NAN;
+			_dock_brake_status_pub.publish(brake_status);
 
 		} else {
 			// an update is necessary here because otherwise the takeoff state doesn't get skipped with non-altitude-controlled modes
+			_dock_climb_brake.reset();
 			_control.setDockBraking(false);
+			dock_brake_status_s brake_status{};
+			brake_status.timestamp = hrt_absolute_time();
+			_dock_brake_status_pub.publish(brake_status);
 			_takeoff.updateTakeoffState(_vehicle_control_mode.flag_armed, _vehicle_land_detected.landed, false, 10.f, true,
 						    vehicle_local_position.timestamp_sample);
 			_control.resetIntegral();

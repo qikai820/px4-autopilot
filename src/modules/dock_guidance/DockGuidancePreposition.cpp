@@ -346,7 +346,7 @@ void DockGuidance::run_preposition(hrt_abstime now) {
       !Vector3f(local.vx, local.vy, local.vz).isAllFinite() ||
       !std::isfinite(local.ref_lat) || !std::isfinite(local.ref_lon) ||
       !std::isfinite(local.ref_alt)) {
-    invalidate_setpoint(now, "preposition local position invalid");
+    invalidate_setpoint(now, "preposition local position invalid", false);
     publish_preposition_status(now, 5, false);
     return;
   }

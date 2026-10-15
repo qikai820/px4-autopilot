@@ -24,13 +24,13 @@ void DockGuidance::compute_relative_control(const Vector3f &direction, const Vec
   if (!_local_pos_sub.copy(&local) || !local.xy_valid || !local.z_valid ||
       !local.v_xy_valid || !local.v_z_valid ||
       !dock_motion::state_sample_time(local.timestamp_sample, local.timestamp, now, 100_ms, sample)) {
-    invalidate_setpoint(now, "relative guidance local state unavailable");
+    invalidate_setpoint(now, "relative guidance local state unavailable", false);
     return;
   }
   _velocity_ned = Vector3f(local.vx, local.vy, local.vz);
   const Vector3f own = Vector3f(local.x, local.y, local.z) + _velocity_ned * ((now - sample) * 1e-6f);
   if (!own.isAllFinite() || !_velocity_ned.isAllFinite()) {
-    invalidate_setpoint(now, "relative guidance local state nonfinite");
+    invalidate_setpoint(now, "relative guidance local state nonfinite", false);
     return;
   }
   auto &c = _relative_context;
@@ -281,7 +281,7 @@ bool DockGuidance::relative_terminal(hrt_abstime now, bool blind) {
       local.xy_reset_counter != _xy_reset_counter || local.z_reset_counter != _z_reset_counter ||
       local.vxy_reset_counter != _vxy_reset_counter || local.vz_reset_counter != _vz_reset_counter ||
       !dock_motion::state_sample_time(local.timestamp_sample, local.timestamp, now, 100_ms, sample)) {
-    invalidate_setpoint(now, "relative terminal state/time limit");
+    invalidate_setpoint(now, "relative terminal state/time limit", false);
     return false;
   }
   _velocity_ned = Vector3f(local.vx, local.vy, local.vz);

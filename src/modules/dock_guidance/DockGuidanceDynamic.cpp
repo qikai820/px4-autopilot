@@ -201,7 +201,7 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
     if (!_local_pos_sub.copy(&local) || !local.z_valid || !local.v_z_valid ||
         now < local.timestamp || now - local.timestamp > 100_ms ||
         !std::isfinite(local.z) || !std::isfinite(local.vz) || !std::isfinite(_startup_target_z)) {
-      invalidate_setpoint(now, "startup climb local height unavailable");
+      invalidate_setpoint(now, "startup climb local height unavailable", false);
       return;
     }
     height_local = local;
@@ -687,14 +687,14 @@ bool DockGuidance::dynamic_terminal(hrt_abstime now, bool blind) {
       now - _terminal_started_us >
           static_cast<uint64_t>(math::constrain(_param_dock_terminal_max_time.get(), .1f, 10.f) *
                                 1e6f)) {
-    invalidate_setpoint(now, "dynamic terminal state/time limit");
+    invalidate_setpoint(now, "dynamic terminal state/time limit", false);
     return false;
   }
   _velocity_ned = Vector3f(local.vx, local.vy, local.vz);
   const Vector3f own =
       Vector3f(local.x, local.y, local.z) + _velocity_ned * ((now - local.timestamp) * 1e-6f);
   if (!own.isAllFinite() || !_velocity_ned.isAllFinite()) {
-    invalidate_setpoint(now, "dynamic terminal nonfinite local state");
+    invalidate_setpoint(now, "dynamic terminal nonfinite local state", false);
     return false;
   }
   _estimated_relative = _target_motion.relative(now, own);
@@ -783,7 +783,7 @@ void DockGuidance::publish_predicted_pass(hrt_abstime now) {
   if (!_local_pos_sub.copy(&local) || !local.v_xy_valid || !local.v_z_valid ||
       !local.timestamp || now < local.timestamp || now - local.timestamp > 500_ms ||
       !Vector3f(local.vx, local.vy, local.vz).isAllFinite() || !std::isfinite(local.heading)) {
-    invalidate_setpoint(now, "post-pass local velocity/heading invalid");
+    invalidate_setpoint(now, "post-pass local velocity/heading invalid", false);
     return;
   }
   const float dt = _last_control_update_us && now > _last_control_update_us
@@ -799,7 +799,7 @@ void DockGuidance::publish_predicted_pass(hrt_abstime now) {
       math::radians(math::constrain(_param_dock_yaw_rate.get(), 1.f, 90.f)), dt,
       local.heading_reset_counter, local.delta_heading);
   if (!std::isfinite(recovery_yaw)) {
-    invalidate_setpoint(now, "post-pass heading gate invalid");
+    invalidate_setpoint(now, "post-pass heading gate invalid", false);
     return;
   }
   _yaw_setpoint_rad = recovery_yaw;

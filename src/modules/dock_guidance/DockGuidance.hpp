@@ -45,6 +45,7 @@
 #include <uORB/topics/dock_guidance_relative.h>
 #include <uORB/topics/dock_preposition_status.h>
 #include <uORB/topics/dock_guidance_thrust.h>
+#include <uORB/topics/dock_brake_status.h>
 #include <uORB/topics/gimbal_controls.h>
 #include <uORB/topics/parameter_update.h>
 #include <uORB/topics/register_ext_component_reply.h>
@@ -183,7 +184,7 @@ private:
   bool get_delayed_state(hrt_abstime exposure,
                          matrix::Vector3f &att_deg,
                          matrix::Vector3f &gyro_dps) const;
-  void invalidate_setpoint(hrt_abstime timestamp, const char *reason);
+  void invalidate_setpoint(hrt_abstime timestamp, const char *reason, bool guidance_fault = true);
   void reset_tracking_state();
 
   // 曝光时刻的相机视线转至 NED，滤波并估计视线角速度，再选择静态/动态控制路径。
@@ -230,6 +231,7 @@ private:
   uORB::Subscription _vehicle_thrust_sub{ORB_ID(vehicle_thrust_setpoint)};
   uORB::Subscription _hover_thrust_sub{ORB_ID(hover_thrust_estimate)};
   uORB::Subscription _vehicle_status_sub{ORB_ID(vehicle_status)};
+  uORB::Subscription _dock_brake_status_sub{ORB_ID(dock_brake_status)};
   uORB::Subscription _land_sub{ORB_ID(vehicle_land_detected)};
   uORB::Subscription _register_ext_component_reply_sub{
       ORB_ID(register_ext_component_reply)};
@@ -317,6 +319,7 @@ private:
   hrt_abstime _dock_activation_time{0};
   bool _vision_degraded{false};
   bool _mode_fault_latched{false};
+  bool _fault_brake_eligible{false};
   bool _fault_hold_pending{false};
   hrt_abstime _exit_stable_since_us{0};
   hrt_abstime _last_exit_request_us{0};
@@ -511,6 +514,7 @@ private:
       (ParamFloat<px4::params::DOCK_THR>)_param_dock_thrust,
       (ParamFloat<px4::params::DOCK_THR_RATE>)_param_dock_thrust_rate,
       (ParamBool<px4::params::DOCK_BRK_EN>)_param_dock_brake_enable,
+      (ParamInt<px4::params::DOCK_BRK_MODE>)_param_dock_brake_mode,
       (ParamFloat<px4::params::DOCK_BRK_THR>)_param_dock_brake_thrust,
       (ParamFloat<px4::params::DOCK_BRK_RATE>)_param_dock_brake_rate,
       (ParamFloat<px4::params::DOCK_BRK_VEL>)_param_dock_brake_speed,

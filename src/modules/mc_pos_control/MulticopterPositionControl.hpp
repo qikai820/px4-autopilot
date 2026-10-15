@@ -44,6 +44,7 @@
 #include "DockFailsafeYaw.hpp"
 #include "DockRtlVelocityRamp.hpp"
 #include "DockFaultTransfer.hpp"
+#include "DockClimbBrake.hpp"
 
 #include <drivers/drv_hrt.h>
 #include <lib/mathlib/math/filter/AlphaFilter.hpp>
@@ -63,6 +64,10 @@
 #include <uORB/Subscription.hpp>
 #include <uORB/SubscriptionCallback.hpp>
 #include <uORB/topics/hover_thrust_estimate.h>
+#include <uORB/topics/dock_brake_status.h>
+#include <uORB/topics/control_allocator_status.h>
+#include <uORB/topics/vehicle_attitude.h>
+#include <uORB/topics/vehicle_angular_velocity.h>
 #include <uORB/topics/parameter_update.h>
 #include <uORB/topics/trajectory_setpoint.h>
 #include <uORB/topics/vehicle_attitude_setpoint.h>
@@ -103,6 +108,7 @@ private:
 	uORB::PublicationData<takeoff_status_s>              _takeoff_status_pub{ORB_ID(takeoff_status)};
 	uORB::Publication<vehicle_attitude_setpoint_s>	     _vehicle_attitude_setpoint_pub{ORB_ID(vehicle_attitude_setpoint)};
 	uORB::Publication<vehicle_local_position_setpoint_s> _local_pos_sp_pub{ORB_ID(vehicle_local_position_setpoint)};	/**< vehicle local position setpoint publication */
+	uORB::Publication<dock_brake_status_s> _dock_brake_status_pub{ORB_ID(dock_brake_status)};
 
 	uORB::SubscriptionCallbackWorkItem _local_pos_sub{this, ORB_ID(vehicle_local_position)};	/**< vehicle local position */
 
@@ -110,6 +116,9 @@ private:
 
 	uORB::Subscription _hover_thrust_estimate_sub{ORB_ID(hover_thrust_estimate)};
 	uORB::Subscription _dock_thrust_sub{ORB_ID(dock_guidance_thrust)};
+	uORB::Subscription _vehicle_attitude_sub{ORB_ID(vehicle_attitude)};
+	uORB::Subscription _vehicle_angular_velocity_sub{ORB_ID(vehicle_angular_velocity)};
+	uORB::Subscription _control_allocator_status_sub{ORB_ID(control_allocator_status)};
 	uORB::Subscription _vehicle_status_sub{ORB_ID(vehicle_status)};
 	uORB::Subscription _trajectory_setpoint_sub{ORB_ID(trajectory_setpoint)};
 	uORB::Subscription _vehicle_constraints_sub{ORB_ID(vehicle_constraints)};
@@ -128,6 +137,12 @@ private:
 	DockFailsafeYaw _dock_failsafe_yaw;
 	DockFaultTransfer _dock_fault_transfer;
 	DockRtlVelocityRamp _dock_rtl_velocity_ramp;
+	DockClimbBrake _dock_climb_brake;
+	vehicle_attitude_s _vehicle_attitude{};
+	vehicle_angular_velocity_s _vehicle_angular_velocity{};
+	control_allocator_status_s _control_allocator_status{};
+	hrt_abstime _dock_climb_allocation_bad_since{0};
+	hrt_abstime _dock_climb_attitude_bad_since{0};
 
 	vehicle_constraints_s _vehicle_constraints {
 		.timestamp = 0,
@@ -166,9 +181,18 @@ private:
 		(ParamFloat<px4::params::DOCK_REC_YAW_V>)   _param_dock_recovery_yaw_speed,
 		(ParamInt<px4::params::DOCK_EXIT_MODE>)    _param_dock_exit_mode,
 		(ParamBool<px4::params::DOCK_BRK_EN>)       _param_dock_brake_enable,
+		(ParamInt<px4::params::DOCK_BRK_MODE>)      _param_dock_brake_mode,
 		(ParamFloat<px4::params::DOCK_BRK_THR>)    _param_dock_brake_thrust,
 		(ParamFloat<px4::params::DOCK_BRK_RATE>)   _param_dock_brake_rate,
 		(ParamFloat<px4::params::DOCK_BRK_VEL>)    _param_dock_brake_speed,
+		(ParamFloat<px4::params::DOCK_CLB_P_RATE>) _param_dock_climb_pitch_rate,
+		(ParamFloat<px4::params::DOCK_CLB_TILT>)   _param_dock_climb_tilt,
+		(ParamFloat<px4::params::DOCK_CLB_DH_MAX>) _param_dock_climb_height,
+		(ParamFloat<px4::params::DOCK_CLB_VMAX>)   _param_dock_climb_speed,
+		(ParamFloat<px4::params::DOCK_CLB_A_UP>)   _param_dock_climb_accel_up,
+		(ParamFloat<px4::params::DOCK_CLB_A_DN>)   _param_dock_climb_accel_down,
+		(ParamFloat<px4::params::DOCK_DYN_JERK>)   _param_dock_dynamic_jerk,
+		(ParamFloat<px4::params::DOCK_CLB_TMAX>)   _param_dock_climb_duration,
 
 		(ParamFloat<px4::params::MPC_VEL_LP>)       _param_mpc_vel_lp,
 		(ParamFloat<px4::params::MPC_VEL_NF_FRQ>)   _param_mpc_vel_nf_frq,

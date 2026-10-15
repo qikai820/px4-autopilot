@@ -53,6 +53,7 @@
 #include <uORB/topics/actuator_controls_status.h>
 #include <uORB/topics/battery_status.h>
 #include <uORB/topics/dock_guidance_thrust.h>
+#include <uORB/topics/dock_brake_status.h>
 #include <uORB/topics/control_allocator_status.h>
 #include <uORB/topics/manual_control_setpoint.h>
 #include <uORB/topics/parameter_update.h>
@@ -99,6 +100,7 @@ private:
 
 	uORB::Subscription _battery_status_sub{ORB_ID(battery_status)};
 	uORB::Subscription _dock_thrust_sub{ORB_ID(dock_guidance_thrust)};
+	uORB::Subscription _dock_brake_status_sub{ORB_ID(dock_brake_status)};
 	uORB::Subscription _local_pos_sub{ORB_ID(vehicle_local_position)};
 	uORB::Subscription _control_allocator_status_sub{ORB_ID(control_allocator_status)};
 	uORB::Subscription _manual_control_setpoint_sub{ORB_ID(manual_control_setpoint)};
@@ -120,11 +122,13 @@ private:
 	vehicle_control_mode_s	_vehicle_control_mode{};
 	vehicle_status_s	_vehicle_status{};
 	dock_guidance_thrust_s _dock_thrust{};
+	dock_brake_status_s _dock_brake_status{};
 	vehicle_local_position_s _local_pos{};
 	DockThrustControl _dock_thrust_control;
 	DockThrottleSlew _dock_throttle_slew;
 	DockFaultTransfer _dock_fault_transfer;
 	bool _dock_fault_braking_complete{false};
+	hrt_abstime _dock_fault_handoff_time{0};
 
 	bool _landed{true};
 	bool _ground_contact{true};
@@ -150,6 +154,7 @@ private:
 		(ParamFloat<px4::params::MPC_THR_MIN>) _param_mpc_thr_min,
 		(ParamFloat<px4::params::MPC_THR_MAX>) _param_mpc_thr_max,
 		(ParamBool<px4::params::DOCK_BRK_EN>) _param_dock_brake_enable,
+		(ParamInt<px4::params::DOCK_BRK_MODE>) _param_dock_brake_mode,
 		(ParamFloat<px4::params::DOCK_BRK_TMIN>) _param_dock_brake_min_throttle,
 		(ParamFloat<px4::params::DOCK_BRK_TVEL>) _param_dock_brake_min_speed,
 		(ParamFloat<px4::params::DOCK_REC_YAW_V>) _param_dock_recovery_yaw_speed,

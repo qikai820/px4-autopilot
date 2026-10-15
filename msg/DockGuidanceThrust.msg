@@ -8,3 +8,4 @@ float32 brake_speed              # horizontal speed for full braking authority (
 uint8 source_id                  # registered Dock navigation mode ID
 bool valid                      # active, airborne and healthy guidance
 bool braking                    # post-pass thrust-preserving attitude braking, with relaxed height control
+bool brake_fault_eligible       # Dock guidance fault, suitable for controlled braking after verified RTL handoff

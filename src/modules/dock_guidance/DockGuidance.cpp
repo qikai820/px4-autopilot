@@ -389,7 +389,7 @@ void DockGuidance::push_delay_history(hrt_abstime timestamp) {
     _state_history.reset();
     _estimator_reset_reason = 4;
     if (_param_dock_dyn_enable.get() && _dock_mode_active) {
-      invalidate_setpoint(timestamp, "dynamic local position reset");
+      invalidate_setpoint(timestamp, "dynamic local position reset", false);
     }
   }
   const int slot = _state_history.write(timestamp);
@@ -582,7 +582,7 @@ void DockGuidance::reset_tracking_state() {
 }
 
 void DockGuidance::invalidate_setpoint(hrt_abstime timestamp,
-                                       const char *reason) {
+                                       const char *reason, bool guidance_fault) {
   const bool was_active = _dock_mode_active;
   const float last_yaw_setpoint_rad = _yaw_setpoint_rad;
 
@@ -591,6 +591,9 @@ void DockGuidance::invalidate_setpoint(hrt_abstime timestamp,
   }
 
   if (was_active) {
+    if (!_mode_fault_latched) {
+      _fault_brake_eligible = guidance_fault;
+    }
     _mode_fault_latched = true;
     _fault_hold_pending = _param_dock_exit_mode.get() == 1;
     _exit_stable_since_us = 0;
@@ -886,11 +889,13 @@ void DockGuidance::update_mode_state() {
   if (_mode_fault_latched && (_mode_id >= 0) &&
       (status.nav_state_user_intention != static_cast<uint8_t>(_mode_id))) {
     _mode_fault_latched = false;
+    _fault_brake_eligible = false;
     PX4_INFO("dock fault latch cleared by mode deselection");
   }
 
   if (active && !_dock_mode_active) {
     _dock_mode_active = true;
+    _fault_brake_eligible = false;
     _closest_target_distance_m = INFINITY;
     _closest_target_distance_reported = false;
     _fault_hold_pending = false;
@@ -1034,6 +1039,18 @@ void DockGuidance::maybe_request_exit_mode(hrt_abstime now) {
     return;
   }
 
+  // An active climb session owns the vertical arrest. Do not leave Dock on a
+  // transient low-speed sample before the shared controller declares it done.
+  if (_param_dock_brake_enable.get() && _param_dock_brake_mode.get() == 1) {
+    dock_brake_status_s brake{};
+    if (_dock_brake_status_sub.copy(&brake) && brake.timestamp != 0 &&
+        now >= brake.timestamp && now - brake.timestamp <= 100_ms &&
+        brake.active && brake.climb && !brake.complete) {
+      _exit_stable_since_us = 0;
+      return;
+    }
+  }
+
   if (_exit_stable_since_us == 0) {
     _exit_stable_since_us = now;
     return;
@@ -1043,7 +1060,9 @@ void DockGuidance::maybe_request_exit_mode(hrt_abstime now) {
     return;
   }
 
-  const uint8_t destination = _param_dock_exit_mode.get() == 1
+  const bool climb_post_pass = post_pass && _param_dock_brake_enable.get() &&
+                               _param_dock_brake_mode.get() == 1;
+  const uint8_t destination = (_param_dock_exit_mode.get() == 1 || climb_post_pass)
       ? vehicle_status_s::NAVIGATION_STATE_AUTO_LOITER
       : vehicle_status_s::NAVIGATION_STATE_AUTO_RTL;
   vehicle_command_s command{};
@@ -1071,6 +1090,7 @@ void DockGuidance::publish_thrust_request(hrt_abstime timestamp) {
   request.thrust = _param_dock_thrust.get();
   request.slew_rate = _param_dock_thrust_rate.get();
   request.braking = _stage == Stage::PASS_PREDICTED && _param_dock_brake_enable.get();
+  request.brake_fault_eligible = _mode_fault_latched && _fault_brake_eligible;
   if (request.braking) {
     // 独立的制动下限；追踪阶段的高油门只作为末级斜坡起点，避免收角时仍强制持续爬升。
     request.thrust = _param_dock_brake_thrust.get();
@@ -1149,7 +1169,7 @@ void DockGuidance::publish_terminal_dash_setpoint(hrt_abstime timestamp) {
       !velocity_ned.isAllFinite() ||
       !_terminal_velocity_ned.isAllFinite() ||
       (_terminal_velocity_ned.norm() < 0.1f)) {
-    invalidate_setpoint(timestamp, "terminal local velocity invalid");
+    invalidate_setpoint(timestamp, "terminal local velocity invalid", false);
     return;
   }
 
@@ -1822,7 +1842,7 @@ void DockGuidance::process_observation(float los_yaw_deg, float los_pitch_deg,
   }
 
   if (!_velocity_valid) {
-    invalidate_setpoint(now, "local velocity invalid");
+    invalidate_setpoint(now, "local velocity invalid", false);
     return;
   }
 

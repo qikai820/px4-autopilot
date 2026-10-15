@@ -11,15 +11,19 @@
 class DockFaultTransfer {
 public:
 	bool update(uint64_t now, const vehicle_control_mode_s &mode, const vehicle_status_s &status,
-		    const dock_guidance_thrust_s &dock, bool airborne)
+		    const dock_guidance_thrust_s &dock, bool airborne, bool require_fault_eligible = false)
 	{
 		// Dock clears activation_timestamp as soon as its mode is deselected. Cache
 		// the last fresh identity so subscriber ordering cannot hide the handoff.
-		if (mode.source_id != 0 && dock.source_id == mode.source_id
+		// A newly invalidated Dock request may arrive after the control mode update.
+		const uint8_t expected_source_id = mode.source_id != 0 ? mode.source_id
+				: (_pending_since != 0 ? _pending_source_id : _previous_source_id);
+		if (expected_source_id != 0 && dock.source_id == expected_source_id
 		    && dock.activation_timestamp != 0 && dock.timestamp != 0
 		    && now >= dock.timestamp && now - dock.timestamp <= 100000) {
 			_last_dock_source_id = dock.source_id;
 			_last_dock_seen = dock.timestamp;
+			_last_fault_eligible = dock.brake_fault_eligible;
 		}
 
 		if (_previous_source_id != 0 && mode.source_id != _previous_source_id
@@ -41,8 +45,10 @@ public:
 			 && status.timestamp != 0 && now >= status.timestamp && now - status.timestamp <= 1000000;
 
 		if (_pending_since != 0 && rtl && status.failsafe
+		    && (!require_fault_eligible || _last_fault_eligible)
 		    && status.nav_state_user_intention == _pending_source_id) {
 			_active_source_id = _pending_source_id;
+			_active_fault_eligible = _last_fault_eligible;
 			_active = true;
 			_pending_since = 0;
 			return true;
@@ -55,6 +61,8 @@ public:
 	}
 
 	bool active() const { return _active; }
+	bool faultEligible() const { return _active && _active_fault_eligible; }
+	bool pending() const { return _pending_since != 0; }
 	void cancel() { _active = false; _pending_since = 0; }
 
 private:
@@ -65,4 +73,6 @@ private:
 	uint8_t _pending_source_id{0};
 	uint8_t _active_source_id{0};
 	bool _active{false};
+	bool _last_fault_eligible{false};
+	bool _active_fault_eligible{false};
 };
