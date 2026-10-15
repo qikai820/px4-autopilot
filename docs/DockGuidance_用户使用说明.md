@@ -4,17 +4,18 @@
 
 ## 1. 使用前先选工作路径
 
-DockGuidance 注册名为 **Dock Guidance** 的 PX4 外部模式。进入模式后发布 NED 三维速度和航向设定值，由 PX4 多旋翼位置、姿态和角速度控制器执行。它需要持续有效的视觉与本机状态。模块运行或注册成功，不等于可以进入模式；入模前还有视觉/预置、定位和传感器健康检查。
+DockGuidance 注册名为 **Dock Guidance** 的 PX4 外部模式。进入模式后发布 NED 三维速度和航向设定值，由 PX4 多旋翼位置、姿态和角速度控制器执行。预置阶段可以先使用外部目标位置流，交接后的对接阶段需要持续有效的视觉与本机状态。模块运行或注册成功，不等于可以进入模式；入模前还有视觉/预置、定位和传感器健康检查。
 
 | 场景 | 关键选择 | 所需数据 |
 |---|---|---|
-| 直接视觉引导，不使用外部目标后方预置 | `DOCK_PRE_EN=0` | 新鲜有效的 `viztra_observation`；高速接近通常还需目标相对 NED 位置 |
-| 先到目标轨迹后方，再切换视觉 | `DOCK_PRE_EN=1` | 新鲜的 `viztra_target` 位置与 NED 速度、本机有效全球参考和局部状态；视觉稳定后交接 |
+| 直接视觉引导，不使用外部目标预置 | `DOCK_PRE_EN=0` | 入模前已有可用的视觉引导设定值；高速接近通常还需目标相对 NED 位置 |
+| 先到目标轨迹后方，再切换视觉 | `DOCK_PRE_EN=1`、`DOCK_PRE_REAR=1` | 新鲜的 `viztra_target` 位置与 NED 速度、本机有效全球参考和局部状态；到达后方参考附近且视觉稳定后交接 |
+| 从当前位置方向接近目标，再切换视觉 | `DOCK_PRE_EN=1`、`DOCK_PRE_REAR=0` | 同样需要新鲜的 `viztra_target`；沿当前位置接近线向停靠参考点引导，视觉稳定后可在到达前交接 |
 | 普通静态控制路径 | `DOCK_DYN_EN=0` | 视觉 LOS；距离用于允许高速接近和末段判定 |
 | 静止或运动目标的三维相对交会 | `DOCK_DYN_EN=1`、`DOCK_TERM_EN=1`、`DOCK_PRED_EN=1` | 可信米制尺度：相对 NED 位置，或经标定且未裁剪的目标框宽高；仅有角度不足以确定交会距离 |
 | 单轴俯仰相机，用真实角度做坐标变换 | `DOCK_CAM_SERVO=1`、`DOCK_CAM_ENC_EN=1` | 舵机输出、MT6701 的连续 I²C 数据和已标定零位；舵机仍使用视觉误差控制 |
 
-**当前默认值需要特别核对：**`DOCK_PRE_EN=1`、`DOCK_TERM_EN=1`、`DOCK_DYN_EN=0`、`DOCK_CAM_ENC_EN=0`。没有 `viztra_target` 时，通常先关闭预置入口；`DOCK_TERM_EN=1` 会启用有时限的末段穿越，其超时是故障，不是对接成功。本文参数表列的是 `module.yaml` 默认值，板级 `param set-default` 和已保存参数可能覆盖它们；飞控上的 `param show` 才是实际值。
+**当前默认值需要特别核对：**`DOCK_PRE_EN=1`、`DOCK_PRE_REAR=1`、`DOCK_TERM_EN=1`、`DOCK_DYN_EN=0`、`DOCK_CAM_ENC_EN=0`。没有 `viztra_target` 时，通常先关闭预置入口；此时若视觉无效，Commander 会拒绝入模。`DOCK_TERM_EN=1` 会启用有时限的末段穿越，其超时是故障，不是对接成功。本文参数表列的是 `module.yaml` 默认值，板级 `param set-default` 和已保存参数可能覆盖它们；飞控上的 `param show` 才是实际值。
 
 ## 2. 固件、输入和输出
 
@@ -68,18 +69,45 @@ listener viztra_observation -n 5
 dock_guidance status
 ```
 
-若没有外部 `viztra_target` 后方预置数据，在**尚未进入 Dock 模式**时设置 `DOCK_PRE_EN=0`；若使用预置，保留 `DOCK_PRE_EN=1` 并检查 `listener viztra_target -n 5`、`listener dock_preposition_status -n 5`。`DOCK_PRE_REAR=1` 时还需到达后方参考附近并保持视觉稳定，才会切换到视觉引导；它不是仅凭收到一帧图像就交接。
+若没有外部 `viztra_target` 数据，在**尚未进入 Dock 模式**时设置 `DOCK_PRE_EN=0`；此时入模检查依赖已经生成的有效视觉设定值。`viztra_observation.valid=1` 是输入条件之一，还需通过时间戳、姿态/速度和相机历史检查。若视觉一直为 `valid=0`，关闭预置不能让模式变得可进入。
 
 ```sh
 param set DOCK_PRE_EN 0
 param save
 ```
 
-以上两行仅用于**没有外部目标流**的直接视觉路径；使用预置时保留 `DOCK_PRE_EN=1`。
+以上两行仅用于**没有外部目标流**的直接视觉路径。有新鲜外部目标流，且希望从当前位置方向接近时，使用下列配置：
+
+```sh
+param set DOCK_PRE_EN 1
+param set DOCK_PRE_REAR 0
+param show DOCK_PRE_DIST
+param save
+```
+
+`DOCK_PRE_REAR=0` 的任意方向预置需要包含该接近线逻辑的固件。`DOCK_PRE_DIST` 默认 100 m，可按场景核对后再修改已有保存值。它是无视觉时相对目标的**水平参考间距**，不是最终对接距离。距离大于该值时，参考点位于当前位置到预测目标位置的连线上；已经在该距离内时，参考点取本机当前位置，不再主动向目标水平靠近。移动目标仍有目标速度前馈，实际刹停和间距需看本机跟踪结果。预置过程中，新鲜视觉连续满足 `DOCK_PRE_VIS_T` 即可交接，无需先到达参考点；视觉始终无效时不会直接按外部目标坐标穿越。
+
+![俯视示意：0° 位于目标轨迹后方，90° 位于侧方](assets/dock_guidance/preposition_approach_angles.svg)
+
+图中 0° 和 90° 只是说明来向的相对方位：以目标运动方向的反向为 0°，侧方为 90°。它们不是需要设置的飞控角度参数。`DOCK_PRE_REAR=0` 按本机实际位置计算接近线；目标静止且没有历史运动方向时，`DOCK_PRE_REAR=1` 也会使用本机到目标的接近线作为后方参考方向。图中虚线只示意几何方向，不代表实际飞行轨迹或视觉交接已经满足条件。
+
+任意方向预置入模仍要求 `viztra_target` 的目标 ID 为 1、来源组件为 25、位置及 NED 速度有效且在 `DOCK_PRE_TOUT` 内，同时本机局部位置/速度和全球参考有效。视觉交接后还要按视觉路径的距离、视场与控制限制执行。地面或 HIL 验证时观察：
+
+```sh
+listener viztra_target -n 5
+listener dock_preposition_status -n 5
+listener viztra_observation -n 5
+listener dock_guidance_setpoint -n 5
+```
+
+预置中 `dock_preposition_status.state=2` 表示跟随参考点，`state=7` 表示已到参考点等待视觉；查看 `target_valid`、`reference_valid`、`reference_reached`、`visual_wait_s`、`target_age_s`、`reference_position_ned`、`guidance_position_ned` 与 `vehicle_position_ned`。`bypass_active=1` 表示正在绕开目标或匹配目标速度。`state=4` 表示已交接，随后 `dock_guidance_setpoint.stage` 应进入 `ALIGN`。`visual_stable=0` 或 `viztra_observation.valid=0` 时不能把已入模当作已具备视觉对接条件。
 
 ```sh
 param show DOCK_GUIDANCE
 param show DOCK_PRE_EN
+param show DOCK_PRE_REAR
+param show DOCK_PRE_DIST
+param show DOCK_PRE_TOUT
 param show DOCK_DYN_EN
 param show DOCK_TERM_EN
 param show DOCK_CAM_SERVO
@@ -88,9 +116,15 @@ param show DOCK_CAM_ENC_EN
 
 ### 3.2 校准相机和确认距离
 
-固定相机需核对 `DOCK_CAM_ROLL/PITCH/YAW` 与真实安装方向。单轴舵机需设置实际 PWM 输出为 `Gimbal Pitch (421)`，检查 `DOCK_CAM_P_MIN/MAX` 对应行程；PWM 通道反向与编码器方向是两件事。本工作树的 CUAV 板级默认脚本包含 `PWM_AUX_FUNC1=421` 和 `DOCK_CAM_SERVO=1`，但该脚本当前有未提交改动，不能替代对实际固件参数和输出的检查。
+固定相机需核对 `DOCK_CAM_ROLL/PITCH/YAW` 与真实安装方向。单轴舵机需设置实际 PWM 输出为 `Gimbal Pitch (421)`，检查 `DOCK_CAM_P_MIN/MAX` 对应行程；PWM 通道反向与编码器方向是两件事。按原代码的相机角定义，机身水平时，舵机命令 0° 使镜头朝机头正前方，+90° 使镜头朝上。`DOCK_CAM_PITCH` 是初始命令角；模块默认 0° 对应朝前，MicoAir H743 Dock 的板级默认值改为 90°。CUAV 板级脚本包含 `PWM_AUX_FUNC1=421` 和 `DOCK_CAM_SERVO=1`；仍需核对实际固件参数和输出。
+
+无编码器且相机实际行程不是默认 0°～90° 时，按 [无编码器舵机标定](DockGuidance_无编码器舵机标定.md) 测量光轴角/PWM 对应关系；`DOCK_CAM_OUT_LO/HI` 可分别设置行程两端的归一化输出，默认 `-1/+1` 保留旧映射。MicoAir H743 Dock 的 ES08MA 采用 1:1 传动，PWM5 实测端点为 90°/1500 μs 和 30°/2100 μs；启动角为 90°，软件下限为 30°。
 
 若接入 1:1 传动的 MT6701，先在未解锁状态按 [MT6701 相机角度使用说明](DockGuidance_MT6701_相机角度使用说明.md) 启动 I²C 驱动、执行 `dock_guidance calib_zero`、核对正向角和约 90° 的计数变化，再启用 `DOCK_CAM_ENC_EN=1`。0° 需要标定，90° 只作核对；编码器只用于相机到机体坐标变换，不改变舵机命令。
+
+![侧视示意：飞机水平放置时，相机光轴朝机头正前方为 0°，朝上为 +90°](assets/dock_guidance/camera_pitch_0_90.svg)
+
+图中机体轮廓取自 `dayin.stp` 的 X–Z 侧视投影，已按实际机头方向翻转为机头向右。机身长轴水平摆放仅为说明角度基准，不表示穿越机的飞行姿态；相机安装位置和转轴仅作示意。按原代码的相机坐标定义，镜头朝机头正前方为相机角 0°，向上抬至竖直为 +90°。编码器测量的是相机相对机体的角度，因此飞行中机体俯仰后，0° 不一定对地水平。实物零位应在朝前的 0° 位置执行 `dock_guidance calib_zero`，并核对舵机与编码器正向。这里的 0°/90° 与前文俯视图中的目标接近来向无关。
 
 观察 `viztra_observation.relative_position_valid`。`DOCK_LEGACY_APP=0`（默认）时，静态路径缺少有效相对 NED 位置会停留在对准阶段，不会按高速接近参数加速。`DOCK_LEGACY_APP=1` 可允许仅角度接近，但受 `DOCK_LEG_VMAX` 限制，而且没有可靠米制距离供末段控制。动态相对交会需要可信尺度和多帧相对变化率，不能从单帧目标框或仅角度推断真实三维距离。
 
@@ -99,7 +133,7 @@ param show DOCK_CAM_ENC_EN
 1. 在地面核对目标方向、相机角、舵机行程、本机位置/速度有效性和所有实际参数；先在受控低速场景验证视觉方向与限幅，再考虑高速参数。
 2. 执行 `dock_guidance status`，确认 `Dock mode: registered`、视觉状态正常、无故障锁存。若启用编码器，确认 `ready=1`、`fault=0`、样本年龄连续更新。
 3. 在支持该外部模式的飞行模式界面中选择 **Dock Guidance**。模式 ID 由 Commander 注册返回，不应在脚本中写死。入模成功后 `dock_guidance status` 的 `active` 变为 `yes`；`listener dock_guidance_setpoint -n 5` 的 `valid` 和 `stage` 用于确认当前引导状态。
-4. 不使用预置时，视觉先进入 `ALIGN`；目标在对准区内保持 `DOCK_ALIGN_T` 后，才可能加速。有预置时先进入 `PRE_POSITION`，通过目标位置/速度和连续视觉条件交接。运行中不要临时修改相机几何、编码器零位或动态路径开关；这些会清理历史或使引导失效。
+4. 不使用预置时，视觉先进入 `ALIGN`；目标在对准区内保持 `DOCK_ALIGN_T` 后，才可能加速。有预置时先进入 `PRE_POSITION`：`DOCK_PRE_REAR=1` 跟随轨迹后方参考点，`0` 跟随当前位置接近线上的参考点；交接后进入视觉 `ALIGN`。运行中不要临时修改预置方向、相机几何、编码器零位或动态路径开关；这些会改变参考路径或清理历史。
 5. 退出或发生故障后，先看飞行模式、`fault_latched` 和日志。真实视觉故障锁存后，须由驾驶员明确切换到其他模式，才会清除再次入模的锁存；不可依靠持续保持 Dock 开关自动反复重入。
 
 ## 4. 阶段和退出语义
@@ -114,7 +148,7 @@ param show DOCK_CAM_ENC_EN
 | 7 | `TERMINAL_DASH` | 已提交有界末段穿越；可能短时保持最后速度，受盲飞和总时限约束 |
 | 8 | `PASS_PREDICTED` | 估计穿越目标平面，进入通过后制动；**不是接触或对接成功传感器** |
 | 9、10 | `STARTUP_CLIMB`、`TRACK_CAPTURE` | 动态路径的启动高度/目标捕获阶段 |
-| 11 | `PRE_POSITION` | 使用外部目标轨迹进行后方预置 |
+| 11 | `PRE_POSITION` | 使用外部目标位置流预置；参考点由 `DOCK_PRE_REAR` 选择轨迹后方或当前位置接近线 |
 
 `DOCK_TERM_EN=1` 默认允许最大速度末段流程，不按 `DOCK_STOP_DIST` 提前停车。静态与动态路径的末段判据不同：静态路径可由距离或目标框比例触发 `TERMINAL_DASH`，超时会故障；三维相对交会路径还检查可达性、误差界和冻结速度穿越预测。任何 `PASS_PREDICTED` 或最近距离数字都只是估计，当前没有物理接触确认输入。
 
@@ -129,11 +163,14 @@ param show DOCK_CAM_ENC_EN
 | 参数 | 默认 | 作用 |
 |---|---:|---|
 | `DOCK_GUIDANCE` | 1 | 开机启动 DockGuidance 模块 |
-| `DOCK_PRE_EN` | 1 | 入模先走外部目标后方预置；无 `viztra_target` 时通常设为 0 |
-| `DOCK_PRE_DIST` | 100 m | 沿目标轨迹/接近线往后取参考点的距离 |
-| `DOCK_PRE_REAR` | 1 | 要求接近后方参考点再交接视觉；0 时可在视觉稳定后直接交接 |
+| `DOCK_PRE_EN` | 1 | 入模先走外部目标预置；无 `viztra_target` 时通常设为 0 |
+| `DOCK_PRE_DIST` | 100 m | 后方路径上的参考距离，或任意方向路径的水平参考间距；无视觉时减速趋向该参考点 |
+| `DOCK_PRE_WAIT_T` | 2 s | 到达后方或停靠参考点后，等待有效视觉的最长时间；超时按故障退出 |
+| `DOCK_PRE_CLEAR_D` | 50 m | 后方路径对外部目标的最小水平绕行距离；无法安全绕行则故障退出 |
+| `DOCK_PRE_REAR` | 1 | 1：沿轨迹到后方参考点再交接；0：从当前位置方向到停靠参考点再交接 |
 | `DOCK_PRE_RADIUS` | 250 m | 预置路径水平转弯半径下界 |
-| `DOCK_PRE_ZOFF` | 0 m | 后方参考点相对目标轨迹的高度偏置 |
+| `DOCK_PRE_YAW_R` | 30°/s | 预置阶段朝向预测目标的航向设定值变化率上限；视觉交接后使用 `DOCK_YAW_RATE` |
+| `DOCK_PRE_ZOFF` | 0 m | 预置参考点相对目标轨迹的高度偏置；任意方向路径在停靠距离内默认取本机当前位置，启动爬升仍可调整高度 |
 | `DOCK_PRE_VIS_T` | 0.3 s | 视觉连续有效达到此时间后允许交接 |
 | `DOCK_PRE_TOUT` | 800 ms | 外部目标位置/速度流的超时门槛，适配约 2 Hz 输入；已有保存值需手动确认 |
 | `DOCK_PRE_PRED_T` | 1 s | 外部目标运动外推时间上限 |
@@ -144,12 +181,13 @@ param show DOCK_CAM_ENC_EN
 |---|---:|---|
 | `DOCK_CAM_DLY` | 0 ms | 曝光到 Viztra 帧接收时间的延迟，供历史对齐；不表示舵机机械延迟 |
 | `DOCK_OBS_TOUT` | 150 ms | Dock 视觉帧超时门槛；与 `VIZTRA_TOUT` 不同 |
-| `DOCK_CAM_ROLL/PITCH/YAW` | -90/0/0° | 相机到机体安装角；启用编码器后实测俯仰角替代 PITCH 分量 |
+| `DOCK_CAM_ROLL/PITCH/YAW` | -90/0/0° | 相机到机体安装角；固定相机的 PITCH=0° 指朝前，启用舵机时 PITCH=0° 是初始命令角、指朝前；启用编码器后实测角替代 PITCH 分量 |
 | `DOCK_CAM_SERVO` | 0 | 启用单轴俯仰视觉舵机控制 |
 | `DOCK_CAM_ENC_EN` | 0 | 用 MT6701 实测角计算相机到机体旋转；不参与舵机控制 |
 | `DOCK_CAM_ENC_Z` | -1 count | 相机机体相对 0° 时的原始计数；-1 表示未标定 |
 | `DOCK_CAM_ENC_REV` | 0 | 反转测量角符号，不反转 PWM |
 | `DOCK_CAM_P_MIN/MAX` | 0/90° | 舵机行程端点，同时给编码器角度合理性检查定界 |
+| `DOCK_CAM_OUT_LO/HI` | -1/+1 | 行程低/高角度对应的归一化 `Gimbal Pitch` 输出；无编码器时按实测光轴角与 PWM 标定 |
 | `DOCK_CAM_P_RATE` | 5°/s | 舵机命令角变化率上限 |
 | `DOCK_CAM_P_TC` | 2 s | 图像俯仰误差到舵机转速的时间常数 |
 | `DOCK_CAM_P_DB` | 0.5° | 舵机俯仰误差死区 |
@@ -206,7 +244,7 @@ param show DOCK_CAM_ENC_EN
 | `DOCK_TERM_EN` | 1 | 启用有时限末段穿越，不按 `DOCK_STOP_DIST` 提前停车 |
 | `DOCK_TERM_DIST` | 0 m | 静态末段的距离触发阈值；0 禁用该触发 |
 | `DOCK_TERM_SIZE` | 0.10 | 目标框占画面尺寸比例的静态末段触发阈值 |
-| `DOCK_TERM_CFM` | 0.05 s | 静态末段进入条件确认时间 |
+| `DOCK_TERM_CFM` | 0.05 s | 末段进入条件连续确认时间 |
 | `DOCK_TERM_BLIND` | 0.50 s | 末段视觉丢失后允许的保持上限，另受总时限约束 |
 | `DOCK_TERM_MAX_T` | 1.5 s | 末段总时长上限；超时是故障，不是成功 |
 | `DOCK_TERM_FILT` | 10 Hz | 末段 LOS 滤波截止频率 |
@@ -246,8 +284,10 @@ listener vehicle_status -n 5
 |---|---|
 | 未看到 Dock Guidance 模式 | `DOCK_GUIDANCE`、`dock_guidance status` 的 `registered`、启动脚本和 Commander 状态 |
 | Viztra 连接正常但 Dock 视觉无效 | `viztra_status.observation_valid`、`viztra_observation.valid`、时间戳、画面目标及 `DOCK_OBS_TOUT`；有串口帧不等于有有效观测 |
-| 不能进入模式 | `fault_latched`、有效视觉或预置入口、定位/速度/姿态健康；启用编码器还需 `ready=1` |
-| 停留在 `PRE_POSITION` | `viztra_target` 的目标 ID/来源/位置速度有效位与时效、全球定位参考、`dock_preposition_status`、`DOCK_PRE_REAR` |
+| `DOCK_PRE_EN=0` 后不能进入模式 | 看 `viztra_observation.valid` 与 `protocol_status`、`dock_guidance_setpoint.valid`；`protocol_status=0x00` 表示有效位 `0x01` 未置位，即使持续收到帧也不能生成直接视觉入口。状态位 `0x02` 置位也表示跟踪停止 |
+| 使用预置仍不能进入模式 | 看 `viztra_target` 目标 ID/来源、位置和速度有效位、`DOCK_PRE_TOUT`，以及本机局部位置/速度和全球参考；再看 `fault_latched`，启用编码器时还需 `ready=1` |
+| `DOCK_PRE_REAR=0` 仍飞向轨迹后方 | 核对已刷入包含当前位置接近线逻辑的固件、实际 `param show DOCK_PRE_REAR`，以及 `dock_preposition_status.reference_position_ned` |
+| 停留在 `PRE_POSITION` | 看 `dock_preposition_status.target_valid/reference_valid/visual_stable/state`；目标流失效检查时效，视觉无效检查画面目标和 Viztra 锁定状态 |
 | 停留在 `ALIGN` | 目标是否处在 `DOCK_FOV_ALIGN` 内且持续 `DOCK_ALIGN_T`，是否有有效相对距离；舵机是否在行程端且画面仍偏离 |
 | 相机角或目标方向错误 | 安装角 `DOCK_CAM_ROLL/YAW`、编码器零位/反向、`camera_time_aligned`、`DOCK_CAM_DLY`；同时检查 PWM 反向是否只影响舵机 |
 | 接近速度低于 `DOCK_VEL_MAX` | `capture_speed_limit`、`DOCK_LEG_VMAX`、目标尺度/估计、FOV、MPC 各轴速度/加速度和推力限幅；命令速度与实速分开比较 |

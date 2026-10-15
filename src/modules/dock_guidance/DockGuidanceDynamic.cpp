@@ -99,10 +99,17 @@ void DockGuidance::update_target_motion(const viztra_observation_s &obs, const V
     record_closest_target_distance(range);
   }
   if (exposure) {
-    if (metric && !_relative_terminal_active) {
-      _relative_motion.update(exposure, own, own_velocity, los * range, sigma,
+    const bool terminal_image_safe = _relative_terminal_active &&
+        _bbox_edge_ratio < math::constrain(_param_dock_fov_soft.get(), .15f, .95f);
+    if (metric && (!_relative_terminal_active || terminal_image_safe)) {
+      const bool accepted = _relative_motion.update(exposure, own, own_velocity, los * range, sigma,
           math::max(.0005f, 2.f / math::min(fx, fy)),
           math::constrain(_param_dock_est_accel.get(), .1f, 20.f));
+      if (_relative_terminal_active && accepted) {
+        _terminal_plan_deadline = dock_motion::relative_terminal_deadline(
+            _terminal_started_us, now, _relative_motion.age(now),
+            _param_dock_terminal_blind.get(), _param_dock_terminal_max_time.get());
+      }
     }
     // 本机位置噪声会直接进入目标位置差分；量测方差必须纳入 EKF 位置误差，
     // 避免把本机定位抖动识别为目标运动。
@@ -293,48 +300,10 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
           _dynamic_max_closure * dock_motion::clamp((soft - _fov_ratio) / (soft - align), 0.f, 1.f);
       wanted_closure = dock_motion::distance_limited_approach_speed(_param_dock_terminal_enable.get(),
           wanted_closure, _estimated_relative.norm(), _param_dock_stop_dist.get(), deceleration);
-      const Vector3f relative_velocity = _velocity_ned - _target_velocity;
-      const float actual_closure = relative_velocity * direction;
-      const auto closest = dock_motion::predict_closest_approach(
-          _estimated_relative, _velocity_ned, _target_velocity, previous,
-          math::constrain(_param_dock_pred_response.get(), .05f, 2.f),
-          math::constrain(_param_dock_pred_time.get(), .2f, 10.f));
-      const auto point_evidence = dock_motion::assess_closest_approach(_target_motion, now, closest);
-      const float pass_time = point_evidence.time_upper_s +
-          _param_dock_pass_distance.get() / math::max(actual_closure, .5f);
-      // The target accepts entry from any direction: require a bounded 3-D
-      // closest approach rather than only a small error in a chosen plane.
-      const bool candidate =
-          _param_dock_terminal_enable.get() && _fov_ratio <= align &&
-          actual_closure > .5f && point_evidence.valid &&
-          pass_time < .8f * _param_dock_terminal_max_time.get() &&
-          point_evidence.miss_bound_m < _param_dock_pass_error.get() &&
-          (_param_dock_terminal_distance.get() <= 0.f ||
-           _estimated_relative.norm() <= _param_dock_terminal_distance.get());
-      if (candidate) {
-        if (!_terminal_candidate_since_us) {
-          _terminal_candidate_since_us = now;
-        }
-        if (now - _terminal_candidate_since_us >=
-            static_cast<uint64_t>(math::constrain(_param_dock_terminal_confirm.get(), .02f, 2.f) *
-                                  1e6f)) {
-          _terminal_direction = direction;
-          _terminal_started_us = now;
-          _terminal_blind_since_us = 0;
-          _terminal_velocity_ned = previous;
-          set_stage(Stage::TERMINAL_DASH);
-        }
-      } else {
-        _terminal_candidate_since_us = 0;
-      }
-      if (_stage != Stage::TERMINAL_DASH) {
-        set_stage(wanted_closure < _dynamic_max_closure - .05f
-                      ? Stage::TERMINAL_BRAKE
-                      : (_dynamic_closure >= wanted_closure - .05f ? Stage::MAX_SPEED_APPROACH
-                                                                   : Stage::ACCELERATE));
-      }
-    } else {
-      _terminal_candidate_since_us = 0;
+      set_stage(wanted_closure < _dynamic_max_closure - .05f
+                    ? Stage::TERMINAL_BRAKE
+                    : (_dynamic_closure >= wanted_closure - .05f ? Stage::MAX_SPEED_APPROACH
+                                                                 : Stage::ACCELERATE));
     }
   }
   if (_stage == Stage::TERMINAL_DASH) {
@@ -607,6 +576,40 @@ void DockGuidance::compute_dynamic_control(const Vector3f &direction, const Vect
       _point_time_upper = point_evidence.time_upper_s;
     }
   }
+  // Decide terminal entry from the velocity actually planned for publication.
+  // The former pre-planner check used the previous command, while the ULog
+  // point evidence described this new command. Keep the full target box and
+  // projected LOS inside the soft FOV before committing to a bounded dash.
+  const bool terminal_approach_stage = _stage == Stage::ACCELERATE ||
+      _stage == Stage::MAX_SPEED_APPROACH || _stage == Stage::TERMINAL_BRAKE;
+  const float actual_closure = (_velocity_ned - _target_velocity) * direction;
+  const float pass_time = _point_time_upper +
+      _param_dock_pass_distance.get() / math::max(actual_closure, .5f);
+  const bool pass_state_ready = dock_motion::classify_pass(_estimated_relative, direction,
+      _target_position_error, _param_dock_pass_distance.get(),
+      _param_dock_pass_error.get()) == dock_motion::PassState::Approaching;
+  const bool terminal_candidate = _param_dock_terminal_enable.get() && trusted &&
+      terminal_approach_stage && _fov_ratio <= align && _bbox_edge_ratio < soft &&
+      _predicted_fov_ratio < soft && actual_closure > .5f && pass_state_ready &&
+      _closest_approach.valid && std::isfinite(pass_time + _point_error_bound) &&
+      pass_time < .8f * _param_dock_terminal_max_time.get() &&
+      _point_error_bound < _param_dock_pass_error.get() &&
+      (_param_dock_terminal_distance.get() <= 0.f ||
+       _estimated_relative.norm() <= _param_dock_terminal_distance.get());
+  if (terminal_candidate) {
+    if (!_terminal_candidate_since_us) { _terminal_candidate_since_us = now; }
+    if (now - _terminal_candidate_since_us >=
+        static_cast<uint64_t>(math::constrain(_param_dock_terminal_confirm.get(), .02f, 2.f) * 1e6f)) {
+      _terminal_direction = direction;
+      _terminal_started_us = now;
+      _terminal_blind_since_us = 0;
+      _terminal_velocity_ned = _velocity_setpoint_ned;
+      _terminal_ready = true;
+      set_stage(Stage::TERMINAL_DASH);
+    }
+  } else if (_stage != Stage::TERMINAL_DASH) {
+    _terminal_candidate_since_us = 0;
+  }
   // Planner 的视场/动态限幅可能挡住修正；只有实际发布的速度朝修正方向变化
   // 才把 prediction_valid 计为真，且需要新观测持续确认。
   if (_prediction_ready) {
@@ -760,6 +763,7 @@ bool DockGuidance::dynamic_terminal(hrt_abstime now, bool blind) {
   record_closest_target_distance(_estimated_relative.norm());
   if (pass == dock_motion::PassState::Predicted) {
     // 已预测越过锁定平面时转入减速保持；这只是几何判定，并非实体接触确认。
+    _terminal_ready = false;
     set_stage(Stage::PASS_PREDICTED);
     publish_predicted_pass(now);
     return false;

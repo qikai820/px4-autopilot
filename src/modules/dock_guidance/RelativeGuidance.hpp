@@ -56,6 +56,29 @@ inline Vector3f limit_preposition_turn_acceleration(const Vector3f &velocity,
       along_e * tangent + along_n * limited_lateral, acceleration(2));
 }
 
+// Approach from the aircraft's current bearing. Without visual tracking, keep
+// a stand-off gap instead of flying through the target's reported position.
+inline bool approach_line_standoff(const Vector3f &own, const Vector3f &target,
+    float stand_off_m, float height_offset_m, Vector3f &reference) {
+  if (!own.isAllFinite() || !target.isAllFinite() ||
+      !std::isfinite(stand_off_m) || !std::isfinite(height_offset_m) ||
+      stand_off_m <= 0.f) { return false; }
+
+  const matrix::Vector2f to_target(target(0) - own(0), target(1) - own(1));
+  const float horizontal_range = to_target.norm();
+  if (!std::isfinite(horizontal_range)) { return false; }
+
+  if (horizontal_range <= stand_off_m) {
+    reference = own;
+  } else {
+    reference = target - Vector3f(to_target(0), to_target(1), 0.f) *
+        (stand_off_m / horizontal_range);
+    reference(2) = target(2) - height_offset_m;
+  }
+
+  return reference.isAllFinite();
+}
+
 inline bool far_lookahead_direction(const Vector3f &own, const Vector3f &rear,
     const Vector3f &target, Vector3f &direction) {
   const Vector3f target_line = target - own;
@@ -82,6 +105,89 @@ inline float rear_stop_speed(float distance, float closing_speed, const Relative
   const float braking = .7f * min(c.deceleration, min(c.up, c.down));
   const float margin = closing_speed * c.response;
   return min(c.limits.total, sqrtf(2.f * braking * max(0.f, distance - margin)));
+}
+
+inline bool preposition_reference_arrived(float reference_error_m,
+    float handoff_radius_m, bool target_fresh, bool reference_valid,
+    bool startup_climb) {
+  return target_fresh && reference_valid && !startup_climb &&
+      std::isfinite(reference_error_m) && std::isfinite(handoff_radius_m) &&
+      handoff_radius_m > 0.f && reference_error_m <= handoff_radius_m;
+}
+
+inline bool preposition_visual_handoff_ready(bool rear_required, bool at_reference,
+    bool target_fresh, bool reference_valid, bool startup_climb, bool visual_locked) {
+  return target_fresh && reference_valid && !startup_climb && visual_locked &&
+      (!rear_required || at_reference);
+}
+
+inline float preposition_segment_clearance_xy(const Vector3f &start,
+    const Vector3f &end, const Vector3f &target) {
+  const matrix::Vector2f path(end(0) - start(0), end(1) - start(1));
+  const matrix::Vector2f relative(target(0) - start(0), target(1) - start(1));
+  const float path_squared = path * path;
+  const float fraction = path_squared > 1e-4f
+      ? clamp((relative * path) / path_squared, 0.f, 1.f) : 0.f;
+  return (relative - path * fraction).norm();
+}
+
+inline bool preposition_clearance_braking_needed(float range_xy, float closing_speed,
+    float clearance_m, float deceleration, float response_s) {
+  if (!std::isfinite(range_xy) || !std::isfinite(closing_speed) ||
+      !std::isfinite(clearance_m) || !std::isfinite(deceleration) ||
+      !std::isfinite(response_s) || deceleration <= 0.f) {
+    return true;
+  }
+  const float closing = max(0.f, closing_speed);
+  const float stop_distance = closing * response_s +
+      closing * closing / (2.f * .7f * deceleration);
+  return range_xy <= clearance_m + stop_distance;
+}
+
+// Follow the rear reference around the target, not through its reported
+// position. A side is retained for the approach so the moving waypoint cannot
+// alternate clockwise/counterclockwise on successive target updates.
+inline bool preposition_guidance_reference(const Vector3f &own,
+    const Vector3f &target, const Vector3f &rear, float clearance_m,
+    float turn_radius_m, int &side, Vector3f &guidance, bool &bypass) {
+  bypass = false;
+  if (!own.isAllFinite() || !target.isAllFinite() || !rear.isAllFinite() ||
+      !std::isfinite(clearance_m) || clearance_m <= 0.f ||
+      !std::isfinite(turn_radius_m) || turn_radius_m < 0.f) {
+    return false;
+  }
+
+  const matrix::Vector2f to_own(own(0) - target(0), own(1) - target(1));
+  const matrix::Vector2f to_rear(rear(0) - target(0), rear(1) - target(1));
+  if (to_own.norm() <= clearance_m || to_rear.norm() <= clearance_m) {
+    return false;
+  }
+  if (preposition_segment_clearance_xy(own, rear, target) >= clearance_m) {
+    guidance = rear;
+    return true;
+  }
+
+  const float own_angle = atan2f(to_own(1), to_own(0));
+  const float rear_angle = atan2f(to_rear(1), to_rear(0));
+  const float shortest = matrix::wrap_pi(rear_angle - own_angle);
+  if (side == 0) { side = shortest < 0.f ? -1 : 1; }
+  const float directed = side > 0 ? matrix::wrap_2pi(rear_angle - own_angle)
+                                   : matrix::wrap_2pi(own_angle - rear_angle);
+  // Leave room for the velocity controller to round the arc. The geometric
+  // waypoint clearance alone is not an aircraft trajectory guarantee.
+  const float orbit_radius = max(2.f * clearance_m, 1.5f * turn_radius_m);
+  float step = min(directed, 0.2617994f);
+  for (int attempt = 0; attempt < 6; ++attempt) {
+    const float angle = own_angle + side * step;
+    guidance = Vector3f(target(0) + orbit_radius * cosf(angle),
+                        target(1) + orbit_radius * sinf(angle), rear(2));
+    if (preposition_segment_clearance_xy(own, guidance, target) >= clearance_m) {
+      bypass = true;
+      return true;
+    }
+    step *= 0.5f;
+  }
+  return false;
 }
 
 inline VelocityPlan relative_step(const RelativeContext &c, const Vector3f &desired,
@@ -259,5 +365,30 @@ inline bool relative_terminal_window(const PointEvidence &point, float observati
   const float clearance = max(0.f, pass_distance) / relative_speed;
   return point.miss_bound_m < allowed_miss && point.time_upper_s <= tgo_limit &&
       point.time_upper_s + clearance + .03f < min(blind_limit - observation_age, total_limit);
+}
+
+inline uint64_t relative_terminal_deadline(uint64_t started, uint64_t now, float observation_age,
+    float blind_limit, float total_limit) {
+  if (!started || now < started || !std::isfinite(observation_age + blind_limit + total_limit) ||
+      observation_age < 0.f) { return 0; }
+  const uint64_t total_deadline = started + uint64_t(clamp(total_limit, .1f, 10.f) * 1e6f);
+  const uint64_t visual_deadline = now + uint64_t(
+      max(0.f, clamp(blind_limit, .05f, 3.f) - observation_age) * 1e6f);
+  return min(total_deadline, visual_deadline);
+}
+
+// Confirm stable encounter evidence while the target is still visible. The
+// narrower blind-flight time window is checked on the commit frame itself;
+// requiring it throughout the confirmation interval can make a valid window
+// shorter than the configured confirmation time at high closure speed.
+inline bool relative_terminal_confirmed(uint64_t now, uint64_t &since, bool stable_evidence,
+    bool blind_window, float confirmation_s) {
+  if (!now || !stable_evidence || !std::isfinite(confirmation_s)) {
+    since = 0;
+    return false;
+  }
+  if (!since || now < since) { since = now; }
+  return blind_window && now - since >=
+      uint64_t(clamp(confirmation_s, .02f, 2.f) * 1e6f);
 }
 } // namespace dock_motion

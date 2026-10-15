@@ -34,6 +34,27 @@ static void test_observer() {
   assert(!motion.fresh(time));
 }
 
+static void test_terminal_fresh_frame_deadline() {
+  RelativeMotion motion;
+  const Vector3f target(20.f, 0.f, 0.f), velocity(20.f, 0.f, 0.f);
+  uint64_t now = 1000000;
+  Vector3f own{};
+  for (int i = 0; i < 8; ++i, now += 100000) {
+    own = velocity * (.1f * i);
+    assert(motion.update(now, own, velocity, target - own, .4f, .002f, 3.f));
+  }
+  const uint64_t committed = now - 100000;
+  const uint64_t first_deadline = relative_terminal_deadline(
+      committed, committed, motion.age(committed), .5f, 1.5f);
+  own += velocity * .1f;
+  assert(motion.update(now, own, velocity, target - own, .4f, .002f, 3.f));
+  const uint64_t refreshed_deadline = relative_terminal_deadline(
+      committed, now, motion.age(now), .5f, 1.5f);
+  assert(refreshed_deadline > first_deadline);
+  assert(refreshed_deadline <= committed + 1500000);
+  assert((motion.relative(now, own) - (target - own)).norm() < .1f);
+}
+
 struct Outcome { float miss{INFINITY}, time{0.f}, speed{0.f}; bool committed{false}, passed{false}; };
 
 static void test_fast_visual_handoff() {
@@ -78,6 +99,120 @@ static void test_preposition_turn_radius() {
   const Vector3f right_turn = limit_preposition_turn_acceleration(velocity,
       Vector3f(0.f, -8.f, 0.f), 150.f);
   assert(fabsf(right_turn(1) + 400.f / 150.f) < .001f);
+}
+
+static void test_preposition_guidance_clearance() {
+  // The logged 99 m target range is irrelevant while the rear reference is
+  // still about 198 m away. Arrival alone cannot authorize visual handoff.
+  assert(!preposition_reference_arrived(198.f, 25.f, true, true, false));
+  assert(preposition_reference_arrived(24.f, 25.f, true, true, false));
+  assert(!preposition_reference_arrived(24.f, 25.f, false, true, false));
+  assert(!preposition_reference_arrived(24.f, 25.f, true, true, true));
+  // Front approach can hand off on stable vision before the stand-off point;
+  // rear approach keeps the reference-arrival gate.
+  assert(preposition_visual_handoff_ready(false, false, true, true, false, true));
+  assert(!preposition_visual_handoff_ready(true, false, true, true, false, true));
+  assert(preposition_visual_handoff_ready(true, true, true, true, false, true));
+  assert(!preposition_visual_handoff_ready(false, false, false, true, false, true));
+  assert(!preposition_visual_handoff_ready(false, false, true, false, false, true));
+  assert(!preposition_visual_handoff_ready(false, false, true, true, true, true));
+  assert(!preposition_visual_handoff_ready(false, false, true, true, false, false));
+  const Vector3f target(0.f, 0.f, 0.f), rear(100.f, 0.f, 0.f);
+  Vector3f own(-101.f, 18.f, 0.f), guidance{};
+  bool bypass = false;
+  int side = 0;
+  assert(preposition_segment_clearance_xy(own, rear, target) < 20.f);
+  for (int i = 0; i < 30; ++i) {
+    assert(preposition_guidance_reference(own, target, rear, 50.f, 250.f,
+        side, guidance, bypass));
+    assert(preposition_segment_clearance_xy(own, guidance, target) >= 50.f);
+    if (!bypass) { break; }
+    own = guidance;
+  }
+  assert(!bypass);
+  assert((guidance - rear).norm() < .001f);
+  assert(side != 0);
+
+  own = Vector3f(-40.f, 0.f, 0.f);
+  assert(!preposition_guidance_reference(own, target, rear, 50.f, 250.f,
+      side, guidance, bypass));
+  assert(!preposition_clearance_braking_needed(101.f, 0.f, 50.f, 3.f, .5f));
+  assert(preposition_clearance_braking_needed(101.f, 20.f, 50.f, 3.f, .5f));
+  assert(preposition_clearance_braking_needed(49.f, 0.f, 50.f, 3.f, .5f));
+}
+
+static void test_moving_target_rear_bypass() {
+  Vector3f own(-800.f, 0.f, 0.f), velocity{}, target{}, guidance{};
+  const Vector3f target_velocity(-10.f, 0.f, 0.f);
+  RelativeContext context;
+  context.limits = {50.f, 100.f, 40.f, 4.f};
+  context.acceleration = 8.f;
+  context.deceleration = 3.f;
+  context.up = 4.f;
+  context.down = 3.f;
+  context.response = .5f;
+  int side = 0;
+  bool bypass = false, reached = false, saw_bypass = false;
+  float minimum_clearance = INFINITY;
+  bool settled = false;
+  constexpr float dt = .02f;
+  for (int i = 0; i < 6000; ++i) {
+    target += target_velocity * dt;
+    const Vector3f rear = target + Vector3f(100.f, 0.f, 0.f);
+    assert(preposition_guidance_reference(own, target, rear, 50.f, 250.f,
+        side, guidance, bypass));
+    saw_bypass |= bypass;
+    const Vector3f to_target = target - own;
+    const float current_range = matrix::Vector2f(to_target(0), to_target(1)).norm();
+    const float closing = current_range > .01f
+        ? (to_target * (velocity - target_velocity)) / current_range : 0.f;
+    if (!bypass && preposition_clearance_braking_needed(
+            current_range, closing, 50.f, 3.f, .5f)) {
+      assert(current_range > 60.f);
+      guidance = own;
+      bypass = settled = true;
+    }
+    const Vector3f error = guidance - own;
+    const float distance = error.norm();
+    const float relative_speed = (velocity - target_velocity).norm();
+    const float speed = min(.35f * distance,
+        rear_stop_speed(distance, relative_speed, context));
+    Vector3f requested = target_velocity;
+    if (distance > .01f) { requested += error * (speed / distance); }
+    const Vector3f change = requested - velocity;
+    const float acceleration_limit = requested.norm() < velocity.norm() ? 3.f : 8.f;
+    velocity += change.norm() > acceleration_limit * dt
+        ? change * (acceleration_limit * dt / change.norm()) : change;
+    own += velocity * dt;
+    const float actual_clearance = matrix::Vector2f(own(0) - target(0), own(1) - target(1)).norm();
+    minimum_clearance = min(minimum_clearance, actual_clearance);
+    if ((rear - own).norm() < 25.f) { reached = true; break; }
+  }
+  printf("moving rear bypass: min clearance %.1f m, settled=%d, reached=%d\n",
+      (double)minimum_clearance, (int)settled, (int)reached);
+  assert(saw_bypass && settled && reached && minimum_clearance >= 50.f);
+}
+
+static void test_any_direction_preposition_standoff() {
+  const Vector3f target(500.f, 100.f, -50.f);
+  Vector3f reference{};
+  for (const Vector3f &own : {Vector3f(0.f, 100.f, -60.f),
+                              Vector3f(1000.f, 100.f, -60.f),
+                              Vector3f(500.f, -400.f, -60.f),
+                              Vector3f(500.f, 600.f, -60.f)}) {
+    assert(approach_line_standoff(own, target, 100.f, 10.f, reference));
+    const matrix::Vector2f to_target(target(0) - own(0), target(1) - own(1));
+    const matrix::Vector2f to_reference(reference(0) - own(0), reference(1) - own(1));
+    assert(to_target * to_reference > 0.f);
+    assert(fabsf(matrix::Vector2f(target(0) - reference(0), target(1) - reference(1)).norm() -
+                 100.f) < .001f);
+    assert(fabsf(reference(2) + 60.f) < .001f);
+  }
+
+  const Vector3f close(490.f, 100.f, -45.f);
+  assert(approach_line_standoff(close, target, 100.f, 10.f, reference));
+  assert((reference - close).norm() < .001f); // hold before visual acquisition
+  assert(!approach_line_standoff(close, Vector3f(NAN, 0.f, 0.f), 100.f, 0.f, reference));
 }
 
 static void test_far_rear_approach() {
@@ -173,10 +308,16 @@ static Outcome scenario(const Vector3f &initial_target_velocity, bool estimated,
       if (terminal) {
         const auto point = relative_frozen_approach(c, command);
         const auto evidence = relative_point_evidence(motion, now, point);
-        if (relative_terminal_window(evidence, motion.age(now), point.relative_speed_m_s, 2.f, 3.f, .35f, .5f, 1.5f)) {
-          if (!confirmation) { confirmation = now; }
-          if (now - confirmation >= 50000) { result.committed = true; pass_axis = point.approach_axis; }
-        } else { confirmation = 0; }
+        const bool stable = cached.valid && cached.closest.valid && !plan.limits_override &&
+            evidence.valid && evidence.miss_bound_m < 3.f &&
+            evidence.time_upper_s > 0.f && evidence.time_upper_s <= 1.5f &&
+            point.relative_speed_m_s > .5f;
+        const bool window = relative_terminal_window(evidence, motion.age(now),
+            point.relative_speed_m_s, 2.f, 3.f, .35f, .5f, 1.5f);
+        if (relative_terminal_confirmed(now, confirmation, stable, window, .05f)) {
+          result.committed = true;
+          pass_axis = point.approach_axis;
+        }
       }
     } else {
       const Vector3f relative = motion.relative(now, own);
@@ -234,6 +375,21 @@ static void test_frozen_and_fov() {
   point.miss_bound_m = NAN;
   assert(!relative_terminal_window(point, .1f, 40.f, 2.f, 3.f, .35f, .5f, 1.5f));
 
+  assert(relative_terminal_deadline(1000000, 1000000, .02f, .5f, 1.5f) == 1480000);
+  assert(relative_terminal_deadline(1000000, 1200000, .01f, .5f, 1.5f) == 1690000);
+  assert(relative_terminal_deadline(1000000, 2400000, .01f, .5f, 1.5f) == 2500000);
+  assert(relative_terminal_deadline(1000000, 1200000, NAN, .5f, 1.5f) == 0);
+
+  uint64_t confirmed_since = 0;
+  // The encounter is stable for 60 ms, while the final blind-time window is
+  // open only at the last sample. Confirm the encounter before committing.
+  assert(!relative_terminal_confirmed(1000000, confirmed_since, true, false, .05f));
+  assert(!relative_terminal_confirmed(1040000, confirmed_since, true, false, .05f));
+  assert(relative_terminal_confirmed(1060000, confirmed_since, true, true, .05f));
+  assert(!relative_terminal_confirmed(1070000, confirmed_since, false, true, .05f));
+  assert(confirmed_since == 0);
+  assert(!relative_terminal_confirmed(1080000, confirmed_since, true, true, .05f));
+
   c.relative = Vector3f(100.f, 0.f, 0.f);
   c.previous.zero();
   c.previous_acceleration.zero();
@@ -259,8 +415,12 @@ static void test_frozen_and_fov() {
 
 int main() {
   test_observer();
+  test_terminal_fresh_frame_deadline();
   test_fast_visual_handoff();
   test_preposition_turn_radius();
+  test_preposition_guidance_clearance();
+  test_moving_target_rear_bypass();
+  test_any_direction_preposition_standoff();
   test_far_rear_approach();
   test_frozen_and_fov();
   for (const Vector3f &velocity : {Vector3f{}, Vector3f(10.f, 0.f, 0.f), Vector3f(-10.f, 0.f, 0.f),

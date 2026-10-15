@@ -66,7 +66,18 @@ void DockGuidance::publish_preposition_status(hrt_abstime now, uint8_t state, bo
   status.target_sequence = _pre_target.sequence;
   status.visual_tracking_s = _pre_visual_since > 0 && now >= _pre_visual_since
       ? (now - _pre_visual_since) * 1e-6f : 0.f;
-  status.visual_stable = status.visual_tracking_s >= _param_dock_pre_visual_time.get();
+  status.visual_wait_s = _pre_visual_wait_since > 0 && now >= _pre_visual_wait_since
+      ? (now - _pre_visual_wait_since) * 1e-6f : 0.f;
+  status.reference_reached = _pre_reference_reached;
+  status.bypass_active = _pre_bypass_active;
+  const uint64_t observation_timeout_us = static_cast<uint64_t>(math::constrain(
+      _param_dock_obs_tout.get(), int32_t{20}, int32_t{5000})) * 1000ULL;
+  status.visual_stable = _pre_visual_since > 0 &&
+      _last_valid_observation_us >= _pre_visual_since &&
+      now >= _last_valid_observation_us &&
+      now - _last_valid_observation_us <= observation_timeout_us &&
+      status.visual_tracking_s >= math::constrain(
+          _param_dock_pre_visual_time.get(), 0.05f, 5.f);
   status.target_age_s = _pre_target.timestamp > 0 && now >= _pre_target.timestamp
       ? (now - _pre_target.timestamp) * 1e-6f : NAN;
   status.prediction_horizon_s = _pre_prediction_horizon_s;
@@ -79,6 +90,11 @@ void DockGuidance::publish_preposition_status(hrt_abstime now, uint8_t state, bo
     Vector3f(NAN, NAN, NAN).copyTo(status.target_velocity_ned);
   }
   _pre_reference.copyTo(status.reference_position_ned);
+  if (status.reference_valid) {
+    _pre_guidance_reference.copyTo(status.guidance_position_ned);
+  } else {
+    Vector3f(NAN, NAN, NAN).copyTo(status.guidance_position_ned);
+  }
   vehicle_local_position_s local{};
   if (_local_pos_sub.copy(&local) && local.timestamp > 0 && now >= local.timestamp) {
     status.vehicle_age_s = (now - local.timestamp) * 1e-6f;
@@ -120,6 +136,7 @@ bool DockGuidance::update_rear_reference(hrt_abstime now, const vehicle_local_po
     _pre_last_source_ms = 0;
     _pre_last_direction.zero();
     _pre_target = {};
+    _pre_bypass_side = 0;
   }
 
   MapProjection projection(local.ref_lat, local.ref_lon, local.ref_timestamp);
@@ -145,6 +162,7 @@ bool DockGuidance::update_rear_reference(hrt_abstime now, const vehicle_local_po
       _pre_last_source_ms = 0;
       _pre_last_direction.zero();
       _pre_target = {};
+      _pre_bypass_side = 0;
     }
     if (target_position.isAllFinite() && !discontinuity) {
       _pre_target = incoming;
@@ -176,6 +194,14 @@ bool DockGuidance::update_rear_reference(hrt_abstime now, const vehicle_local_po
   _pre_target_position = _pre_path[_pre_path_count - 1] + velocity * horizon;
 
   const float rear_distance = math::constrain(_param_dock_pre_distance.get(), 1.f, 1000.f);
+  const float height_offset = math::constrain(_param_dock_pre_z_offset.get(), -100.f, 100.f);
+  if (!_param_dock_pre_rear.get()) {
+    _pre_reference_valid = dock_motion::approach_line_standoff(
+        Vector3f(local.x, local.y, local.z), _pre_target_position,
+        rear_distance, height_offset, _pre_reference);
+    return true;
+  }
+
   float remaining = rear_distance;
   Vector3f cursor = _pre_target_position;
   bool reference_ready = false;
@@ -209,7 +235,7 @@ bool DockGuidance::update_rear_reference(hrt_abstime now, const vehicle_local_po
   }
   if (reference_ready) {
     _pre_reference_valid = true;
-    _pre_reference(2) -= math::constrain(_param_dock_pre_z_offset.get(), -100.f, 100.f);
+    _pre_reference(2) -= height_offset;
   }
   return true;
 }
@@ -278,7 +304,6 @@ void DockGuidance::run_preposition(hrt_abstime now) {
     set_stage(Stage::ALIGN);
     publish_preposition_status(now, 4, target_fresh);
   };
-  hrt_abstime visual_handoff_sample = 0;
   const uint64_t observation_timeout_us = static_cast<uint64_t>(math::constrain(
       _param_dock_obs_tout.get(), int32_t{20}, int32_t{5000})) * 1000ULL;
   viztra_observation_s observation{};
@@ -318,19 +343,6 @@ void DockGuidance::run_preposition(hrt_abstime now) {
       if (std::isfinite(pitch_error)) {
         update_camera_pitch_servo(pitch_error, dt, sample);
       }
-      if (sample >= _pre_visual_since &&
-          sample - _pre_visual_since >= static_cast<uint64_t>(
-              math::constrain(_param_dock_pre_visual_time.get(), 0.05f, 5.f) * 1e6f)) {
-        if (!_param_dock_pre_rear.get()) {
-          const uint64_t target_timeout_us = static_cast<uint64_t>(math::constrain(
-              _param_dock_pre_timeout.get(), int32_t{100}, int32_t{5000})) * 1000ULL;
-          const bool target_fresh = _pre_target.timestamp > 0 && now >= _pre_target.timestamp &&
-              now - _pre_target.timestamp <= target_timeout_us && _pre_path_count > 0;
-          finish_visual_handoff(sample, target_fresh);
-          return;
-        }
-        visual_handoff_sample = sample;
-      }
     } else {
       _pre_visual_since = 0;
     }
@@ -346,20 +358,95 @@ void DockGuidance::run_preposition(hrt_abstime now) {
       !Vector3f(local.vx, local.vy, local.vz).isAllFinite() ||
       !std::isfinite(local.ref_lat) || !std::isfinite(local.ref_lon) ||
       !std::isfinite(local.ref_alt)) {
+    _pre_visual_wait_since = 0;
+    _pre_reference_reached = false;
+    _pre_bypass_active = false;
     invalidate_setpoint(now, "preposition local position invalid", false);
     publish_preposition_status(now, 5, false);
     return;
   }
 
   const bool target_fresh = update_rear_reference(now, local);
+  _pre_bypass_active = false;
+  _pre_guidance_reference = _pre_reference;
+  const Vector3f own(local.x, local.y, local.z);
+  const float clearance_m = math::constrain(_param_dock_pre_clearance.get(), 5.f, 500.f);
+  const float rear_distance = math::constrain(_param_dock_pre_distance.get(), 1.f, 1000.f);
+  const float handoff_radius = math::constrain(0.25f * rear_distance, 2.f, 25.f);
+  const float reference_error_m = target_fresh && _pre_reference_valid
+      ? (_pre_reference - own).norm() : INFINITY;
+  const bool at_reference = dock_motion::preposition_reference_arrived(
+      reference_error_m, handoff_radius, target_fresh, _pre_reference_valid, _startup_climb);
+  const bool visual_locked = _pre_visual_since > 0 &&
+      _last_valid_observation_us >= _pre_visual_since &&
+      now >= _last_valid_observation_us &&
+      now - _last_valid_observation_us <= observation_timeout_us &&
+      now - _pre_visual_since >= static_cast<uint64_t>(
+          math::constrain(_param_dock_pre_visual_time.get(), 0.05f, 5.f) * 1e6f);
 
-  if (visual_handoff_sample && target_fresh && _pre_reference_valid && !_startup_climb) {
-    const float rear_distance = math::constrain(_param_dock_pre_distance.get(), 1.f, 1000.f);
-    const float handoff_radius = math::constrain(0.25f * rear_distance, 2.f, 25.f);
-    const Vector3f reference_error = _pre_reference - Vector3f(local.x, local.y, local.z);
-    if (reference_error.norm() <= handoff_radius) {
-      finish_visual_handoff(visual_handoff_sample, true);
-      return;
+  // A stable image may take over a frontal approach immediately. Rear-path
+  // guidance still has to reach its reference before visual docking begins.
+  if (dock_motion::preposition_visual_handoff_ready(_param_dock_pre_rear.get(),
+          at_reference, target_fresh, _pre_reference_valid, _startup_climb,
+          visual_locked)) {
+    _pre_reference_reached = at_reference;
+    if (!_pre_visual_lock_reported) {
+      _pre_visual_lock_reported = true;
+      mavlink_log_info(&_mavlink_log_pub, "Dock visual locked");
+    }
+    finish_visual_handoff(_last_valid_observation_us, true);
+    return;
+  }
+
+  if (at_reference && _pre_visual_wait_since == 0) {
+    _pre_visual_wait_since = now;
+  } else if (!target_fresh || !_pre_reference_valid || _startup_climb ||
+             reference_error_m > 1.5f * handoff_radius) {
+    _pre_visual_wait_since = 0;
+  }
+  _pre_reference_reached = _pre_visual_wait_since > 0;
+  if (_pre_visual_wait_since > 0 &&
+      now - _pre_visual_wait_since >= static_cast<uint64_t>(
+          math::constrain(_param_dock_pre_visual_wait.get(), 0.5f, 10.f) * 1e6f)) {
+    if (_param_dock_pre_rear.get()) {
+      mavlink_log_warning(&_mavlink_log_pub, "Dock rear reference reached without visual lock");
+    } else {
+      mavlink_log_warning(&_mavlink_log_pub, "Dock stand-off reached without visual lock");
+    }
+    invalidate_setpoint(now, "visual lock timeout after preposition");
+    publish_preposition_status(now, 6, true);
+    return;
+  }
+
+  if (target_fresh && _pre_reference_valid && _param_dock_pre_rear.get() &&
+      !dock_motion::preposition_guidance_reference(own, _pre_target_position,
+          _pre_reference, clearance_m,
+          math::constrain(_param_dock_pre_radius.get(), 0.f, 2000.f),
+          _pre_bypass_side, _pre_guidance_reference, _pre_bypass_active)) {
+    invalidate_setpoint(now, "preposition target clearance unavailable");
+    publish_preposition_status(now, 6, true);
+    return;
+  }
+  if (target_fresh && _pre_reference_valid && _param_dock_pre_rear.get() &&
+      !_pre_bypass_active) {
+    const Vector2f relative_xy(_pre_target_position(0) - own(0),
+                               _pre_target_position(1) - own(1));
+    const float range_xy = relative_xy.norm();
+    const Vector2f relative_velocity_xy(local.vx - _pre_target.vn,
+                                        local.vy - _pre_target.ve);
+    const float closing_speed = range_xy > 0.01f
+        ? relative_xy * relative_velocity_xy / range_xy : 0.f;
+    if (dock_motion::preposition_clearance_braking_needed(range_xy, closing_speed,
+            clearance_m, math::constrain(_param_dock_dec_max.get(), .1f, 20.f),
+            math::constrain(_param_dock_pred_response.get(), .05f, 2.f))) {
+      if (range_xy <= clearance_m + 10.f) {
+        invalidate_setpoint(now, "preposition target clearance lost");
+        publish_preposition_status(now, 6, true);
+        return;
+      }
+      // First match target velocity before cutting inward from the bypass arc.
+      _pre_guidance_reference = own;
+      _pre_bypass_active = true;
     }
   }
 
@@ -382,9 +469,10 @@ void DockGuidance::run_preposition(hrt_abstime now) {
           _startup_height_reached = true;
         } else {
           _pre_reference(2) = math::min(_pre_reference(2), _startup_target_z);
+          _pre_guidance_reference(2) = math::min(_pre_guidance_reference(2), _startup_target_z);
         }
       }
-      const Vector3f error = _pre_reference - Vector3f(local.x, local.y, local.z);
+      const Vector3f error = _pre_guidance_reference - own;
       const float distance = error.norm();
       desired_velocity = velocity;
       if (distance > .01f) {
@@ -401,7 +489,7 @@ void DockGuidance::run_preposition(hrt_abstime now) {
                 (Vector3f(local.vx, local.vy, local.vz) - velocity).norm(), c));
         desired_velocity += error * (speed / distance);
       }
-      state = 2;
+      state = _pre_reference_reached ? 7 : 2;
       const Vector2f horizontal_to_target(_pre_target_position(0) - local.x,
                                           _pre_target_position(1) - local.y);
       if (horizontal_to_target.norm() > 1.f) {
@@ -411,7 +499,11 @@ void DockGuidance::run_preposition(hrt_abstime now) {
           _yaw_setpoint_rad = _att_sub.copy(&attitude)
               ? Eulerf(Quatf(attitude.q)).psi() : target_yaw;
         }
-        const float yaw_step = math::radians(_param_dock_yaw_rate.get()) * dt;
+        // The rear-reference arc can rotate the target bearing faster than the
+        // visual-stage yaw limit. Follow it during preposition so that the
+        // target is still in the camera FOV when the reference is reached.
+        const float yaw_step = math::radians(math::constrain(
+            _param_dock_pre_yaw_rate.get(), 1.f, 60.f)) * dt;
         _yaw_setpoint_rad = matrix::wrap_pi(_yaw_setpoint_rad + math::constrain(
             matrix::wrap_pi(target_yaw - _yaw_setpoint_rad), -yaw_step, yaw_step));
       }

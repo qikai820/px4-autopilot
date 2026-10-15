@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="500" viewBox="0 0 1040 500" role="img" aria-labelledby="title desc">
+  <title id="title">相机相对机体俯仰 0 度和 90 度示意</title>
+  <desc id="desc">机体轮廓提取自 dayin.stp 的 X-Z 正交侧视投影，并按实际机头方向翻转，使机头朝右。机身长轴水平摆放时，按原 DockGuidance 相机坐标定义：左侧零度镜头朝机头正前方，右侧正九十度镜头竖直朝上。相机安装位置仅作示意，横置机身不表示飞行姿态。</desc>
+  <defs>
+    <marker id="sight-arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#d46b18"/>
+    </marker>
+    <g id="airframe">
+      <path d="M 59.7 276.5 L 60.5 271.9 L 63.5 266.2 L 68.7 261.4 L 71.3 259.9 L 73.7 259.3 L 87.5 258.2 L 159.9 257.7 L 186.7 236.3 L 186.7 235.7 L 184.4 235.5 L 180.7 234.2 L 177.6 232.2 L 176.8 230.9 L 176.8 229.2 L 178.7 227.0 L 184.1 224.8 L 189.6 223.7 L 208.3 222.6 L 208.3 223.5 L 209.4 223.5 L 209.4 234.2 L 216.3 235.3 L 218.7 236.6 L 218.7 255.5 L 224.8 257.1 L 225.2 257.7 L 232.1 257.9 L 232.1 258.2 L 235.6 258.2 L 235.6 258.6 L 247.7 259.9 L 248.3 260.5 L 255.7 261.9 L 255.7 262.3 L 258.5 262.9 L 262.8 264.7 L 275.3 266.9 L 275.5 289.1 L 262.6 291.5 L 255.5 294.3 L 247.2 296.3 L 229.9 298.5 L 225.2 298.5 L 224.6 299.1 L 218.5 300.7 L 218.9 311.8 L 218.5 319.4 L 215.1 320.7 L 209.4 321.2 L 209.4 332.7 L 208.3 332.7 L 208.3 333.6 L 199.0 333.4 L 189.6 332.5 L 184.1 331.4 L 180.3 330.1 L 177.9 328.6 L 176.6 325.8 L 177.6 324.0 L 180.7 322.0 L 184.4 320.7 L 186.7 320.5 L 186.7 319.7 L 159.7 298.3 L 87.5 297.9 L 73.7 296.8 L 68.7 294.8 L 63.5 290.0 L 60.5 283.9 Z" transform="translate(335 0) scale(-1 1)" fill="#dce7ef" stroke="#52677a" stroke-width="2" stroke-linejoin="round"/>
+      <path d="M 275 278 L 282 278" stroke="#52677a" stroke-width="3" stroke-linecap="round"/>
+    </g>
+    <g id="camera">
+      <rect x="300" y="265" width="65" height="26" rx="6" fill="#e8f4ff" stroke="#1778c8" stroke-width="3"/>
+      <rect x="365" y="269" width="10" height="18" rx="2" fill="#1778c8"/>
+      <circle cx="293" cy="278" r="11" fill="#fff" stroke="#1778c8" stroke-width="4"/>
+      <circle cx="293" cy="278" r="3" fill="#1778c8"/>
+    </g>
+  </defs>
+
+  <rect x="1" y="1" width="1038" height="498" rx="16" fill="#fff" stroke="#d9e0e8" stroke-width="2"/>
+  <text x="35" y="47" fill="#172b43" font-size="25" font-weight="700" font-family="sans-serif">相机俯仰角示意（侧视，机头向右）</text>
+  <text x="35" y="78" fill="#52667c" font-size="17" font-family="sans-serif">机身水平、机头向右；按原代码：0° 朝机头正前方，+90° 朝上</text>
+
+  <rect x="25" y="104" width="485" height="322" rx="12" fill="#f8fbfe" stroke="#d9e0e8" stroke-width="2"/>
+  <rect x="530" y="104" width="485" height="322" rx="12" fill="#f8fbfe" stroke="#d9e0e8" stroke-width="2"/>
+  <text x="49" y="145" fill="#0b5f9b" font-size="25" font-weight="700" font-family="sans-serif">0°  镜头朝机头正前方</text>
+  <text x="554" y="145" fill="#0b5f9b" font-size="25" font-weight="700" font-family="sans-serif">+90°  镜头竖直朝上</text>
+
+  <g>
+    <use href="#airframe"/>
+    <use href="#camera"/>
+    <path d="M 381 278 L 455 278" stroke="#d46b18" stroke-width="5" stroke-linecap="round" marker-end="url(#sight-arrow)"/>
+    <text x="367" y="250" fill="#a74e0d" font-size="18" font-family="sans-serif">光轴</text>
+  </g>
+
+  <g transform="translate(505 0)">
+    <use href="#airframe"/>
+    <path d="M 326 278 L 388 278" fill="none" stroke="#9baaba" stroke-width="2" stroke-dasharray="7 6"/>
+    <use href="#camera" transform="rotate(-90 293 278)"/>
+    <path d="M 293 192 L 293 161" stroke="#d46b18" stroke-width="5" stroke-linecap="round" marker-end="url(#sight-arrow)"/>
+    <text x="310" y="193" fill="#a74e0d" font-size="18" font-family="sans-serif">光轴</text>
+    <path d="M 339 278 A 46 46 0 0 0 293 232" fill="none" stroke="#1778c8" stroke-width="3"/>
+    <text x="338" y="239" fill="#0b5f9b" font-size="17" font-family="sans-serif">+90°</text>
+    <text x="316" y="316" fill="#52667c" font-size="16" font-family="sans-serif">朝前 0° 基准</text>
+  </g>
+
+  <text x="49" y="403" fill="#172b43" font-size="17" font-family="sans-serif">镜头朝前：原代码中的相机角 0°</text>
+  <text x="554" y="403" fill="#172b43" font-size="17" font-family="sans-serif">镜头朝上：原代码中的相机角 +90°</text>
+
+  <text x="35" y="463" fill="#52667c" font-size="17" font-family="sans-serif">机体轮廓来自 dayin.stp；横置仅为标定示意，不代表飞行姿态。相机位置与转轴以实物为准。</text>
+</svg>

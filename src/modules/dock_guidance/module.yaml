@@ -10,20 +10,60 @@ parameters:
         type: boolean
         default: true
       DOCK_PRE_EN:
-        description: {short: Enable target rear-position guidance through visual handoff}
+        description: {short: Enable target-position guidance through visual handoff}
         type: boolean
         default: true
       DOCK_PRE_DIST:
-        description: {short: Distance behind target trajectory or stationary target approach line}
+        description:
+          short: Preposition distance from target
+          long: >
+            With DOCK_PRE_REAR enabled, the reference is behind the target
+            trajectory. Otherwise it is on the current aircraft-to-target line.
+            Without a valid visual target, guidance slows toward this reference.
+            Rear-path handoff requires arrival and a stable image. Frontal
+            handoff needs a stable image but does not wait for arrival.
         type: float
         unit: m
         min: 1
         max: 1000
         default: 100.0
+      DOCK_PRE_WAIT_T:
+        description:
+          short: Maximum visual wait after preposition arrival
+          long: >
+            Start this timer only after the aircraft reaches the rear or stand-off
+            reference. Continue following the moving reference while waiting.
+            Never enter visual docking on external target position alone. If a
+            fresh image does not remain valid for DOCK_PRE_VIS_T before timeout,
+            use the normal Dock fault exit.
+        type: float
+        unit: s
+        min: 0.5
+        max: 10
+        default: 2.0
+      DOCK_PRE_CLEAR_D:
+        description:
+          short: Minimum horizontal clearance from external target
+          long: >
+            During rear-reference guidance, route around the predicted target
+            when the direct path would cross this clearance. If no safe route
+            can be formed, use the normal Dock fault exit instead of flying
+            through the target on external guidance alone.
+        type: float
+        unit: m
+        min: 5
+        max: 500
+        default: 50.0
       DOCK_PRE_REAR:
         description:
-          short: Reach the rear reference before visual handoff
-          long: When enabled, stable visual tracking hands off only after the vehicle is close to the moving rear reference. Disable to hand off as soon as the image is stable.
+          short: Use target-trajectory rear approach
+          long: >
+            When enabled, guide to the moving rear reference and require its
+            vicinity before visual handoff. When disabled, guide toward a
+            stand-off point on the aircraft-to-target line from any bearing,
+            and hand off as soon as visual tracking is stable, even before
+            reaching that point. Fresh target position and a valid reference
+            remain required for handoff in both modes.
         type: boolean
         default: true
       DOCK_PRE_RADIUS:
@@ -35,8 +75,23 @@ parameters:
         min: 0
         max: 2000
         default: 250.0
+      DOCK_PRE_YAW_R:
+        description:
+          short: Preposition yaw-setpoint slew rate
+          long: >
+            While following the external rear reference, turn the camera toward
+            the predicted target at this maximum rate. The ordinary DOCK_YAW_RATE
+            still applies after visual handoff. Set this high enough to follow
+            the target bearing around a close moving trajectory; actual yaw
+            tracking remains limited by the multicopter controller and airframe.
+        type: float
+        unit: deg/s
+        min: 1
+        max: 60
+        decimal: 1
+        default: 30.0
       DOCK_PRE_ZOFF:
-        description: {short: Height above rear trajectory point}
+        description: {short: Height above preposition reference}
         type: float
         unit: m
         min: -100
@@ -123,7 +178,7 @@ parameters:
       DOCK_CAM_P_MIN:
         description:
           short: Camera pitch servo minimum angle
-          long: One servo travel endpoint. The lower of P_MIN and P_MAX maps to output -1 and bounds valid MT6701 camera pitch with a 5 degree margin.
+          long: Lower camera pitch travel endpoint. Its normalized Gimbal Pitch output is DOCK_CAM_OUT_LO; also bounds valid MT6701 pitch with a 5 degree margin.
         type: float
         min: -180
         max: 180
@@ -132,12 +187,30 @@ parameters:
       DOCK_CAM_P_MAX:
         description:
           short: Camera pitch servo maximum angle
-          long: Other servo travel endpoint. The higher of P_MIN and P_MAX maps to output +1 and bounds valid MT6701 camera pitch with a 5 degree margin.
+          long: Upper camera pitch travel endpoint. Its normalized Gimbal Pitch output is DOCK_CAM_OUT_HI; also bounds valid MT6701 pitch with a 5 degree margin.
         type: float
         min: -180
         max: 180
         decimal: 1
         default: 90.0
+      DOCK_CAM_OUT_LO:
+        description:
+          short: Gimbal output at minimum camera pitch
+          long: Normalized Gimbal Pitch command at the lower DOCK_CAM_P_MIN/MAX angle. Set from measured camera angle and PWM; default preserves the original full-range mapping.
+        type: float
+        min: -1
+        max: 1
+        decimal: 2
+        default: -1.0
+      DOCK_CAM_OUT_HI:
+        description:
+          short: Gimbal output at maximum camera pitch
+          long: Normalized Gimbal Pitch command at the higher DOCK_CAM_P_MIN/MAX angle. Set from measured camera angle and PWM; default preserves the original full-range mapping.
+        type: float
+        min: -1
+        max: 1
+        decimal: 2
+        default: 1.0
       DOCK_CAM_P_RATE:
         description: {short: Camera pitch servo maximum slew rate}
         type: float

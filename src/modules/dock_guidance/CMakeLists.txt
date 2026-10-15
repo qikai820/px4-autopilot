@@ -18,6 +18,7 @@ px4_add_module(
 		RelativeGuidance.hpp
 		DockGuidance.hpp
 		CameraHistory.hpp
+		CameraServoMap.hpp
 		PredictiveCorrection.hpp
 		RecoveryHeading.hpp
 	MODULE_CONFIG

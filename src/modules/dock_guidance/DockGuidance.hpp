@@ -46,6 +46,7 @@
 #include <uORB/topics/dock_preposition_status.h>
 #include <uORB/topics/dock_guidance_thrust.h>
 #include <uORB/topics/dock_brake_status.h>
+#include <uORB/topics/debug_vect.h>
 #include <uORB/topics/gimbal_controls.h>
 #include <uORB/topics/parameter_update.h>
 #include <uORB/topics/register_ext_component_reply.h>
@@ -73,6 +74,7 @@
 #include <cmath>
 #include "TargetMotion.hpp"
 #include "CameraHistory.hpp"
+#include "CameraServoMap.hpp"
 #include "PredictiveCorrection.hpp"
 #include "RecoveryHeading.hpp"
 #include "RelativeGuidance.hpp"
@@ -103,6 +105,7 @@ private:
   static constexpr float LOOP_DT = 0.01f;
   static constexpr uint32_t WATCHDOG_INTERVAL_US = 10_ms;
   static constexpr uint32_t CAMERA_SERVO_PUBLISH_INTERVAL_US = 50_ms;
+  static constexpr uint32_t CAMERA_TELEMETRY_INTERVAL_US = 200_ms;
 
   // 阶段值也写入 dock_guidance_setpoint，供日志和地面站定位控制分支。
   // ALIGN 先居中，ACCELERATE/MAX_SPEED_APPROACH 接近，TERMINAL_BRAKE 按距离或视场减速；
@@ -150,6 +153,7 @@ private:
   void update_camera_pitch_servo(float camera_pitch_error_deg, float dt_s,
                                  hrt_abstime timestamp_sample);
   void publish_camera_pitch_servo(hrt_abstime timestamp_sample);
+  void publish_camera_telemetry(hrt_abstime now);
   void update_camera_encoder(hrt_abstime now);
   bool camera_encoder_ready(hrt_abstime now) const;
   bool preposition_entry_ready(hrt_abstime now);
@@ -250,6 +254,7 @@ private:
       ORB_ID(dock_guidance_thrust)};
   uORB::Publication<gimbal_controls_s> _gimbal_controls_pub{
       ORB_ID(gimbal_controls)};
+  uORB::Publication<debug_vect_s> _camera_telemetry_pub{ORB_ID(debug_vect)};
   uORB::Publication<trajectory_setpoint_s> _trajectory_setpoint_pub{
       ORB_ID(trajectory_setpoint)};
   uORB::Publication<register_ext_component_request_s>
@@ -295,12 +300,16 @@ private:
   float _closest_target_distance_m{INFINITY};
   bool _closest_target_distance_reported{false};
   bool _preposition_active{false};
+  bool _pre_visual_lock_reported{false};
+  bool _pre_reference_reached{false};
+  bool _pre_bypass_active{false};
   bool _qgc_guidance_live{false};
   bool _preposition_handoff_pending{false};
   bool _preposition_enabled_for_activation{false};
   bool _course_yaw_active{false};
   bool _pre_reference_valid{false};
   hrt_abstime _pre_visual_since{0};
+  hrt_abstime _pre_visual_wait_since{0};
   hrt_abstime _pre_last_visual_sample{0};
   hrt_abstime _pre_last_control_us{0};
   uint64_t _pre_last_source_ms{0};
@@ -311,8 +320,10 @@ private:
   matrix::Vector3f _pre_requested_velocity{};
   float _pre_prediction_horizon_s{NAN};
   matrix::Vector3f _pre_reference{};
+  matrix::Vector3f _pre_guidance_reference{};
   matrix::Vector3f _pre_target_position{};
   matrix::Vector3f _pre_last_direction{};
+  int _pre_bypass_side{0};
   static constexpr int PRE_PATH_CAPACITY = 1024;
   matrix::Vector3f _pre_path[PRE_PATH_CAPACITY]{};
   int _pre_path_count{0};
@@ -367,6 +378,7 @@ private:
   bool _camera_pitch_initialized{false};
   bool _camera_servo_armed{false};
   hrt_abstime _last_camera_pitch_publish_us{0};
+  hrt_abstime _last_camera_telemetry_us{0};
   dock_motion::CameraHistory<1024> _camera_history;
   dock_motion::EncoderPitchHistory<601> _camera_encoder_history;
   hrt_abstime _encoder_last_sample_us{0};
@@ -462,8 +474,11 @@ private:
   DEFINE_PARAMETERS(
       (ParamBool<px4::params::DOCK_PRE_EN>)_param_dock_pre_enable,
       (ParamFloat<px4::params::DOCK_PRE_DIST>)_param_dock_pre_distance,
+      (ParamFloat<px4::params::DOCK_PRE_WAIT_T>)_param_dock_pre_visual_wait,
+      (ParamFloat<px4::params::DOCK_PRE_CLEAR_D>)_param_dock_pre_clearance,
       (ParamBool<px4::params::DOCK_PRE_REAR>)_param_dock_pre_rear,
       (ParamFloat<px4::params::DOCK_PRE_RADIUS>)_param_dock_pre_radius,
+      (ParamFloat<px4::params::DOCK_PRE_YAW_R>)_param_dock_pre_yaw_rate,
       (ParamFloat<px4::params::DOCK_PRE_ZOFF>)_param_dock_pre_z_offset,
       (ParamFloat<px4::params::DOCK_PRE_VIS_T>)_param_dock_pre_visual_time,
       (ParamInt<px4::params::DOCK_PRE_TOUT>)_param_dock_pre_timeout,
@@ -499,6 +514,8 @@ private:
       (ParamInt<px4::params::DOCK_CAM_ENC_REV>)_param_dock_cam_encoder_reverse,
       (ParamFloat<px4::params::DOCK_CAM_P_MIN>)_param_dock_cam_pitch_min,
       (ParamFloat<px4::params::DOCK_CAM_P_MAX>)_param_dock_cam_pitch_max,
+      (ParamFloat<px4::params::DOCK_CAM_OUT_LO>)_param_dock_cam_output_low,
+      (ParamFloat<px4::params::DOCK_CAM_OUT_HI>)_param_dock_cam_output_high,
       (ParamFloat<px4::params::DOCK_CAM_P_RATE>)_param_dock_cam_pitch_rate,
       (ParamFloat<px4::params::DOCK_CAM_P_TC>)_param_dock_cam_pitch_tc,
       (ParamFloat<px4::params::DOCK_CAM_P_DB>)_param_dock_cam_pitch_deadband,

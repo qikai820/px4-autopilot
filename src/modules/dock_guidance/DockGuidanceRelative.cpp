@@ -239,29 +239,34 @@ void DockGuidance::compute_relative_control(const Vector3f &direction, const Vec
       _prediction_reject = dock_motion::PredictionReject::Ready;
     }
     // Include clearance of the pass plane in the blind budget, not just time
-    // to minimum separation. Freeze the observer and the published command.
-    const float remaining = math::constrain(_param_dock_terminal_blind.get(), .05f, 3.f) -
-        _relative_motion.age(now);
-    const bool terminal = _relative_response.fresh(now) && dock_motion::relative_terminal_window(evidence, _relative_motion.age(now),
+    // to minimum separation. Lock the command and crossing direction; safe
+    // visual measurements may still update the pass estimate after entry.
+    const bool stable_terminal_evidence = _relative_response.fresh(now) &&
+        _relative_trajectory.valid && _relative_trajectory.closest.valid && evidence.valid &&
+        std::isfinite(evidence.miss_bound_m + evidence.time_upper_s) &&
+        evidence.miss_bound_m < _param_dock_pass_error.get() &&
+        evidence.time_upper_s > 0.f &&
+        evidence.time_upper_s <= math::constrain(_param_dock_terminal_max_time.get(), .1f, 10.f) &&
+        _closest_approach.relative_speed_m_s > .5f &&
+        _fov_ratio < soft && _bbox_edge_ratio < soft && plan.predicted_fov < soft &&
+        (_param_dock_terminal_distance.get() <= 0.f ||
+         c.relative.norm() <= _param_dock_terminal_distance.get());
+    const bool blind_window = dock_motion::relative_terminal_window(evidence, _relative_motion.age(now),
         _closest_approach.relative_speed_m_s, _param_dock_pass_distance.get(), _param_dock_pass_error.get(),
         math::constrain(_param_dock_blind_tgo.get(), .1f, .5f),
-        math::constrain(_param_dock_terminal_blind.get(), .05f, 3.f), _param_dock_terminal_max_time.get()) &&
-        _fov_ratio < soft && _bbox_edge_ratio < .98f && plan.predicted_fov < soft &&
-        (_param_dock_terminal_distance.get() <= 0.f || c.relative.norm() <= _param_dock_terminal_distance.get());
-    if (terminal) {
-      if (!_terminal_candidate_since_us) { _terminal_candidate_since_us = now; }
-      if (now - _terminal_candidate_since_us >= static_cast<uint64_t>(
-          math::constrain(_param_dock_terminal_confirm.get(), .02f, 2.f) * 1e6f)) {
-        _relative_terminal_active = _terminal_ready = true;
-        _terminal_started_us = now;
-        _terminal_blind_since_us = 0;
-        _terminal_direction = _closest_approach.approach_axis;
-        _terminal_velocity_ned = plan.velocity;
-        _terminal_plan_deadline = now + static_cast<uint64_t>(
-            math::min(remaining, _param_dock_terminal_max_time.get()) * 1e6f);
-        set_stage(Stage::TERMINAL_DASH);
-      }
-    } else { _terminal_candidate_since_us = 0; }
+        math::constrain(_param_dock_terminal_blind.get(), .05f, 3.f), _param_dock_terminal_max_time.get());
+    if (dock_motion::relative_terminal_confirmed(now, _terminal_candidate_since_us,
+        stable_terminal_evidence, blind_window, _param_dock_terminal_confirm.get())) {
+      _relative_terminal_active = _terminal_ready = true;
+      _terminal_started_us = now;
+      _terminal_blind_since_us = 0;
+      _terminal_direction = _closest_approach.approach_axis;
+      _terminal_velocity_ned = plan.velocity;
+      _terminal_plan_deadline = dock_motion::relative_terminal_deadline(
+          _terminal_started_us, now, _relative_motion.age(now),
+          _param_dock_terminal_blind.get(), _param_dock_terminal_max_time.get());
+      set_stage(Stage::TERMINAL_DASH);
+    }
   } else { _terminal_candidate_since_us = 0; }
   _commanded_speed_ms = _velocity_setpoint_ned.norm();
   _closing_speed_ms = _velocity_ned * direction;
@@ -274,14 +279,24 @@ bool DockGuidance::relative_terminal(hrt_abstime now, bool blind) {
   vehicle_local_position_s local{};
   uint64_t sample = 0;
   if (!relative_guidance_enabled() || !_airborne || !_terminal_started_us ||
-      now < _terminal_started_us || now > _terminal_plan_deadline ||
-      _relative_motion.age(now) > math::constrain(_param_dock_terminal_blind.get(), .05f, 3.f) ||
-      !_local_pos_sub.copy(&local) || !local.xy_valid || !local.z_valid ||
+      now < _terminal_started_us) {
+    invalidate_setpoint(now, "relative terminal inactive/invalid state", false);
+    return false;
+  }
+  if (now > _terminal_plan_deadline) {
+    invalidate_setpoint(now, "relative terminal deadline", false);
+    return false;
+  }
+  if (_relative_motion.age(now) > math::constrain(_param_dock_terminal_blind.get(), .05f, 3.f)) {
+    invalidate_setpoint(now, "relative terminal observation age limit", false);
+    return false;
+  }
+  if (!_local_pos_sub.copy(&local) || !local.xy_valid || !local.z_valid ||
       !local.v_xy_valid || !local.v_z_valid ||
       local.xy_reset_counter != _xy_reset_counter || local.z_reset_counter != _z_reset_counter ||
       local.vxy_reset_counter != _vxy_reset_counter || local.vz_reset_counter != _vz_reset_counter ||
       !dock_motion::state_sample_time(local.timestamp_sample, local.timestamp, now, 100_ms, sample)) {
-    invalidate_setpoint(now, "relative terminal state/time limit", false);
+    invalidate_setpoint(now, "relative terminal local state unavailable", false);
     return false;
   }
   _velocity_ned = Vector3f(local.vx, local.vy, local.vz);
@@ -308,6 +323,7 @@ bool DockGuidance::relative_terminal(hrt_abstime now, bool blind) {
     return false;
   }
   if (blind && !_terminal_blind_since_us) { _terminal_blind_since_us = now; }
+  if (!blind) { _terminal_blind_since_us = 0; }
   _vision_degraded = blind;
   _prediction_ready = false;
   _miss_correction = {};

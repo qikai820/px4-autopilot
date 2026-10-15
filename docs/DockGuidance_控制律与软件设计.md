@@ -139,7 +139,7 @@ v_{track}=-d K_{img}e_{remaining}
 
 舵机只使用相机坐标系中的持续俯仰误差：误差先经过 `DOCK_CAM_P_DB` 死区，再除以 `DOCK_CAM_P_TC` 得到慢速角度变化率，并受 `DOCK_CAM_P_RATE` 限制。舵机指令不使用机体姿态、角速度或编码器反馈，因此不是增稳云台。`DOCK_CAM_ENC_EN=0` 时，曝光时刻的舵机命令历史用于相机到机体矩阵；`DOCK_CAM_ENC_EN=1` 时改用 MT6701 实测角历史，舵机命令本身不变。
 
-将一个未使用的 PWM 输出功能设置为 `Gimbal Pitch (421)`。`DOCK_CAM_P_MIN/MAX` 中较小/较大角度分别映射到归一化输出 -1/+1；方向相反时使用该 PWM 通道的反向参数。该直接输出方式不需要启动 PX4 gimbal 模块，建议保持 `MNT_MODE_IN=-1`，避免多个发布者同时控制同一个输出。
+将一个未使用的 PWM 输出功能设置为 `Gimbal Pitch (421)`。`DOCK_CAM_P_MIN/MAX` 中较小/较大角度分别映射到 `DOCK_CAM_OUT_LO/HI`，默认值为 -1/+1；可按实测相机角与 PWM 值调整。该直接输出方式不需要启动 PX4 gimbal 模块，建议保持 `MNT_MODE_IN=-1`，避免多个发布者同时控制同一个输出。
 
 ### 6.2 对准阶段
 

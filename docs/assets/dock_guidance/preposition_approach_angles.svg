@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="520" viewBox="0 0 960 520" role="img" aria-labelledby="title desc">
+  <title id="title">目标轨迹后方 0 度与侧方 90 度的接近位置示意</title>
+  <desc id="desc">俯视图。目标在中心向右运动；0 度飞机位于轨迹后方，90 度飞机位于一侧。两条虚线分别表示从当前位置指向目标的接近线。</desc>
+  <defs>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1778c8"/>
+    </marker>
+    <marker id="arrow-orange" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#d46b18"/>
+    </marker>
+  </defs>
+  <rect x="1" y="1" width="958" height="518" rx="16" fill="#fff" stroke="#d9e0e8" stroke-width="2"/>
+  <text x="42" y="53" fill="#172b43" font-size="25" font-weight="700" font-family="sans-serif">对接来向示意（俯视）</text>
+  <text x="42" y="84" fill="#52667c" font-size="17" font-family="sans-serif">以目标运动方向的反向为 0°；90° 表示一侧的横向来向</text>
+
+  <line x1="130" y1="304" x2="825" y2="304" stroke="#dce3eb" stroke-width="3" stroke-dasharray="9 9"/>
+  <text x="735" y="283" fill="#52667c" font-size="17" font-family="sans-serif">目标轨迹</text>
+
+  <path d="M 251 304 L 479 304" fill="none" stroke="#1778c8" stroke-width="5" stroke-linecap="round" stroke-dasharray="11 9" marker-end="url(#arrow-blue)"/>
+  <path d="M 528 167 L 528 263" fill="none" stroke="#1778c8" stroke-width="5" stroke-linecap="round" stroke-dasharray="11 9" marker-end="url(#arrow-blue)"/>
+
+  <circle cx="220" cy="304" r="31" fill="#e8f4ff" stroke="#1778c8" stroke-width="3"/>
+  <path d="M 209 288 L 239 304 L 209 320 z" fill="#1778c8"/>
+  <text x="144" y="363" fill="#0b5f9b" font-size="22" font-weight="700" font-family="sans-serif">0° 轨迹后方</text>
+
+  <circle cx="528" cy="135" r="31" fill="#e8f4ff" stroke="#1778c8" stroke-width="3"/>
+  <path d="M 512 124 L 528 154 L 544 124 z" fill="#1778c8"/>
+  <text x="575" y="143" fill="#0b5f9b" font-size="22" font-weight="700" font-family="sans-serif">90° 侧方</text>
+
+  <circle cx="528" cy="304" r="35" fill="#fff0df" stroke="#d46b18" stroke-width="3"/>
+  <path d="M 514 287 L 547 304 L 514 321 z" fill="#d46b18"/>
+  <text x="489" y="367" fill="#a74e0d" font-size="22" font-weight="700" font-family="sans-serif">目标</text>
+  <line x1="574" y1="304" x2="690" y2="304" stroke="#d46b18" stroke-width="5" stroke-linecap="round" marker-end="url(#arrow-orange)"/>
+  <text x="586" y="336" fill="#a74e0d" font-size="17" font-family="sans-serif">运动方向</text>
+
+  <line x1="42" y1="414" x2="918" y2="414" stroke="#d9e0e8" stroke-width="2"/>
+  <text x="42" y="448" fill="#172b43" font-size="17" font-family="sans-serif">DOCK_PRE_REAR=1：预置参考点取目标轨迹后方（有可用运动方向时）</text>
+  <text x="42" y="480" fill="#172b43" font-size="17" font-family="sans-serif">DOCK_PRE_REAR=0：从当前来向接近；0°、90° 或其他方向均无需设置方位角</text>
+</svg>
