@@ -111,11 +111,19 @@ static void test_camera_history() {
 
 static void test_encoder_pitch_alignment() {
   float pitch = NAN;
-  assert(encoder_pitch_deg(15000, 15000, false, 0.f, 90.f, pitch) && pitch == 0.f);
-  assert(encoder_pitch_deg(2712, 15000, false, 0.f, 90.f, pitch) && pitch == 90.f);
-  assert(encoder_pitch_deg(10904, 15000, true, 0.f, 90.f, pitch) && pitch == 90.f);
-  assert(!encoder_pitch_deg(2712, -1, false, 0.f, 90.f, pitch));
-  assert(!encoder_pitch_deg(6144, 0, false, 0.f, 90.f, pitch));
+  // New 90-degree reference: both directions remain correct across counter wrap.
+  assert(encoder_pitch_deg(2712, -1, 2712, false, 0.f, 90.f, pitch) && pitch == 90.f);
+  assert(encoder_pitch_deg(15000, -1, 2712, false, 0.f, 90.f, pitch) && pitch == 0.f);
+  assert(encoder_pitch_deg(10904, -1, 10904, true, 0.f, 90.f, pitch) && pitch == 90.f);
+  assert(encoder_pitch_deg(15000, -1, 10904, true, 0.f, 90.f, pitch) && pitch == 0.f);
+  // Flipping direction does not change the measured angle at the reference.
+  assert(encoder_pitch_deg(2712, -1, 2712, true, 0.f, 90.f, pitch) && pitch == 90.f);
+  // A 90-degree calibration takes precedence over a saved legacy zero.
+  assert(encoder_pitch_deg(2712, 8000, 2712, false, 0.f, 90.f, pitch) && pitch == 90.f);
+  assert(encoder_pitch_deg(15000, 15000, -1, false, 0.f, 90.f, pitch) && pitch == 0.f);
+  assert(encoder_pitch_deg(2712, 15000, -1, false, 0.f, 90.f, pitch) && pitch == 90.f);
+  assert(!encoder_pitch_deg(2712, -1, -1, false, 0.f, 90.f, pitch));
+  assert(!encoder_pitch_deg(6144, 0, -1, false, 0.f, 90.f, pitch));
 
   EncoderPitchHistory<4> history;
   assert(!history.at(1000000, pitch));

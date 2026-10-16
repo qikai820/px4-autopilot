@@ -122,14 +122,21 @@ void DockGuidance::compute_relative_control(const Vector3f &direction, const Vec
   Vector3f far_direction{};
   Vector3f far_target_velocity{};
   bool far_reference_valid = false;
-  if (_preposition_enabled_for_activation && !ready && _relative_motion.updates() < 4 &&
+  // An unavailable external fix cannot prove that an older QGC-derived
+  // command is still outside the lock gate.
+  bool qgc_far_guidance_blocked = _preposition_enabled_for_activation &&
+      _param_dock_pre_lock_distance.get() > 0.f;
+  if (_preposition_enabled_for_activation && !ready &&
       update_rear_reference(now, local) && _pre_reference_valid) {
     const Vector3f target_line = _pre_target_position - own;
     const float target_range = target_line.norm();
+    qgc_far_guidance_blocked = dock_motion::preposition_lock_distance_reached(target_line,
+        _param_dock_pre_lock_distance.get());
     // The ground station position and the image must refer to the same target.
     // The absolute fix is only a far-field range source; it never makes the
     // relative observer ready or permits a terminal dash.
-    if (target_line.isAllFinite() && target_range > 1.f &&
+    if (_relative_motion.updates() < 4 && target_line.isAllFinite() && target_range > 1.f &&
+        !qgc_far_guidance_blocked &&
         target_line * direction > 0.82f * target_range &&
         dock_motion::far_lookahead_direction(own, _pre_reference, _pre_target_position,
             far_direction)) {
@@ -182,8 +189,10 @@ void DockGuidance::compute_relative_control(const Vector3f &direction, const Vec
     set_stage(far_reference_valid ? Stage::ACCELERATE : Stage::TRACK_CAPTURE);
     if (_relative_motion.updates() >= 4) {
       // A short loss of metric scale cannot authorize new acceleration or a
-      // blind terminal. Preserve continuity while fresh angles can recover it.
-      desired = previous;
+      // blind terminal. Inside the lock range do not retain a command that
+      // may have originated from the external target position.
+      desired = qgc_far_guidance_blocked
+          ? direction * capture_speed + _tracking_velocity_ned : previous;
       if (_relative_motion.age(now) > .5f) {
         invalidate_setpoint(now, "relative scale observation expired");
         return;

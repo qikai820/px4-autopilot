@@ -102,8 +102,14 @@ static void test_preposition_turn_radius() {
 }
 
 static void test_preposition_guidance_clearance() {
-  // The logged 99 m target range is irrelevant while the rear reference is
-  // still about 198 m away. Arrival alone cannot authorize visual handoff.
+  // The lock gate uses the full three-dimensional offset, including height.
+  assert(!preposition_lock_distance_reached(Vector3f(99.f, 0.f, 60.f), 100.f));
+  assert(preposition_lock_distance_reached(Vector3f(80.f, 0.f, 60.f), 100.f));
+  assert(preposition_lock_distance_reached(Vector3f(99.f, 0.f, 0.f), 100.f));
+  assert(!preposition_lock_distance_reached(Vector3f(99.f, 0.f, 0.f), 0.f));
+  assert(!preposition_lock_distance_reached(Vector3f(NAN, 0.f, 0.f), 100.f));
+  // Reference arrival and the target-distance lock gate are separate checks.
+  // A rear reference still about 198 m away has not been reached.
   assert(!preposition_reference_arrived(198.f, 25.f, true, true, false));
   assert(preposition_reference_arrived(24.f, 25.f, true, true, false));
   assert(!preposition_reference_arrived(24.f, 25.f, false, true, false));

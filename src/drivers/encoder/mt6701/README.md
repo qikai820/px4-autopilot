@@ -29,6 +29,13 @@ mt6701 info
 listener sensor_encoder
 ```
 
+To start the driver automatically at power-up on external I2C bus 1, set
+`SENS_EN_MT6701=1`, save parameters, and reboot. The default is `0` (no
+automatic startup); manual `mt6701 start` remains available. The parameter
+controls the PX4 driver, not the sensor's electrical power. For any other bus
+or a programmed I2C address, leave automatic startup disabled and use the
+manual command with the appropriate `-I`/`-X`, `-b`, and `-a` options.
+
 Use `-I` for an internal bus, and replace `1` with the actual bus number.
 For a sensor whose I2C address was changed to `0x46`, add `-a 0x46` to the
 `start` command. `mt6701 stop` stops the driver.
@@ -50,13 +57,14 @@ DockGuidance can use this encoder for the actual body-relative camera pitch.
 It assumes one MT6701 with direct 1:1 drive and a camera range shorter than
 180 degrees. Start the driver on the wired bus before enabling feedback.
 
-With the vehicle disarmed, put the camera at its body-relative zero pitch and
-run `dock_guidance calib_zero`. This stores the current raw count in
-`DOCK_CAM_ENC_Z`; it does not program the MT6701 EEPROM. Move the camera a
-known amount in the positive pitch direction. If the reported calibrated
-angle moves negative, set `DOCK_CAM_ENC_REV` to 1. At 90 degrees, the raw
-reading should be about 4096 counts from zero, allowing for wrap at 16383.
-The 90-degree point is a check, not a second calibration point.
+With the vehicle disarmed, put the camera at body-relative positive 90 degrees
+and run `dock_guidance calib_90`. This stores the current raw count in
+`DOCK_CAM_ENC_90`; it does not program the MT6701 EEPROM. Move the camera
+downward a few degrees: the reported calibrated angle should decrease. If it
+increases, flip `DOCK_CAM_ENC_REV` and check again. At zero degrees, the raw
+reading should be about 4096 counts from the 90-degree reference, allowing for
+wrap at 16383. Existing `DOCK_CAM_ENC_Z` zero calibrations remain usable until
+replaced by `calib_90`.
 
 Set `DOCK_CAM_ENC_EN` to 1 only after this check. When enabled, DockGuidance
 time-aligns measured pitch to the image exposure and uses it in the

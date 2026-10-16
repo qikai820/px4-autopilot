@@ -1422,9 +1422,9 @@ void DockGuidance::publish_camera_telemetry(hrt_abstime now) {
   debug_vect_s telemetry{};
   telemetry.timestamp = now;
   memcpy(telemetry.name, "DockCam", sizeof("DockCam"));
+  // The last servo setpoint remains the commanded angle until it is replaced or disarmed.
   telemetry.x = _param_dock_cam_pitch_variable.get() != 0 && _camera_servo_armed &&
-      _last_camera_pitch_publish_us != 0 &&
-      now - _last_camera_pitch_publish_us <= 200_ms
+      _last_camera_pitch_publish_us != 0
       ? _camera_mount_pitch_deg : NAN;
   telemetry.y = camera_encoder_ready(now) ? _encoder_pitch_deg : NAN;
   telemetry.z = 0.f;
@@ -1457,6 +1457,7 @@ void DockGuidance::update_camera_encoder(hrt_abstime now) {
   const float maximum = math::max(_param_dock_cam_pitch_min.get(), _param_dock_cam_pitch_max.get());
   float pitch = NAN;
   if (!dock_motion::encoder_pitch_deg(encoder.raw_angle, _param_dock_cam_encoder_zero.get(),
+      _param_dock_cam_encoder_ninety.get(),
       _param_dock_cam_encoder_reverse.get(), minimum, maximum, pitch)) {
     _encoder_fault = true;
     return;
@@ -1479,7 +1480,7 @@ void DockGuidance::update_camera_encoder(hrt_abstime now) {
 }
 
 bool DockGuidance::camera_encoder_ready(hrt_abstime now) const {
-  return _param_dock_cam_encoder_zero.get() >= 0 &&
+  return (_param_dock_cam_encoder_ninety.get() >= 0 || _param_dock_cam_encoder_zero.get() >= 0) &&
          !_encoder_fault && _encoder_last_sample_us != 0 &&
          now >= _encoder_last_sample_us && now - _encoder_last_sample_us <= 50_ms;
 }
@@ -2445,6 +2446,7 @@ void DockGuidance::update_parameters() {
       _param_dock_cam_roll.get(), _param_dock_cam_pitch.get(), _param_dock_cam_yaw.get(),
       float(_param_dock_cam_dly.get()), float(_param_dock_cam_pitch_variable.get()),
       float(_param_dock_cam_encoder_enable.get()), float(_param_dock_cam_encoder_zero.get()),
+      float(_param_dock_cam_encoder_ninety.get()),
       float(_param_dock_cam_encoder_reverse.get()),
       _param_dock_res_x.get(), _param_dock_res_y.get(),
       _param_dock_fov_x.get(), _param_dock_fov_y.get(),
@@ -2456,6 +2458,7 @@ void DockGuidance::update_parameters() {
       _param_dock_cam_roll.get(), _param_dock_cam_pitch.get(), _param_dock_cam_yaw.get(),
       float(_param_dock_cam_dly.get()), float(_param_dock_cam_pitch_variable.get()),
       float(_param_dock_cam_encoder_enable.get()), float(_param_dock_cam_encoder_zero.get()),
+      float(_param_dock_cam_encoder_ninety.get()),
       float(_param_dock_cam_encoder_reverse.get()),
       _param_dock_res_x.get(), _param_dock_res_y.get(),
       _param_dock_fov_x.get(), _param_dock_fov_y.get(),
@@ -2564,19 +2567,18 @@ int DockGuidance::task_spawn(int argc, char *argv[]) {
 
 int DockGuidance::custom_command(int argc, char *argv[]) {
   if (argc > 0 && (!strcmp(argv[0], "servo_test") || !strcmp(argv[0], "servo_test_angle"))) {
-    // This test is deliberately limited to the measured MicoAir H743 PWM5
-    // camera range. The saved disarmed output must be moved to the known
-    // 90-degree/1500-us reference before a timed test can return to it.
+    // This test follows the calibrated PWM5 endpoints, with a 50-us margin
+    // at the low-angle end and a disarmed return at the high-angle endpoint.
     const bool angle_test = !strcmp(argv[0], "servo_test_angle");
     if (argc != 2) {
-      PX4_ERR("usage: dock_guidance %s <%s>", argv[0], angle_test ? "angle_deg" : "1500..2050 us");
+      PX4_ERR("usage: dock_guidance %s <%s>", argv[0], angle_test ? "angle_deg" : "pulse_us");
       return PX4_ERROR;
     }
     char *end = nullptr;
     const float requested_angle_deg = angle_test ? strtof(argv[1], &end) : NAN;
     long pulse_us = angle_test ? 0 : strtol(argv[1], &end, 10);
     if (end == argv[1] || *end != '\0' ||
-        (angle_test ? !std::isfinite(requested_angle_deg) : pulse_us < 1500 || pulse_us > 2050)) {
+        (angle_test && !std::isfinite(requested_angle_deg))) {
       PX4_ERR("invalid camera servo test %s", angle_test ? "angle" : "PWM");
       return PX4_ERROR;
     }
@@ -2599,14 +2601,18 @@ int DockGuidance::custom_command(int argc, char *argv[]) {
     int32_t prearm_mode = -1;
     if (!read_int_param("PWM_MAIN_MIN5", minimum) || !read_int_param("PWM_MAIN_MAX5", maximum) ||
         !read_int_param("PWM_MAIN_CENT5", center) || !read_int_param("PWM_MAIN_DIS5", disarmed) ||
-        !read_int_param("PWM_MAIN_FAIL5", failsafe) || !read_int_param("PWM_MAIN_REV", reverse) ||
-        minimum >= maximum || disarmed != 1500 ||
-        (failsafe != -1 && failsafe != 1500)) {
-      PX4_ERR("PWM5 range invalid or disarmed/failsafe output not at 1500 us");
+        !read_int_param("PWM_MAIN_FAIL5", failsafe) || !read_int_param("PWM_MAIN_REV", reverse)) {
+      PX4_ERR("PWM5 parameters unavailable");
+      return PX4_ERROR;
+    }
+    int test_minimum = 0, test_maximum = 0;
+    if (!dock_motion::camera_servo_test_limits(minimum, maximum, center,
+                                                disarmed, failsafe, test_minimum, test_maximum)) {
+      PX4_ERR("PWM5 test range/return invalid; check MIN5/CENT5/MAX5 and DIS5/FAIL5");
       return PX4_ERROR;
     }
     // Prearmed gimbal controls can take over when actuator-test control expires.
-    // This H743 procedure requires PWM5 to return to its disarmed 1500 us.
+    // This H743 procedure requires PWM5 to return to the high-angle endpoint.
     if (!read_int_param("COM_PREARM_MODE", prearm_mode) || prearm_mode != 0) {
       PX4_ERR("set COM_PREARM_MODE=0 before camera servo test");
       return PX4_ERROR;
@@ -2636,15 +2642,7 @@ int DockGuidance::custom_command(int argc, char *argv[]) {
       return PX4_ERROR;
     }
 
-    const bool has_center = center >= 800 && center <= 2200;
-    if (has_center && (center < minimum || center > maximum)) {
-      PX4_ERR("PWM_MAIN_CENT5 must be within min and max");
-      return PX4_ERROR;
-    }
-    if (!angle_test && (pulse_us < minimum || pulse_us > maximum)) {
-      PX4_ERR("requested PWM outside PWM_MAIN_MIN5/MAX5");
-      return PX4_ERROR;
-    }
+    const bool has_center = center != -1;
     float normalized = 0.f;
     if (angle_test) {
       auto read_float_param = [](const char *name, float &value) {
@@ -2679,9 +2677,10 @@ int DockGuidance::custom_command(int argc, char *argv[]) {
             : minimum + (output_value + 1.f) * 0.5f * float(maximum - minimum);
       };
       const float pwm_at_high_angle = pwm_from_normalized(output_high);
-      if (fabsf(pwm_at_high_angle - 1500.f) > 1.f ||
-          pwm_from_normalized(output_low) <= pwm_at_high_angle) {
-        PX4_ERR("camera angle mapping must put its high-angle endpoint at 1500 us");
+      if (fabsf(pwm_at_high_angle - float(test_minimum)) > 1.f ||
+          (has_center ? pwm_from_normalized(output_low) <= pwm_at_high_angle
+           : fabsf(pwm_from_normalized(output_low) - float(maximum)) > 1.f)) {
+        PX4_ERR("camera angle mapping does not match PWM5 calibrated endpoints");
         return PX4_ERROR;
       }
       const float expected_pwm = pwm_from_normalized(normalized);
@@ -2699,14 +2698,15 @@ int DockGuidance::custom_command(int argc, char *argv[]) {
       }
       if (reverse & (1 << 4)) { normalized = -normalized; }
     }
-    if (pulse_us < 1500 || pulse_us > 2050 || pulse_us < minimum || pulse_us > maximum) {
-      PX4_ERR("requested camera angle/PWM exceeds safe 1500..2050 us PWM5 test range");
+    if (pulse_us < test_minimum || pulse_us > test_maximum) {
+      PX4_ERR("requested camera angle/PWM exceeds safe PWM5 test range %d..%d us",
+              test_minimum, test_maximum);
       return PX4_ERROR;
     }
 
     // Commander applies the ordinary actuator-test interlocks and the output
     // mixer supplies the configured PWM scaling. One second later PWM5 returns
-    // to the checked 1500-us disarmed value.
+    // to the checked disarmed value at the high-angle endpoint.
     uORB::Subscription ack_sub{ORB_ID(vehicle_command_ack)};
     uORB::Publication<vehicle_command_s> command_pub{ORB_ID(vehicle_command)};
     vehicle_command_s command{};
@@ -2746,7 +2746,9 @@ int DockGuidance::custom_command(int argc, char *argv[]) {
     return PX4_ERROR;
   }
 
-  if (argc > 0 && !strcmp(argv[0], "calib_zero")) {
+  if (argc > 0 && (!strcmp(argv[0], "calib_90") || !strcmp(argv[0], "calib_zero"))) {
+    const bool calibrate_ninety = !strcmp(argv[0], "calib_90");
+    const char *reference_name = calibrate_ninety ? "90-degree" : "zero";
     uORB::Subscription status_sub{ORB_ID(vehicle_status)};
     uORB::Subscription encoder_sub{ORB_ID(sensor_encoder)};
     vehicle_status_s status{};
@@ -2754,7 +2756,7 @@ int DockGuidance::custom_command(int argc, char *argv[]) {
     if (!status_sub.copy(&status) || status.timestamp == 0 ||
         status.timestamp > start || start - status.timestamp > 500_ms ||
         status.arming_state != vehicle_status_s::ARMING_STATE_DISARMED) {
-      PX4_ERR("disarm before camera zero calibration");
+      PX4_ERR("disarm before camera %s calibration", reference_name);
       return PX4_ERROR;
     }
 
@@ -2769,7 +2771,7 @@ int DockGuidance::custom_command(int argc, char *argv[]) {
       if (!status_sub.copy(&status) || status.timestamp == 0 ||
           status.timestamp > now || now - status.timestamp > 500_ms ||
           status.arming_state != vehicle_status_s::ARMING_STATE_DISARMED) {
-        PX4_ERR("camera zero calibration interrupted by arming");
+        PX4_ERR("camera %s calibration interrupted by arming", reference_name);
         return PX4_ERROR;
       }
       sensor_encoder_s encoder{};
@@ -2781,7 +2783,7 @@ int DockGuidance::custom_command(int argc, char *argv[]) {
           encoder.timestamp_sample > encoder.timestamp || encoder.timestamp > now ||
           now - encoder.timestamp_sample > 50_ms ||
           (device_id && encoder.device_id != device_id)) {
-        PX4_ERR("invalid MT6701 sample during camera zero calibration");
+        PX4_ERR("invalid MT6701 sample during camera %s calibration", reference_name);
         return PX4_ERROR;
       }
       device_id = encoder.device_id;
@@ -2789,32 +2791,35 @@ int DockGuidance::custom_command(int argc, char *argv[]) {
       if (first < 0) { first = encoder.raw_angle; }
       const int32_t delta = (int32_t(encoder.raw_angle) - first + 16384 + 8192) % 16384 - 8192;
       if (abs(delta) > 20) {
-        PX4_ERR("camera moved during zero calibration");
+        PX4_ERR("camera moved during %s calibration", reference_name);
         return PX4_ERROR;
       }
       sum += delta;
       ++count;
     }
     if (count < 16) {
-      PX4_ERR("not enough fresh MT6701 samples for zero calibration");
+      PX4_ERR("not enough fresh MT6701 samples for %s calibration", reference_name);
       return PX4_ERROR;
     }
     const hrt_abstime end = hrt_absolute_time();
     if (!status_sub.copy(&status) || status.timestamp == 0 ||
         status.timestamp > end || end - status.timestamp > 500_ms ||
         status.arming_state != vehicle_status_s::ARMING_STATE_DISARMED) {
-      PX4_ERR("camera zero calibration interrupted by arming");
+      PX4_ERR("camera %s calibration interrupted by arming", reference_name);
       return PX4_ERROR;
     }
-    const int32_t zero = (first + int32_t(lroundf(float(sum) / count)) + 16384) % 16384;
-    const param_t handle = param_find("DOCK_CAM_ENC_Z");
-    if (handle == PARAM_INVALID || param_set(handle, &zero) != PX4_OK ||
+    const int32_t reference = (first + int32_t(lroundf(float(sum) / count)) + 16384) % 16384;
+    const int32_t uncalibrated = -1;
+    const param_t handle = param_find(calibrate_ninety ? "DOCK_CAM_ENC_90" : "DOCK_CAM_ENC_Z");
+    const param_t other_handle = param_find(calibrate_ninety ? "DOCK_CAM_ENC_Z" : "DOCK_CAM_ENC_90");
+    if (handle == PARAM_INVALID || other_handle == PARAM_INVALID ||
+        param_set(handle, &reference) != PX4_OK || param_set(other_handle, &uncalibrated) != PX4_OK ||
         param_save_default(true) != PX4_OK) {
-      PX4_ERR("failed to save camera encoder zero");
+      PX4_ERR("failed to save camera encoder %s reference", reference_name);
       return PX4_ERROR;
     }
-    PX4_INFO("camera encoder zero: raw=%ld; check sign using a known positive pitch",
-             (long)zero);
+    PX4_INFO("camera encoder %s reference: raw=%ld; check direction with a known pitch change",
+             reference_name, (long)reference);
     return PX4_OK;
   }
   return print_usage("unknown command");
@@ -2846,8 +2851,9 @@ int DockGuidance::print_status() {
                         ? math::degrees(_yaw_setpoint_rad)
                         : NAN));
   const hrt_abstime now = hrt_absolute_time();
-  PX4_INFO("encoder: %s, zero=%ld, reverse=%d, raw=%u, measured=%.2f deg, age=%.0f ms, ready=%d",
+  PX4_INFO("encoder: %s, ref90=%ld, zero=%ld, reverse=%d, raw=%u, measured=%.2f deg, age=%.0f ms, ready=%d",
            _param_dock_cam_encoder_enable.get() ? "enabled" : "disabled",
+           (long)_param_dock_cam_encoder_ninety.get(),
            (long)_param_dock_cam_encoder_zero.get(), (int)_param_dock_cam_encoder_reverse.get(),
            (unsigned)_encoder_raw_angle, (double)_encoder_pitch_deg,
            _encoder_last_sample_us && now >= _encoder_last_sample_us
@@ -2890,18 +2896,18 @@ for coupled thrust and altitude control.
 $ dock_guidance start
 $ dock_guidance status
 $ dock_guidance servo_test 1500  # H743 PWM5, disarmed, propellers removed
-$ dock_guidance servo_test 1600  # check whether the camera pitches up or down
-$ dock_guidance servo_test_angle 90  # use current camera angle mapping; about 1500 us on calibrated H743
-$ dock_guidance servo_test_angle 80  # about 1600 us on calibrated H743
-$ dock_guidance calib_zero  # disarmed, camera at body-relative zero pitch
+$ dock_guidance servo_test_angle 90  # uses configured DOCK_CAM and PWM5 endpoints
+$ dock_guidance servo_test_angle 60  # e.g. 1780 us for 90/1480, 30/2080 calibration
+$ dock_guidance calib_90  # disarmed, camera at body-relative positive 90 degrees
 $ dock_guidance stop
 )DESCR_STR");
 
   PRINT_MODULE_USAGE_NAME("dock_guidance", "controller");
   PRINT_MODULE_USAGE_COMMAND("start");
-  PRINT_MODULE_USAGE_COMMAND_DESCR("servo_test", "Test H743 camera PWM5 for 1 s (1500..2050 us)");
+  PRINT_MODULE_USAGE_COMMAND_DESCR("servo_test", "Test H743 camera PWM5 for 1 s within configured safe range");
   PRINT_MODULE_USAGE_COMMAND_DESCR("servo_test_angle", "Test H743 camera angle for 1 s using DOCK_CAM mapping");
-  PRINT_MODULE_USAGE_COMMAND_DESCR("calib_zero", "Save MT6701 raw count at camera zero pitch");
+  PRINT_MODULE_USAGE_COMMAND_DESCR("calib_90", "Save MT6701 raw count at camera positive 90 degrees");
+  PRINT_MODULE_USAGE_COMMAND_DESCR("calib_zero", "Legacy zero-pitch calibration");
   PRINT_MODULE_USAGE_DEFAULT_COMMANDS();
   return 0;
 }

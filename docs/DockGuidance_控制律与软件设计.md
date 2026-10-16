@@ -293,7 +293,8 @@ s_{target}=\max\left(
 | `DOCK_CAM_SERVO` | 0 | 0=固定镜头，1=单轴俯仰舵机镜头 |
 | `DOCK_CAM_ROLL/PITCH/YAW` | -90/0/0 deg | 相机到机体安装欧拉角；启用编码器时俯仰分量由实测角替换，`DOCK_CAM_PITCH` 不与实测值相加 |
 | `DOCK_CAM_ENC_EN` | 0 | 1=用 MT6701 实测俯仰角计算相机到机体矩阵；需要有效零位和新鲜数据 |
-| `DOCK_CAM_ENC_Z` | -1 count | 相机相对机体零度时的 MT6701 原始计数；-1 表示未标定 |
+| `DOCK_CAM_ENC_90` | -1 count | 相机相对机体 +90° 时的 MT6701 原始计数；有效时优先于旧版零位 |
+| `DOCK_CAM_ENC_Z` | -1 count | 旧版相机零度原始计数；已有标定继续可用 |
 | `DOCK_CAM_ENC_REV` | 0 | 1=反转实测俯仰角符号；与舵机 PWM 反向设置无关 |
 | `DOCK_CAM_P_MIN/MAX` | 0/90 deg | 舵机机械角度范围，对应输出 -1/+1 |
 | `DOCK_CAM_P_RATE` | 5 deg/s | 舵机最大慢速转动速率 |

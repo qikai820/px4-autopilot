@@ -25,7 +25,7 @@ DockGuidance 注册名为 **Dock Guidance** 的 PX4 外部模式。进入模式�
 make cuav_7-nano_test
 ```
 
-产物为 `build/cuav_7-nano_test/cuav_7-nano_test.px4`。刷写后先确认实际固件版本和参数。`DOCK_GUIDANCE=1` 时，启动脚本在 Commander 运行后自动执行 `dock_guidance start`；`SENS_EN_VIZTRA=1` 时，传感器脚本按 `VIZTRA_CFG` 指定的串口启动 `viztra`。`SENS_EN_VIZTRA` 的模块默认值为 `0`，修改后需重启。MT6701 驱动当前需按实际 I²C 总线手动启动，启用 `DOCK_CAM_ENC_EN` 不会自动启动它。
+产物为 `build/cuav_7-nano_test/cuav_7-nano_test.px4`。刷写后先确认实际固件版本和参数。`DOCK_GUIDANCE=1` 时，启动脚本在 Commander 运行后自动执行 `dock_guidance start`；`SENS_EN_VIZTRA=1` 时，传感器脚本按 `VIZTRA_CFG` 指定的串口启动 `viztra`。`SENS_EN_MT6701=1` 时，传感器脚本在外部 I²C 1 上启动 `mt6701`。两个传感器启动参数默认均为 `0`，修改后需保存并重启；`DOCK_CAM_ENC_EN` 只控制实测角用于坐标变换，不会启动驱动。
 
 | 输入 | 用户应检查什么 |
 |---|---|
@@ -40,6 +40,7 @@ make cuav_7-nano_test
 | 非 Dock 参数/设置 | 当前默认或约束 | 用途 |
 |---|---|---|
 | `SENS_EN_VIZTRA` | 0；改动需重启 | 是否在传感器启动阶段运行 Viztra 串口驱动 |
+| `SENS_EN_MT6701` | 0；改动需重启 | 是否在外部 I²C 1 上自动启动 MT6701 驱动；不控制传感器供电。其他总线或改写后的 I²C 地址需手动启动 |
 | `VIZTRA_CFG` | 启动脚本未配置时选 102 | Viztra 串口选择；须核对该编号在本机实际对应的端口 |
 | `VIZTRA_TOUT` | 500 ms；改动需重启 | Viztra 驱动判定最近有效帧的时限 |
 | PWM 输出功能 `421` | 由实际输出配置决定 | 将单轴相机舵机接到 `Gimbal Pitch` 功能；核对通道及物理转向 |
@@ -85,7 +86,7 @@ param show DOCK_PRE_DIST
 param save
 ```
 
-`DOCK_PRE_REAR=0` 的任意方向预置需要包含该接近线逻辑的固件。`DOCK_PRE_DIST` 默认 100 m，可按场景核对后再修改已有保存值。它是无视觉时相对目标的**水平参考间距**，不是最终对接距离。距离大于该值时，参考点位于当前位置到预测目标位置的连线上；已经在该距离内时，参考点取本机当前位置，不再主动向目标水平靠近。移动目标仍有目标速度前馈，实际刹停和间距需看本机跟踪结果。预置过程中，新鲜视觉连续满足 `DOCK_PRE_VIS_T` 即可交接，无需先到达参考点；视觉始终无效时不会直接按外部目标坐标穿越。
+`DOCK_PRE_REAR=0` 的任意方向预置需要包含该接近线逻辑的固件。`DOCK_PRE_DIST` 默认 100 m，可按场景核对后再修改已有保存值。它是无视觉时相对目标的**水平参考间距**，不是最终对接距离。距离大于该值时，参考点位于当前位置到预测目标位置的连线上；已经在该距离内时，参考点取本机当前位置，不再主动向目标水平靠近。移动目标仍有目标速度前馈，实际刹停和间距需看本机跟踪结果。预置过程中，新鲜视觉连续满足 `DOCK_PRE_VIS_T` 即可交接，无需先到达参考点；若本机与预测目标的三维距离先进入 `DOCK_PRE_LOCK_D` 门槛，视觉未稳定锁定就故障退出，不会继续按 QGC 位置引导。
 
 ![俯视示意：0° 位于目标轨迹后方，90° 位于侧方](assets/dock_guidance/preposition_approach_angles.svg)
 
@@ -107,6 +108,7 @@ param show DOCK_GUIDANCE
 param show DOCK_PRE_EN
 param show DOCK_PRE_REAR
 param show DOCK_PRE_DIST
+param show DOCK_PRE_LOCK_D
 param show DOCK_PRE_TOUT
 param show DOCK_DYN_EN
 param show DOCK_TERM_EN
@@ -120,11 +122,11 @@ param show DOCK_CAM_ENC_EN
 
 无编码器且相机实际行程不是默认 0°～90° 时，按 [无编码器舵机标定](DockGuidance_无编码器舵机标定.md) 测量光轴角/PWM 对应关系；`DOCK_CAM_OUT_LO/HI` 可分别设置行程两端的归一化输出，默认 `-1/+1` 保留旧映射。MicoAir H743 Dock 的 ES08MA 采用 1:1 传动，PWM5 实测端点为 90°/1500 μs 和 30°/2100 μs；启动角为 90°，软件下限为 30°。
 
-若接入 1:1 传动的 MT6701，先在未解锁状态按 [MT6701 相机角度使用说明](DockGuidance_MT6701_相机角度使用说明.md) 启动 I²C 驱动、执行 `dock_guidance calib_zero`、核对正向角和约 90° 的计数变化，再启用 `DOCK_CAM_ENC_EN=1`。0° 需要标定，90° 只作核对；编码器只用于相机到机体坐标变换，不改变舵机命令。
+若接入 1:1 传动的 MT6701，先在未解锁状态按 [MT6701 相机角度使用说明](DockGuidance_MT6701_相机角度使用说明.md) 启动 I²C 驱动，将相机摆到机体相对 +90° 并执行 `dock_guidance calib_90`，再核对向下转动时实测角减小、已知中间角与计数变化一致，最后启用 `DOCK_CAM_ENC_EN=1`。编码器只用于相机到机体坐标变换，不改变舵机命令。
 
 ![侧视示意：飞机水平放置时，相机光轴朝机头正前方为 0°，朝上为 +90°](assets/dock_guidance/camera_pitch_0_90.svg)
 
-图中机体轮廓取自 `dayin.stp` 的 X–Z 侧视投影，已按实际机头方向翻转为机头向右。机身长轴水平摆放仅为说明角度基准，不表示穿越机的飞行姿态；相机安装位置和转轴仅作示意。按原代码的相机坐标定义，镜头朝机头正前方为相机角 0°，向上抬至竖直为 +90°。编码器测量的是相机相对机体的角度，因此飞行中机体俯仰后，0° 不一定对地水平。实物零位应在朝前的 0° 位置执行 `dock_guidance calib_zero`，并核对舵机与编码器正向。这里的 0°/90° 与前文俯视图中的目标接近来向无关。
+图中机体轮廓取自 `dayin.stp` 的 X–Z 侧视投影，已按实际机头方向翻转为机头向右。机身长轴水平摆放仅为说明角度基准，不表示穿越机的飞行姿态；相机安装位置和转轴仅作示意。按相机坐标定义，镜头朝机头正前方为相机角 0°，向上抬至竖直为 +90°。编码器测量的是相机相对机体的角度，因此飞行中机体俯仰后，0° 不一定对地水平。实物应在朝上的 +90° 位置执行 `dock_guidance calib_90`，并核对舵机与编码器正向。这里的 0°/90° 与前文俯视图中的目标接近来向无关。
 
 观察 `viztra_observation.relative_position_valid`。`DOCK_LEGACY_APP=0`（默认）时，静态路径缺少有效相对 NED 位置会停留在对准阶段，不会按高速接近参数加速。`DOCK_LEGACY_APP=1` 可允许仅角度接近，但受 `DOCK_LEG_VMAX` 限制，而且没有可靠米制距离供末段控制。动态相对交会需要可信尺度和多帧相对变化率，不能从单帧目标框或仅角度推断真实三维距离。
 
@@ -165,6 +167,7 @@ param show DOCK_CAM_ENC_EN
 | `DOCK_GUIDANCE` | 1 | 开机启动 DockGuidance 模块 |
 | `DOCK_PRE_EN` | 1 | 入模先走外部目标预置；无 `viztra_target` 时通常设为 0 |
 | `DOCK_PRE_DIST` | 100 m | 后方路径上的参考距离，或任意方向路径的水平参考间距；无视觉时减速趋向该参考点 |
+| `DOCK_PRE_LOCK_D` | 100 m | 本机到预测目标三维距离进入此门槛时，视觉未稳定锁定即故障退出；已锁定则立即视觉交接。0 关闭门槛 |
 | `DOCK_PRE_WAIT_T` | 2 s | 到达后方或停靠参考点后，等待有效视觉的最长时间；超时按故障退出 |
 | `DOCK_PRE_CLEAR_D` | 50 m | 后方路径对外部目标的最小水平绕行距离；无法安全绕行则故障退出 |
 | `DOCK_PRE_REAR` | 1 | 1：沿轨迹到后方参考点再交接；0：从当前位置方向到停靠参考点再交接 |
@@ -184,7 +187,8 @@ param show DOCK_CAM_ENC_EN
 | `DOCK_CAM_ROLL/PITCH/YAW` | -90/0/0° | 相机到机体安装角；固定相机的 PITCH=0° 指朝前，启用舵机时 PITCH=0° 是初始命令角、指朝前；启用编码器后实测角替代 PITCH 分量 |
 | `DOCK_CAM_SERVO` | 0 | 启用单轴俯仰视觉舵机控制 |
 | `DOCK_CAM_ENC_EN` | 0 | 用 MT6701 实测角计算相机到机体旋转；不参与舵机控制 |
-| `DOCK_CAM_ENC_Z` | -1 count | 相机机体相对 0° 时的原始计数；-1 表示未标定 |
+| `DOCK_CAM_ENC_90` | -1 count | 相机机体相对 +90° 时的原始计数；-1 表示未标定；有效时优先于旧版零位 |
+| `DOCK_CAM_ENC_Z` | -1 count | 旧版相机 0° 原始计数；已有配置继续可用 |
 | `DOCK_CAM_ENC_REV` | 0 | 反转测量角符号，不反转 PWM |
 | `DOCK_CAM_P_MIN/MAX` | 0/90° | 舵机行程端点，同时给编码器角度合理性检查定界 |
 | `DOCK_CAM_OUT_LO/HI` | -1/+1 | 行程低/高角度对应的归一化 `Gimbal Pitch` 输出；无编码器时按实测光轴角与 PWM 标定 |

@@ -18,11 +18,11 @@ UDP `9872` 使用 64 字节小端 `UavInfo` 帧：`EB 90` 同步头、长度 `64
 
 `DOCK_PRE_EN` 默认开启。在进入 Dock 模式时，若目标消息与本机全局定位均新鲜，先进入 `PRE_POSITION`。预引导按目标速度短时外推，速度、加速度和 jerk 受现有 DockGuidance 限制约束。参考点的方向由 `DOCK_PRE_REAR` 选择；目标速度为零且没有可用历史方向时，后方路径以本机到目标的接近线作为参考。
 
-`DOCK_PRE_REAR=1`（默认）时，预引导从目标历史轨迹沿运动方向反推 `DOCK_PRE_DIST`（默认 100 m）作为后方参考点。连续有效视觉跟踪达到 `DOCK_PRE_VIS_T`（默认 0.3 s），且本机进入移动后方参考点附近后，才交接原有 `ALIGN` 视觉对接逻辑。接近阈值为 `DOCK_PRE_DIST` 的 25%，限制在 2～25 m；默认后方距离 100 m 时阈值为 25 m。交接还要求目标位置流新鲜、后方参考点有效且起飞爬升已结束。等待交接时继续跟随移动参考点并匹配目标速度。
+`DOCK_PRE_REAR=1`（默认）时，预引导从目标历史轨迹沿运动方向反推 `DOCK_PRE_DIST`（默认 100 m）作为后方参考点。连续有效视觉跟踪达到 `DOCK_PRE_VIS_T`（默认 0.3 s），且本机进入移动后方参考点附近后，才交接原有 `ALIGN` 视觉对接逻辑。接近阈值为 `DOCK_PRE_DIST` 的 25%，限制在 2～25 m；默认后方距离 100 m 时阈值为 25 m。交接还要求目标位置流新鲜、后方参考点有效且起飞爬升已结束。等待交接时继续跟随移动参考点并匹配目标速度。若先进入 `DOCK_PRE_LOCK_D` 的三维距离门槛，则必须已有稳定视觉，满足时直接交接，不再等待后方参考点。
 
 `DOCK_PRE_REAR=0` 时，参考点改为**本机当前位置到预测目标位置**的接近线上、距目标 `DOCK_PRE_DIST` 的水平停靠点，不再绕到目标轨迹后方。已经处于该距离内时，参考点取本机当前位置；移动目标仍有目标速度前馈。只要目标流新鲜、参考点有效、起飞爬升结束，且视觉连续有效达到 `DOCK_PRE_VIS_T`，就立即交接视觉 `ALIGN`，不必先到停靠点。视觉一直无效时仍减速趋向停靠点，不会直接按外部目标坐标穿越。
 
-后方模式的视觉交接仍要求先到轨迹后方参考点；正面模式只等待稳定视觉。两种模式都不会仅凭外部位置进入视觉对接。若尚未交接而到达各自参考点，继续用外部目标流跟随移动参考点，并从就位时开始计时；`DOCK_PRE_WAIT_T` 默认 2 s，超时无视觉时按现有故障制动链和 `DOCK_EXIT_MODE` 退出。旧参数 `DOCK_PRE_LOCK_D` 已移除，已保存的旧值不会成为新等待时间。
+通常情况下，后方模式的视觉交接要求先到轨迹后方参考点；正面模式只等待稳定视觉。两种模式都不会仅凭外部位置进入视觉对接。`DOCK_PRE_LOCK_D` 默认 100 m，按本机到预测目标的三维直线距离判断：进入门槛时视觉尚未连续有效达到 `DOCK_PRE_VIS_T` 就故障退出；已经稳定锁定则立即交接视觉，即使后方参考点尚未到达。设为 0 可关闭此距离门槛。交接后若视觉米制尺度尚未建立，也不允许在门槛内继续使用 QGC 位置作远距离加速参考。若尚未交接而到达各自参考点，继续用外部目标流跟随移动参考点，并从就位时开始计时；`DOCK_PRE_WAIT_T` 默认 2 s，超时无视觉时按现有故障制动链和 `DOCK_EXIT_MODE` 退出。
 
 轨迹后方路径若直线穿过预测目标的 `DOCK_PRE_CLEAR_D` 水平保护区，会生成绕行参考点，再回到轨迹后方参考点。默认保护距离 50 m，速度轨迹仍受 `DOCK_PRE_RADIUS` 和加速度约束；若已进入保护区且无法形成安全绕行，Dock 故障退出。`guidance_position_ned` 是当前控制用绕行点，`reference_position_ned` 仍是真正的交接参考点。
 
@@ -40,7 +40,7 @@ UDP `9872` 使用 64 字节小端 `UavInfo` 帧：`EB 90` 同步头、长度 `64
 
 ULog 默认以最高 50 Hz 记录 `dock_preposition_status`，并记录收到的 `viztra_target`。前者包含目标帧序号和源时间、目标与机体数据年龄、预测时长、目标预测位置与速度、真正的交接参考点和当前控制参考点、机体位置与速度、参考点误差、限速前请求速度、最终指令速度、期望偏航及视觉稳定时间。状态码 0～4 依次为退出、等待、引导、目标流过期、视觉交接；5 表示本机定位无效，6 表示模式故障，7 表示已到参考点等待视觉。`reference_reached`、`visual_wait_s`、`bypass_active` 可分别核对就位、无锁等待和绕行。`target_valid` 表示目标流新鲜，`reference_valid` 表示已经算出有效参考点；参考点无效时距离和误差记为 NaN，不把旧参考点误认为当前有效指令。`DOCK_PRE_REAR=0` 时可用 `reference_position_ned` 与 `vehicle_position_ned` 核对是否沿当前接近线，`state=4` 后核对 `dock_guidance_setpoint.stage=ALIGN`。可按时间戳对齐 `trajectory_setpoint` 和 `vehicle_local_position` 检查下层跟踪结果。
 
-参数：`DOCK_PRE_DIST` 目标到预置参考点的距离，`DOCK_PRE_WAIT_T` 就位后的视觉等待时间，`DOCK_PRE_CLEAR_D` 绕行保护距离，`DOCK_PRE_REAR` 选择轨迹后方或当前位置接近线，`DOCK_PRE_RADIUS` 引导速度轨迹最小转弯半径，`DOCK_PRE_YAW_R` 预置阶段航向设定值变化率，`DOCK_PRE_ZOFF` 相对预置参考点的高度偏移（正值表示更高），`DOCK_PRE_VIS_T` 有效视觉持续时间，`DOCK_PRE_TOUT` 目标流超时，`DOCK_PRE_PRED_T` 最大预测时间。关闭 `DOCK_PRE_EN` 后，下次进入 Dock 模式直接使用视觉路径；入模前必须已有有效视觉引导设定值，否则 Commander 会拒绝切换。
+参数：`DOCK_PRE_DIST` 目标到预置参考点的距离，`DOCK_PRE_LOCK_D` 允许仅凭外部位置引导的最小三维目标距离，`DOCK_PRE_WAIT_T` 就位后的视觉等待时间，`DOCK_PRE_CLEAR_D` 绕行保护距离，`DOCK_PRE_REAR` 选择轨迹后方或当前位置接近线，`DOCK_PRE_RADIUS` 引导速度轨迹最小转弯半径，`DOCK_PRE_YAW_R` 预置阶段航向设定值变化率，`DOCK_PRE_ZOFF` 相对预置参考点的高度偏移（正值表示更高），`DOCK_PRE_VIS_T` 有效视觉持续时间，`DOCK_PRE_TOUT` 目标流超时，`DOCK_PRE_PRED_T` 最大预测时间。关闭 `DOCK_PRE_EN` 后，下次进入 Dock 模式直接使用视觉路径；入模前必须已有有效视觉引导设定值，否则 Commander 会拒绝切换。
 
 飞行前确认 QGC 已连接使用 `viztra` dialect 的固件、飞行器链路为 MAVLink 2、Target 开关处于 `Sending`，并核对 `viztra_target` 与 `dock_preposition_status` 的位置和时间戳。编译通过不代表飞行闭环已验证。
 

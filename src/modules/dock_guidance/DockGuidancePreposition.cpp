@@ -383,12 +383,26 @@ void DockGuidance::run_preposition(hrt_abstime now) {
       now - _last_valid_observation_us <= observation_timeout_us &&
       now - _pre_visual_since >= static_cast<uint64_t>(
           math::constrain(_param_dock_pre_visual_time.get(), 0.05f, 5.f) * 1e6f);
+  const bool lock_distance_reached = target_fresh &&
+      dock_motion::preposition_lock_distance_reached(_pre_target_position - own,
+          _param_dock_pre_lock_distance.get());
 
-  // A stable image may take over a frontal approach immediately. Rear-path
-  // guidance still has to reach its reference before visual docking begins.
-  if (dock_motion::preposition_visual_handoff_ready(_param_dock_pre_rear.get(),
+  if (lock_distance_reached && !visual_locked) {
+    invalidate_setpoint(now, "visual not locked at lock distance");
+    publish_preposition_status(now, 6, true);
+    return;
+  }
+
+  // Inside the lock gate, stable vision takes over even if the rear point was
+  // not reached. External target position cannot keep guiding at this range.
+  if (lock_distance_reached || dock_motion::preposition_visual_handoff_ready(_param_dock_pre_rear.get(),
           at_reference, target_fresh, _pre_reference_valid, _startup_climb,
           visual_locked)) {
+    if (lock_distance_reached) {
+      // The preposition velocity can otherwise be republished until the next
+      // image arrives, despite control having crossed the QGC-only limit.
+      publish_safe_velocity_setpoint(now);
+    }
     _pre_reference_reached = at_reference;
     if (!_pre_visual_lock_reported) {
       _pre_visual_lock_reported = true;

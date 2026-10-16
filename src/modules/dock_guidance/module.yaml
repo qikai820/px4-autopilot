@@ -41,6 +41,21 @@ parameters:
         min: 0.5
         max: 10
         default: 2.0
+      DOCK_PRE_LOCK_D:
+        description:
+          short: Maximum target range without visual lock
+          long: >
+            During external-target preposition, fail if the three-dimensional
+            aircraft-to-predicted-target distance reaches this value before
+            visual tracking is stable. With stable tracking, hand control to
+            visual guidance instead of continuing on the external target
+            position. After handoff, external target position cannot drive
+            far-field guidance inside this distance. Zero disables this gate.
+        type: float
+        unit: m
+        min: 0
+        max: 1000
+        default: 100.0
       DOCK_PRE_CLEAR_D:
         description:
           short: Minimum horizontal clearance from external target
@@ -158,13 +173,21 @@ parameters:
       DOCK_CAM_ENC_EN:
         description:
           short: Use MT6701 measured camera pitch
-          long: Use time-aligned encoder feedback for camera-to-body rotation without changing servo control. Requires a calibrated zero and a fresh sensor_encoder stream. Sensor failure invalidates Dock guidance.
+          long: Use time-aligned encoder feedback for camera-to-body rotation without changing servo control. Requires a calibrated 90-degree or legacy zero reference and a fresh sensor_encoder stream. Sensor failure invalidates Dock guidance.
         type: boolean
         default: false
+      DOCK_CAM_ENC_90:
+        description:
+          short: MT6701 raw count at camera 90 degrees
+          long: Set with dock_guidance calib_90 while disarmed and the camera is at body-relative positive 90 degrees. Minus one means uncalibrated. Takes precedence over a legacy zero reference.
+        type: int32
+        min: -1
+        max: 16383
+        default: -1
       DOCK_CAM_ENC_Z:
         description:
-          short: MT6701 raw count at camera zero pitch
-          long: Set with dock_guidance calib_zero while disarmed and the camera is at body-relative zero pitch. Minus one means uncalibrated.
+          short: Legacy MT6701 raw count at camera zero pitch
+          long: Existing zero calibrations remain valid. dock_guidance calib_zero sets this while disarmed at body-relative zero pitch and clears DOCK_CAM_ENC_90. Minus one means uncalibrated.
         type: int32
         min: -1
         max: 16383
@@ -172,7 +195,7 @@ parameters:
       DOCK_CAM_ENC_REV:
         description:
           short: Reverse MT6701 camera pitch direction
-          long: Set when positive body-relative camera pitch makes the calibrated angle negative. This reverses measurement sign, not servo PWM direction.
+          long: Reverse the sign of raw count changes relative to the calibrated reference. After calib_90, lower the camera a few degrees and select the value that makes measured pitch decrease. This does not reverse servo PWM.
         type: boolean
         default: false
       DOCK_CAM_P_MIN:

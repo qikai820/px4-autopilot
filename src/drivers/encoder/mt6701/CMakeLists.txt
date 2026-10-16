@@ -36,6 +36,8 @@ px4_add_module(
 	MAIN mt6701
 	SRCS
 		MT6701.cpp
+	MODULE_CONFIG
+		module.yaml
 	DEPENDS
 		px4_work_queue
 	)

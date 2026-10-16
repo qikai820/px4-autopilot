@@ -115,6 +115,12 @@ inline bool preposition_reference_arrived(float reference_error_m,
       handoff_radius_m > 0.f && reference_error_m <= handoff_radius_m;
 }
 
+inline bool preposition_lock_distance_reached(const Vector3f &target_offset,
+    float lock_distance_m) {
+  return target_offset.isAllFinite() && std::isfinite(lock_distance_m) &&
+      lock_distance_m > 0.f && target_offset.norm() <= lock_distance_m;
+}
+
 inline bool preposition_visual_handoff_ready(bool rear_required, bool at_reference,
     bool target_fresh, bool reference_valid, bool startup_climb, bool visual_locked) {
   return target_fresh && reference_valid && !startup_climb && visual_locked &&

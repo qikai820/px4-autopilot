@@ -100,14 +100,16 @@ private:
   int _next{0}, _count{0};
 };
 
-// MT6701 is single-turn. The camera is limited to less than 180 degrees, so
-// the shortest signed distance from the mechanical zero needs no turn count.
-inline bool encoder_pitch_deg(uint16_t raw, int32_t zero, bool reverse,
+// MT6701 is single-turn. Prefer the 90-degree reference when calibrated;
+// a saved zero reference remains valid for existing installations.
+inline bool encoder_pitch_deg(uint16_t raw, int32_t zero, int32_t ninety, bool reverse,
                               float minimum, float maximum, float &pitch) {
-  if (raw >= 16384 || zero < 0 || zero >= 16384 ||
+  const bool use_ninety = ninety >= 0;
+  const int32_t reference = use_ninety ? ninety : zero;
+  if (raw >= 16384 || reference < 0 || reference >= 16384 ||
       !std::isfinite(minimum) || !std::isfinite(maximum)) { return false; }
-  const int32_t delta = (int32_t(raw) - zero + 16384 + 8192) % 16384 - 8192;
-  pitch = (reverse ? -1.f : 1.f) * delta * (360.f / 16384.f);
+  const int32_t delta = (int32_t(raw) - reference + 16384 + 8192) % 16384 - 8192;
+  pitch = (use_ninety ? 90.f : 0.f) + (reverse ? -1.f : 1.f) * delta * (360.f / 16384.f);
   // A small allowance covers sensor noise at the mechanical end stops.
   return pitch >= minimum - 5.f && pitch <= maximum + 5.f;
 }

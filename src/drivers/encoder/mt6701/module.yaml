@@ -1,0 +1,16 @@
+module_name: MT6701 Angle Encoder
+
+parameters:
+  - group: Sensors
+    definitions:
+      SENS_EN_MT6701:
+        description:
+          short: Start MT6701 angle encoder at boot
+          long: |
+            Start the MT6701 driver on external I2C bus 1 during sensor startup.
+            This controls driver startup, not the sensor power supply. Set to 1,
+            save parameters, and reboot to enable automatic startup. Other bus
+            numbers and a programmed I2C address require manual startup.
+        type: boolean
+        default: false
+        reboot_required: true

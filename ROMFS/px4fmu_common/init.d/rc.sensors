@@ -8,6 +8,13 @@
 #                           Begin Optional drivers                            #
 ###############################################################################
 
+# MT6701 camera-angle encoder on external I2C bus 1. The enable parameter
+# controls driver startup only; it does not switch sensor power.
+if param compare -s SENS_EN_MT6701 1
+then
+	mt6701 start -X -b 1
+fi
+
 # Viztra visual observation driver.
 # Start it here when explicitly enabled. rc.serial_port translates the
 # VIZTRA_CFG serial-port index into the board-specific device path and marks the
