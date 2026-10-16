@@ -41,12 +41,14 @@
 #include <uORB/topics/arming_check_reply.h>
 #include <uORB/topics/arming_check_request.h>
 #include <uORB/topics/dock_guidance_setpoint.h>
+#include <uORB/topics/dock_guidance_status.h>
 #include <uORB/topics/dock_guidance_prediction.h>
 #include <uORB/topics/dock_guidance_relative.h>
 #include <uORB/topics/dock_preposition_status.h>
 #include <uORB/topics/dock_guidance_thrust.h>
 #include <uORB/topics/dock_brake_status.h>
 #include <uORB/topics/debug_vect.h>
+#include <uORB/topics/failsafe_flags.h>
 #include <uORB/topics/gimbal_controls.h>
 #include <uORB/topics/parameter_update.h>
 #include <uORB/topics/register_ext_component_reply.h>
@@ -58,6 +60,7 @@
 #include <uORB/topics/vehicle_attitude.h>
 #include <uORB/topics/vehicle_control_mode.h>
 #include <uORB/topics/vehicle_command.h>
+#include <uORB/topics/vehicle_command_ack.h>
 #include <uORB/topics/vehicle_local_position.h>
 #include <uORB/topics/vehicle_thrust_setpoint.h>
 #include <uORB/topics/hover_thrust_estimate.h>
@@ -136,6 +139,9 @@ private:
   void configure_dock_mode(hrt_abstime now);
   void unregister_dock_mode();
   void reply_to_arming_check(const arming_check_request_s &request);
+  void report_rejected_mode_entry(hrt_abstime now);
+  bool mode_entry_ready(hrt_abstime now, const char **reason);
+  void publish_dock_status(hrt_abstime now);
   void update_mode_state();
   void maybe_request_exit_mode(hrt_abstime now);
   // 向位置控制器发布 NED 速度和航向；安全输出为零速度并保留当前航向。
@@ -156,7 +162,7 @@ private:
   void publish_camera_telemetry(hrt_abstime now);
   void update_camera_encoder(hrt_abstime now);
   bool camera_encoder_ready(hrt_abstime now) const;
-  bool preposition_entry_ready(hrt_abstime now);
+  bool preposition_entry_ready(hrt_abstime now, const char **reason = nullptr);
   void report_qgc_guidance_state(hrt_abstime now);
   bool update_rear_reference(hrt_abstime now, const vehicle_local_position_s &local);
   void point_camera_to_preposition_target(hrt_abstime now,
@@ -235,6 +241,9 @@ private:
   uORB::Subscription _vehicle_thrust_sub{ORB_ID(vehicle_thrust_setpoint)};
   uORB::Subscription _hover_thrust_sub{ORB_ID(hover_thrust_estimate)};
   uORB::Subscription _vehicle_status_sub{ORB_ID(vehicle_status)};
+  uORB::Subscription _vehicle_command_sub{ORB_ID(vehicle_command)};
+  uORB::Subscription _vehicle_command_ack_sub{ORB_ID(vehicle_command_ack)};
+  uORB::Subscription _failsafe_flags_sub{ORB_ID(failsafe_flags)};
   uORB::Subscription _dock_brake_status_sub{ORB_ID(dock_brake_status)};
   uORB::Subscription _land_sub{ORB_ID(vehicle_land_detected)};
   uORB::Subscription _register_ext_component_reply_sub{
@@ -246,6 +255,7 @@ private:
   // Dock 调试状态与交给 mc_pos_control 的三维速度设定值。
   uORB::Publication<dock_guidance_setpoint_s> _setpoint_pub{
       ORB_ID(dock_guidance_setpoint)};
+  uORB::Publication<dock_guidance_status_s> _status_pub{ORB_ID(dock_guidance_status)};
   uORB::Publication<dock_guidance_prediction_s> _prediction_pub{
       ORB_ID(dock_guidance_prediction)};
   uORB::Publication<dock_guidance_relative_s> _relative_pub{ORB_ID(dock_guidance_relative)};
@@ -268,6 +278,12 @@ private:
   uORB::Publication<arming_check_reply_s> _arming_check_reply_pub{
       ORB_ID(arming_check_reply)};
   orb_advert_t _mavlink_log_pub{nullptr};
+  hrt_abstime _pending_mode_command_us{0};
+  uint32_t _pending_mode_command{0};
+  uint8_t _pending_mode_source_system{0};
+  uint16_t _pending_mode_source_component{0};
+  hrt_abstime _last_mode_reject_report_us{0};
+  hrt_abstime _last_status_pub_us{0};
 
   // LOS 分别在相机系（c）和地理 NED 系（e）中的方向、导数与角速度。
   matrix::Vector3f _los_c_deg{0.0f, 0.0f, 0.0f};

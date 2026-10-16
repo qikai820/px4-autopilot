@@ -67,6 +67,7 @@ set(msg_files
 	DistanceSensor.msg
 	DistanceSensorModeChangeRequest.msg
 	DockGuidanceSetpoint.msg
+	DockGuidanceStatus.msg
 	DockGuidancePrediction.msg
 	DockGuidanceRelative.msg
 	DockPrepositionStatus.msg

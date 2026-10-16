@@ -33,6 +33,7 @@
 #include "DockGuidance.hpp"
 #include "ImageTracking.hpp"
 
+#include <commander/px4_custom_mode.h>
 #include <drivers/drv_hrt.h>
 #include <drivers/drv_sensor.h>
 #include <lib/drivers/device/Device.hpp>
@@ -124,7 +125,12 @@ void DockGuidance::Run() {
   }
 
   update_mode_state();
+  report_rejected_mode_entry(now_us);
   report_qgc_guidance_state(now_us);
+  if (_last_status_pub_us == 0 || now_us - _last_status_pub_us >= 500_ms) {
+    publish_dock_status(now_us);
+    _last_status_pub_us = now_us;
+  }
   if (_fault_hold_pending) {
     maybe_request_exit_mode(now_us);
   }
@@ -883,6 +889,119 @@ void DockGuidance::reply_to_arming_check(
   reply.mode_req_local_position = true;
   reply.mode_req_manual_control = true;
   _arming_check_reply_pub.publish(reply);
+}
+
+bool DockGuidance::mode_entry_ready(hrt_abstime now, const char **reason) {
+  const auto fail = [reason](const char *message) {
+    if (reason) { *reason = message; }
+    return false;
+  };
+  if (reason) { *reason = nullptr; }
+  if (_mode_id < 0 || _arming_check_id < 0) { return fail("mode not registered"); }
+  if (_mode_fault_latched) { return fail("Dock fault latched"); }
+  if (_param_dock_cam_encoder_enable.get() && !camera_encoder_ready(now)) {
+    return fail("camera encoder not ready");
+  }
+  if (!_setpoint_valid) {
+    if (!_param_dock_pre_enable.get()) { return fail("visual setpoint invalid"); }
+    const char *preposition_reason = nullptr;
+    if (!preposition_entry_ready(now, &preposition_reason)) {
+      return fail(preposition_reason ? preposition_reason : "preposition not ready");
+    }
+  }
+
+  // These Commander requirements can reject a mode even when Dock's own gate passes.
+  failsafe_flags_s flags{};
+  if (_failsafe_flags_sub.copy(&flags)) {
+    if (flags.manual_control_signal_lost) { return fail("manual input lost"); }
+    if (flags.angular_velocity_invalid) { return fail("angular velocity invalid"); }
+    if (flags.attitude_invalid) { return fail("attitude invalid"); }
+    if (flags.local_altitude_invalid) { return fail("local altitude invalid"); }
+    if (flags.local_position_invalid) { return fail("local position invalid"); }
+  }
+  return true;
+}
+
+void DockGuidance::publish_dock_status(hrt_abstime now) {
+  const char *reason = nullptr;
+  const bool ready = mode_entry_ready(now, &reason);
+  dock_guidance_status_s status{};
+  status.timestamp = now;
+  status.relative_distance_m = _setpoint_valid && std::isfinite(_relative_distance_m)
+      ? _relative_distance_m : NAN;
+  status.stage = static_cast<uint8_t>(_stage);
+  status.flags = (_mode_id >= 0 && _arming_check_id >= 0 ? 1U << 0 : 0U) |
+      (_dock_mode_active ? 1U << 1 : 0U) |
+      (ready ? 1U << 2 : 0U) |
+      (_setpoint_valid ? 1U << 3 : 0U) |
+      (_qgc_guidance_live ? 1U << 4 : 0U) |
+      (camera_encoder_ready(now) ? 1U << 5 : 0U) |
+      (_mode_fault_latched ? 1U << 6 : 0U) |
+      (_param_dock_pre_enable.get() ? 1U << 7 : 0U) |
+      (_preposition_active ? 1U << 8 : 0U) |
+      (_vision_degraded ? 1U << 9 : 0U) |
+      (_param_dock_cam_encoder_enable.get() ? 1U << 10 : 0U);
+  snprintf(status.entry_reason, sizeof(status.entry_reason), "%s", ready ? "Ready" : reason);
+  _status_pub.publish(status);
+}
+
+void DockGuidance::report_rejected_mode_entry(hrt_abstime now) {
+  // Match a QGC mode command to Commander's ACK. The periodic arming check must
+  // not flood STATUSTEXT while no pilot is asking to enter Dock mode.
+  vehicle_command_s command{};
+  for (int i = 0; i < vehicle_command_s::ORB_QUEUE_LENGTH && _vehicle_command_sub.update(&command); ++i) {
+    if (!command.from_external) { continue; }
+    const bool set_mode = command.command == vehicle_command_s::VEHICLE_CMD_DO_SET_MODE &&
+        std::isfinite(command.param2) && std::isfinite(command.param3) &&
+        static_cast<int>(command.param2) == PX4_CUSTOM_MAIN_MODE_AUTO &&
+        static_cast<int>(command.param3) == PX4_CUSTOM_SUB_MODE_EXTERNAL1 +
+            ((_mode_id >= 0) ? _mode_id - vehicle_status_s::NAVIGATION_STATE_EXTERNAL1 : 0);
+    const bool set_nav_state = command.command == vehicle_command_s::VEHICLE_CMD_SET_NAV_STATE &&
+        std::isfinite(command.param1) &&
+        static_cast<int>(command.param1) == ((_mode_id >= 0) ? _mode_id :
+            vehicle_status_s::NAVIGATION_STATE_EXTERNAL1);
+    if (set_mode || set_nav_state) {
+      _pending_mode_command_us = command.timestamp > 0 ? command.timestamp : now;
+      _pending_mode_command = command.command;
+      _pending_mode_source_system = command.source_system;
+      _pending_mode_source_component = command.source_component;
+
+    } else if (_pending_mode_command_us != 0 &&
+               (command.command == vehicle_command_s::VEHICLE_CMD_DO_SET_MODE ||
+                command.command == vehicle_command_s::VEHICLE_CMD_SET_NAV_STATE) &&
+               command.source_system == _pending_mode_source_system &&
+               command.source_component == _pending_mode_source_component) {
+      // ACK has no requested nav state; avoid attributing a newer mode request
+      // from the same QGC to the earlier Dock request.
+      _pending_mode_command_us = 0;
+    }
+  }
+
+  vehicle_command_ack_s ack{};
+  for (int i = 0; i < vehicle_command_ack_s::ORB_QUEUE_LENGTH && _vehicle_command_ack_sub.update(&ack); ++i) {
+    if (_pending_mode_command_us == 0 || now < _pending_mode_command_us ||
+        now - _pending_mode_command_us > 1_s || ack.timestamp < _pending_mode_command_us ||
+        ack.command != _pending_mode_command ||
+        ack.target_system != _pending_mode_source_system ||
+        ack.target_component != _pending_mode_source_component) {
+      continue;
+    }
+    _pending_mode_command_us = 0;
+    if ((ack.result == vehicle_command_ack_s::VEHICLE_CMD_RESULT_TEMPORARILY_REJECTED ||
+         ack.result == vehicle_command_ack_s::VEHICLE_CMD_RESULT_DENIED) &&
+        (_last_mode_reject_report_us == 0 || now - _last_mode_reject_report_us >= 1_s)) {
+      const char *reason = nullptr;
+      const bool ready = mode_entry_ready(now, &reason);
+      if (ready) { reason = "Dock ready; check Commander health"; }
+      mavlink_log_critical(&_mavlink_log_pub, "Dock reject: %s", reason);
+      failsafe_flags_s flags{};
+      if (_failsafe_flags_sub.copy(&flags) && flags.manual_control_signal_lost &&
+          strcmp(reason, "manual input lost") != 0) {
+        mavlink_log_critical(&_mavlink_log_pub, "Dock reject: manual input lost");
+      }
+      _last_mode_reject_report_us = now;
+    }
+  }
 }
 
 void DockGuidance::update_mode_state() {

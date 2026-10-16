@@ -69,6 +69,9 @@
 #include "streams/COMPONENT_INFORMATION.hpp"
 #include "streams/COMPONENT_METADATA.hpp"
 #include "streams/DISTANCE_SENSOR.hpp"
+#if defined(MAVLINK_MSG_ID_DOCK_GUIDANCE_STATUS)
+#include "streams/DOCK_GUIDANCE_STATUS.hpp"
+#endif
 #include "streams/EFI_STATUS.hpp"
 #include "streams/ESC_INFO.hpp"
 #include "streams/ESC_STATUS.hpp"
@@ -399,6 +402,9 @@ static const StreamListItem streams_list[] = {
 #if defined(DEBUG_VECT_HPP)
 	create_stream_list_item<MavlinkStreamDebugVect>(),
 #endif // DEBUG_VECT_HPP
+#if defined(DOCK_GUIDANCE_STATUS_HPP)
+	create_stream_list_item<MavlinkStreamDockGuidanceStatus>(),
+#endif // DOCK_GUIDANCE_STATUS_HPP
 #if defined(DEBUG_FLOAT_ARRAY_HPP)
 	create_stream_list_item<MavlinkStreamDebugFloatArray>(),
 #endif // DEBUG_FLOAT_ARRAY_HPP

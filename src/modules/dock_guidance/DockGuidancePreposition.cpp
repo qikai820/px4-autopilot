@@ -35,25 +35,39 @@ void DockGuidance::report_qgc_guidance_state(hrt_abstime now) {
   }
 }
 
-bool DockGuidance::preposition_entry_ready(hrt_abstime now) {
+bool DockGuidance::preposition_entry_ready(hrt_abstime now, const char **reason) {
   viztra_target_s target{};
   vehicle_local_position_s local{};
   const uint64_t timeout_us = static_cast<uint64_t>(math::constrain(
       _param_dock_pre_timeout.get(), int32_t{100}, int32_t{5000})) * 1000ULL;
-  return _viztra_target_sub.copy(&target) &&
-      target.target_id == 1 &&
-      target.source_component == kDockTargetComponent &&
-      (target.valid_flags & 3U) == 3U && target.timestamp > 0 &&
-      now >= target.timestamp && now - target.timestamp <= timeout_us &&
-      std::isfinite(target.lat) && std::isfinite(target.lon) &&
-      fabs(target.lat) <= 90.0 && fabs(target.lon) <= 180.0 &&
-      std::isfinite(target.alt_msl) &&
-      Vector3f(target.vn, target.ve, target.vd).isAllFinite() &&
-      _local_pos_sub.copy(&local) && local.xy_valid && local.z_valid &&
-      local.v_xy_valid && local.v_z_valid && local.xy_global && local.z_global &&
-      local.timestamp > 0 && now >= local.timestamp && now - local.timestamp < 200_ms &&
-      std::isfinite(local.ref_lat) && std::isfinite(local.ref_lon) &&
-      std::isfinite(local.ref_alt);
+  const auto fail = [reason](const char *message) {
+    if (reason) { *reason = message; }
+    return false;
+  };
+  if (reason) { *reason = nullptr; }
+
+  if (!_viztra_target_sub.copy(&target)) { return fail("QGC target not received"); }
+  if (target.target_id != 1 || target.source_component != kDockTargetComponent) {
+    return fail("QGC target ID/source invalid");
+  }
+  if ((target.valid_flags & 3U) != 3U) { return fail("QGC target flags invalid"); }
+  if (target.timestamp == 0 || now < target.timestamp || now - target.timestamp > timeout_us) {
+    return fail("QGC target stale");
+  }
+  if (!std::isfinite(target.lat) || !std::isfinite(target.lon) ||
+      fabs(target.lat) > 90.0 || fabs(target.lon) > 180.0 ||
+      !std::isfinite(target.alt_msl) || !Vector3f(target.vn, target.ve, target.vd).isAllFinite()) {
+    return fail("QGC target position/velocity invalid");
+  }
+  if (!_local_pos_sub.copy(&local)) { return fail("local position not received"); }
+  if (!local.xy_valid || !local.z_valid || !local.v_xy_valid || !local.v_z_valid ||
+      !local.xy_global || !local.z_global || local.timestamp == 0 ||
+      now < local.timestamp || now - local.timestamp >= 200_ms ||
+      !std::isfinite(local.ref_lat) || !std::isfinite(local.ref_lon) ||
+      !std::isfinite(local.ref_alt)) {
+    return fail("local/global position invalid");
+  }
+  return true;
 }
 
 void DockGuidance::publish_preposition_status(hrt_abstime now, uint8_t state, bool target_valid) {

@@ -16,5 +16,13 @@
       <field type="uint8_t" name="target_id">Selected target ID; currently one.</field>
       <field type="uint8_t" name="valid_flags">Bit 0: position valid; bit 1: velocity valid.</field>
     </message>
+    <message id="47003" name="DOCK_GUIDANCE_STATUS">
+      <description>DockGuidance entry and runtime status from the flight controller. Private MAVLink 2 message.</description>
+      <field type="uint32_t" name="time_boot_ms" units="ms">Flight controller boot time of this status.</field>
+      <field type="float" name="relative_distance_m" units="m">Visual relative range, NaN when unavailable.</field>
+      <field type="uint16_t" name="flags">Bit 0 mode registered; 1 active; 2 entry ready; 3 visual setpoint valid; 4 QGC target fresh; 5 camera encoder ready; 6 fault latched; 7 preposition enabled; 8 preposition active; 9 vision degraded; 10 encoder required.</field>
+      <field type="uint8_t" name="stage">DockGuidanceSetpoint stage; zero when inactive.</field>
+      <field type="char[40]" name="entry_reason">First blocking entry condition, or Ready.</field>
+    </message>
   </messages>
 </mavlink>
