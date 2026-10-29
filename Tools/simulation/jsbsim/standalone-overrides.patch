@@ -1,0 +1,87 @@
+--- a/px4-jsbsim-bridge/include/sim_protocol.h
++++ b/px4-jsbsim-bridge/include/sim_protocol.h
+@@ -2,6 +2,8 @@
+ 
+ #include <cstdint>
+ #include <cstring>
++#include <cstdlib>
++#include <stdexcept>
+ #include <cerrno>
+ #include <sys/socket.h>
+ #include <sys/types.h>
+@@ -15,6 +17,19 @@
+ //   server → bridge:  传感器数据 (SensorFrame)
+ 
+ static constexpr uint16_t kDefaultServerPort = 5800;
++
++// An inherited process-local override keeps independent bridge/server pairs isolated.
++inline uint16_t configuredServerPort() {
++    const char *value = std::getenv("JSBSIM_SERVER_PORT");
++    if (!value || !*value) return kDefaultServerPort;
++    char *end = nullptr;
++    errno = 0;
++    const auto port = std::strtoul(value, &end, 10);
++    if (errno || *end || port == 0 || port > 65535)
++        throw std::invalid_argument("JSBSIM_SERVER_PORT must be in 1..65535");
++    return static_cast<uint16_t>(port);
++}
++
+ static constexpr int kNumActuatorChannels = 16;
+ 
+ // Bridge → Server: 执行器指令
+--- a/px4-jsbsim-bridge/include/jsbsim_bridge.h
++++ b/px4-jsbsim-bridge/include/jsbsim_bridge.h
+@@ -45,7 +45,7 @@
+   int _server_fd{-1};
+   pid_t _server_pid{-1};
+   std::string _server_bin;
+-  uint16_t _server_port{kDefaultServerPort};
++  uint16_t _server_port{configuredServerPort()};
+   int _motor_channel_count{4};
+ 
+   // UDP wrench feedback (JSBSim 实际力/力矩 → geo_control verify)
+--- a/px4-jsbsim-bridge/src/configuration_parser.cpp
++++ b/px4-jsbsim-bridge/src/configuration_parser.cpp
+@@ -81,7 +81,9 @@
+ }
+ 
+ bool ConfigurationParser::ParseConfigFile(const std::string& path) {
+-  _doc = TiXmlDocument(path);
++  // Both the bridge and its spawned server inherit the same private configuration.
++  const char *override_path = std::getenv("JSBSIM_CONFIG_FILE");
++  _doc = TiXmlDocument(override_path && *override_path ? override_path : path.c_str());
+   if (!_doc.LoadFile()) {
+     std::cerr << "[ConfigurationParser] Could not load actuator configs from configuration file: " << path << std::endl;
+     return false;
+--- a/px4-jsbsim-bridge/src/jsbsim_server.cpp
++++ b/px4-jsbsim-bridge/src/jsbsim_server.cpp
+@@ -81,7 +81,7 @@
+ 
+     int _server_fd{-1};
+     int _client_fd{-1};
+-    uint16_t _port{kDefaultServerPort};
++    uint16_t _port{configuredServerPort()};
+ 
+     SensorFrame _sensor_frame{};
+ 
+--- a/px4-jsbsim-bridge/src/jsbsim_bridge.cpp
++++ b/px4-jsbsim-bridge/src/jsbsim_bridge.cpp
+@@ -95,7 +95,7 @@
+   }
+ 
+   // ── UDP 力/力矩反馈 socket (geo_control verify 端到端验证用) ──
+-  {
++  if (!std::getenv("JSBSIM_WRENCH_FEEDBACK") || std::strcmp(std::getenv("JSBSIM_WRENCH_FEEDBACK"), "0") != 0) {
+     _wrench_feedback_fd = socket(AF_INET, SOCK_DGRAM, 0);
+     if (_wrench_feedback_fd >= 0) {
+       _wrench_feedback_addr.sin_family = AF_INET;
+--- /dev/null
++++ b/scripts/run_sitl.sh
+@@ -0,0 +1,7 @@
++#!/usr/bin/env bash
++# Software-only counterpart of run.sh; physical FC configuration is not changed.
++set -euo pipefail
++project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
++export JSBSIM_ROOT="$project_root"
++px4_root="${PX4_ROOT:-$project_root/../PX4-Autopilot}"
++exec "$px4_root/Tools/simulation/jsbsim/run_vector_sitl.sh" "$@"

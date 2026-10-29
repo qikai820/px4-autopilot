@@ -362,6 +362,12 @@ fi
 # execute autostart post script if any
 [ -e "$autostart_file".post ] && . "$autostart_file".post
 
+# Reapply the explicit logging profile after airframe/default setup. An env value
+# equal to the compiled default may otherwise be replaced by set-default above.
+if [ -n "$PX4_PARAM_SDLOG_PROFILE" ]; then
+ param set SDLOG_PROFILE "$PX4_PARAM_SDLOG_PROFILE"
+fi
+
 # Run script to start logging
 if param compare -s EKF2_EN 1
 then
