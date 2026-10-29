@@ -67,6 +67,7 @@ px4_add_romfs_files(
 
 	19001_jsbsim_morphquad
 	19002_jsbsim_morphquad2
+	19003_jsbsim_voliro_t
 
 	2507_gazebo-classic_cloudship
 

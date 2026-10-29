@@ -274,6 +274,9 @@ ControlAllocator::update_effectiveness_source()
 		case EffectivenessSource::SPACECRAFT_3D:
 			tmp = new ActuatorEffectivenessSpacecraft(this);
 			break;
+		case EffectivenessSource::VOLIRO_T:
+			tmp = new ActuatorEffectivenessVoliroT(this);
+			break;
 		case EffectivenessSource::MORPH_QUAD:
 			tmp = new ActuatorEffectivenessMorphQuad(this);
 			break;

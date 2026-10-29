@@ -184,3 +184,7 @@ if(CONFIG_MODULES_SPACECRAFT)
 		70000_atmos
 	)
 endif()
+
+if(CONFIG_MODULES_VECTOR_POS_CONTROL)
+	px4_add_romfs_files(19003_voliro_t)
+endif()

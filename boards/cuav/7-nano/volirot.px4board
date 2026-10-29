@@ -1,0 +1,30 @@
+# CUAV 7 Nano firmware for the Voliro T aircraft.
+# This label is merged with default.px4board by PX4's board configuration.
+# The aircraft has four common-tilted front motors, one reversible tail motor,
+# and one shared tilt servo (airframe 19003).
+
+CONFIG_MAVLINK_DIALECT="common"
+CONFIG_BOARD_ADDITIONAL_INIT="rc.volirot_defaults"
+
+CONFIG_MODULES_CONTROL_ALLOCATOR=y
+CONFIG_MODULES_FLIGHT_MODE_MANAGER=y
+CONFIG_MODULES_LAND_DETECTOR=y
+CONFIG_MODULES_GEO_CONTROL=n
+CONFIG_MODULES_GEO_POS_CONTROL=n
+CONFIG_MODULES_GEO_ATT_CONTROL=n
+CONFIG_MODULES_MC_ATT_CONTROL=y
+CONFIG_MODULES_MC_AUTOTUNE_ATTITUDE_CONTROL=n
+CONFIG_MODULES_MC_HOVER_THRUST_ESTIMATOR=y
+CONFIG_MODULES_MC_POS_CONTROL=y
+CONFIG_MODULES_MC_RATE_CONTROL=y
+
+# Keep HIL actuator outputs available. SYS_HITL remains an operator choice.
+CONFIG_MODULES_SIMULATION_PWM_OUT_SIM=y
+
+# Dock and its camera/target driver do not belong in this aircraft firmware.
+CONFIG_MODULES_DOCK_GUIDANCE=n
+CONFIG_DRIVERS_VIZTRA=n
+
+CONFIG_MODULES_VECTOR_POS_CONTROL=y
+CONFIG_MODULES_VECTOR_ATT_CONTROL=y
+CONFIG_MODULES_VECTOR_RATE_CONTROL=y

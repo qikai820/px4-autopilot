@@ -11,28 +11,24 @@ set VEHICLE_TYPE vector
 param set-default MAV_TYPE 2
 
 # --- Vehicle physical parameters ---
-param set-default GC_MASS 4.56
-param set-default GC_INERTIA_XX 0.1
-param set-default GC_INERTIA_YY 0.1
-param set-default GC_INERTIA_ZZ 0.2
 
 # --- Position control gains ---
-param set-default GC_XY_P 1.0
-param set-default GC_XY_VEL_P 0.5
-param set-default GC_Z_P 1.0
-param set-default GC_Z_VEL_P 0.5
 
 # --- Attitude control gains ---
-param set-default GC_RP_P 6.0
-param set-default GC_YAW_P 2.5
-param set-default GC_RP_RATE_P 0.5
-param set-default GC_YAW_RATE_P 0.5
 
 # --- Navigation / safety defaults (inherit from MC) ---
 param set-default NAV_ACC_RAD 2
 param set-default RTL_RETURN_ALT 30
 param set-default RTL_DESCEND_ALT 10
 
-ifconfig eth0 192.168.3.10
+# The complete task layer uses the standard MPC_* navigation constraints.
+# Vector control gains use VPC_* and VC_*; both allocators use normalized wrench topics.
+param set-default MPC_USE_HTE 0
 
-mavlink start -u 14561 -o 14560 -p -r 4000000 -m onboard
+# Preserve the existing vector HIL link configuration.
+# POSIX SITL uses simulator_mavlink and its private UDP link instead.
+if [ -z "$PX4_SIM_MODEL" ]
+then
+ ifconfig eth0 192.168.3.10
+ mavlink start -u 14561 -o 14560 -p -r 4000000 -m onboard
+fi

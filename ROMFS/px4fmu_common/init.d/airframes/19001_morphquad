@@ -33,26 +33,13 @@ param set-default CA_METHOD 0
 # --- Shared hover-thrust parameter for the multicopter land detector ---
 param set-default MPC_THR_HOVER 0.35
 
-# --- Split geometric controller defaults ---
-param set-default GPC_RATE_HZ 50.0
-param set-default GPC_MASS 4.56
-param set-default GPC_THR_MAX 158.0
-param set-default GPC_Z_VP 2.0
-param set-default GPC_VX_MAX 2.0
-param set-default GPC_VY_MAX 2.0
-param set-default GPC_VZ_MAX 1.0
-param set-default GPC_AX_MAX 2.0
-param set-default GPC_AY_MAX 2.0
-param set-default GPC_AZ_MAX 1.0
-param set-default GPC_ROLL_MAX 20.0
-param set-default GPC_PITCH_MAX 20.0
-param set-default GAC_RATE_HZ 400.0
-param set-default GAC_ROLL_MAX 20.0
-param set-default GAC_PITCH_MAX 20.0
-param set-default GAC_YAW_THR_MIN 0.15
-param set-default GAC_IXX 0.1
-param set-default GAC_IYY 0.1
-param set-default GAC_IZZ 0.2
+# --- MC-derived vector controller defaults ---
+param set-default VPC_Z_VEL_P_ACC 2.0
+param set-default MPC_MAN_TILT_MAX 20.0
+param set-default MPC_TILTMAX_AIR 20.0
+param set-default VEC_IXX 0.1
+param set-default VEC_IYY 0.1
+param set-default VEC_IZZ 0.2
 
 # --- PWM output channel mapping ---
 # Motors: channels 1-4
@@ -80,3 +67,36 @@ param set-default PWM_MAIN_FUNC9 205
 param set-default PWM_MAIN_FUNC10 206
 param set-default PWM_MAIN_FUNC11 207
 param set-default PWM_MAIN_FUNC12 208
+
+# MC-derived vector controller: physical inertia (optional feedforward) and normalized torque scales.
+param set-default VEC_TQ_R 10.0
+param set-default VEC_TQ_P 10.0
+param set-default VEC_TQ_Y 10.0
+param set-default VEC_GYRO_FF 0
+
+# HIL actuator functions match the physical per-rotor interleaved mapping.
+param set-default HIL_ACT_FUNC1 101
+param set-default HIL_ACT_FUNC2 102
+param set-default HIL_ACT_FUNC3 103
+param set-default HIL_ACT_FUNC4 104
+param set-default HIL_ACT_FUNC5 201
+param set-default HIL_ACT_FUNC6 202
+param set-default HIL_ACT_FUNC7 203
+param set-default HIL_ACT_FUNC8 204
+param set-default HIL_ACT_FUNC9 205
+param set-default HIL_ACT_FUNC10 206
+param set-default HIL_ACT_FUNC11 207
+param set-default HIL_ACT_FUNC12 208
+
+# Preserve the previous vector controller's low-speed task envelope.
+param set-default MPC_XY_VEL_MAX 2.0
+param set-default MPC_VEL_MANUAL 2.0
+param set-default MPC_XY_CRUISE 2.0
+param set-default MPC_Z_VEL_MAX_UP 1.0
+param set-default MPC_Z_VEL_MAX_DN 1.0
+param set-default MPC_Z_V_AUTO_UP 1.0
+param set-default MPC_Z_V_AUTO_DN 1.0
+param set-default MPC_ACC_HOR 2.0
+param set-default MPC_ACC_HOR_MAX 2.0
+param set-default MPC_ACC_UP_MAX 1.0
+param set-default MPC_ACC_DOWN_MAX 1.0

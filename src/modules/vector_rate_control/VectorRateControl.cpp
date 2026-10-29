@@ -1,0 +1,503 @@
+/****************************************************************************
+ *
+ *   Copyright (c) 2013-2019 PX4 Development Team. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in
+ *    the documentation and/or other materials provided with the
+ *    distribution.
+ * 3. Neither the name PX4 nor the names of its contributors may be
+ *    used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+ * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
+ * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
+ * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+ * ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
+ ****************************************************************************/
+
+#include "VectorRateControl.hpp"
+#include <lib/vector_control/VectorGeometry.hpp>
+
+#include <drivers/drv_hrt.h>
+#include <circuit_breaker/circuit_breaker.h>
+#include <mathlib/math/Limits.hpp>
+#include <mathlib/math/Functions.hpp>
+#include <px4_platform_common/events.h>
+
+using namespace matrix;
+using namespace time_literals;
+using math::radians;
+
+VectorRateControl::VectorRateControl(bool vtol) :
+	ModuleParams(nullptr),
+	WorkItem(MODULE_NAME, px4::wq_configurations::rate_ctrl),
+	_vehicle_thrust_setpoint_pub(vtol ? ORB_ID(vehicle_thrust_setpoint_virtual_mc) : ORB_ID(vehicle_thrust_setpoint)),
+	_vehicle_torque_setpoint_pub(vtol ? ORB_ID(vehicle_torque_setpoint_virtual_mc) : ORB_ID(vehicle_torque_setpoint)),
+	_loop_perf(perf_alloc(PC_ELAPSED, MODULE_NAME": cycle"))
+{
+	_vehicle_status.vehicle_type = vehicle_status_s::VEHICLE_TYPE_ROTARY_WING;
+
+	parameters_updated();
+	_controller_status_pub.advertise();
+}
+
+VectorRateControl::~VectorRateControl()
+{
+	perf_free(_loop_perf);
+}
+
+bool
+VectorRateControl::init()
+{
+	if (!_vehicle_angular_velocity_sub.registerCallback()) {
+		PX4_ERR("callback registration failed");
+		return false;
+	}
+
+	return true;
+}
+
+void
+VectorRateControl::parameters_updated()
+{
+	// rate control parameters
+	// The controller gain K is used to convert the parallel (P + I/s + sD) form
+	// to the ideal (K * [1 + 1/sTi + sTd]) form
+	const Vector3f rate_k = Vector3f(_param_mc_rollrate_k.get(), _param_mc_pitchrate_k.get(), _param_mc_yawrate_k.get());
+
+	_rate_control.setPidGains(
+		rate_k.emult(Vector3f(_param_mc_rollrate_p.get(), _param_mc_pitchrate_p.get(), _param_mc_yawrate_p.get())),
+		rate_k.emult(Vector3f(_param_mc_rollrate_i.get(), _param_mc_pitchrate_i.get(), _param_mc_yawrate_i.get())),
+		rate_k.emult(Vector3f(_param_mc_rollrate_d.get(), _param_mc_pitchrate_d.get(), _param_mc_yawrate_d.get())));
+
+	_rate_control.setIntegratorLimit(
+		Vector3f(_param_mc_rr_int_lim.get(), _param_mc_pr_int_lim.get(), _param_mc_yr_int_lim.get()));
+
+	_rate_control.setFeedForwardGain(
+		Vector3f(_param_mc_rollrate_ff.get(), _param_mc_pitchrate_ff.get(), _param_mc_yawrate_ff.get()));
+
+
+	// manual rate control acro mode rate limits
+	_acro_rate_max = Vector3f(radians(_param_mc_acro_r_max.get()), radians(_param_mc_acro_p_max.get()),
+				  radians(_param_mc_acro_y_max.get()));
+
+	_output_lpf_yaw.setCutoffFreq(_param_mc_yaw_tq_cutoff.get());
+}
+
+void
+VectorRateControl::Run()
+{
+	if (should_exit()) {
+		_vehicle_angular_velocity_sub.unregisterCallback();
+		exit_and_cleanup();
+		return;
+	}
+
+	perf_begin(_loop_perf);
+
+	// Check if parameters have changed
+	if (_parameter_update_sub.updated()) {
+		// clear update
+		parameter_update_s param_update;
+		_parameter_update_sub.copy(&param_update);
+
+		updateParams();
+		parameters_updated();
+	}
+
+	/* run controller on gyro changes */
+	vehicle_angular_velocity_s angular_velocity;
+
+	if (_vehicle_angular_velocity_sub.update(&angular_velocity)) {
+
+		const hrt_abstime now = angular_velocity.timestamp_sample;
+
+		// Guard against too small (< 0.125ms) and too large (> 20ms) dt's.
+		const float dt = math::constrain(((now - _last_run) * 1e-6f), 0.000125f, 0.02f);
+		_last_run = now;
+
+		const Vector3f rates{angular_velocity.xyz};
+		const Vector3f angular_accel{angular_velocity.xyz_derivative};
+
+		/* check for updates in other topics */
+		_vehicle_control_mode_sub.update(&_vehicle_control_mode);
+
+		if (_vehicle_control_mode.flag_multicopter_position_control_enabled && !_vector_position_active) {
+			_vector_force_activation = hrt_absolute_time();
+		}
+
+		_vector_position_active = _vehicle_control_mode.flag_multicopter_position_control_enabled;
+		_dock_thrust_sub.update(&_dock_thrust);
+		_dock_brake_status_sub.update(&_dock_brake_status);
+		_local_pos_sub.update(&_local_pos);
+
+		if (_vehicle_land_detected_sub.updated()) {
+			vehicle_land_detected_s vehicle_land_detected;
+
+			if (_vehicle_land_detected_sub.copy(&vehicle_land_detected)) {
+				_landed = vehicle_land_detected.landed;
+				_ground_contact = vehicle_land_detected.ground_contact;
+				_maybe_landed = vehicle_land_detected.maybe_landed;
+			}
+		}
+
+		_vehicle_status_sub.update(&_vehicle_status);
+
+		if (_dock_fault_transfer.update(hrt_absolute_time(), _vehicle_control_mode, _vehicle_status,
+						_dock_thrust, !_landed && !_ground_contact,
+						_param_dock_brake_enable.get() && _param_dock_brake_mode.get() == 1)) {
+			_dock_fault_braking_complete = false;
+			_dock_fault_handoff_time = hrt_absolute_time();
+		}
+
+		if (!_dock_fault_transfer.active()) { _dock_fault_braking_complete = false; }
+
+		// use rates setpoint topic
+		vehicle_rates_setpoint_s vehicle_rates_setpoint{};
+
+		if (_vehicle_control_mode.flag_control_manual_enabled && !_vehicle_control_mode.flag_control_attitude_enabled) {
+			// generate the rate setpoint from sticks
+			manual_control_setpoint_s manual_control_setpoint;
+
+			if (_manual_control_setpoint_sub.update(&manual_control_setpoint)) {
+				// manual rates control - ACRO mode
+				const Vector3f man_rate_sp{
+					math::superexpo(manual_control_setpoint.roll, _param_mc_acro_expo.get(), _param_mc_acro_supexpo.get()),
+					math::superexpo(-manual_control_setpoint.pitch, _param_mc_acro_expo.get(), _param_mc_acro_supexpo.get()),
+					math::superexpo(manual_control_setpoint.yaw, _param_mc_acro_expo_y.get(), _param_mc_acro_supexpoy.get())};
+
+				_rates_setpoint = man_rate_sp.emult(_acro_rate_max);
+				_thrust_setpoint(2) = -(manual_control_setpoint.throttle + 1.f) * .5f;
+				_thrust_setpoint(0) = _thrust_setpoint(1) = 0.f;
+
+				// publish rate setpoint
+				vehicle_rates_setpoint.roll = _rates_setpoint(0);
+				vehicle_rates_setpoint.pitch = _rates_setpoint(1);
+				vehicle_rates_setpoint.yaw = _rates_setpoint(2);
+				_thrust_setpoint.copyTo(vehicle_rates_setpoint.thrust_body);
+				vehicle_rates_setpoint.timestamp = hrt_absolute_time();
+
+				_vehicle_rates_setpoint_pub.publish(vehicle_rates_setpoint);
+			}
+
+		} else if (_vehicle_rates_setpoint_sub.update(&vehicle_rates_setpoint)) {
+			if (_vehicle_rates_setpoint_sub.copy(&vehicle_rates_setpoint)) {
+				_rates_setpoint(0) = PX4_ISFINITE(vehicle_rates_setpoint.roll)  ? vehicle_rates_setpoint.roll  : rates(0);
+				_rates_setpoint(1) = PX4_ISFINITE(vehicle_rates_setpoint.pitch) ? vehicle_rates_setpoint.pitch : rates(1);
+				_rates_setpoint(2) = PX4_ISFINITE(vehicle_rates_setpoint.yaw)   ? vehicle_rates_setpoint.yaw   : rates(2);
+				_thrust_setpoint = Vector3f(vehicle_rates_setpoint.thrust_body);
+			}
+		}
+
+		// run the rate controller
+		if (_vehicle_control_mode.flag_control_rates_enabled) {
+
+			// reset integral if disarmed
+			if (!_vehicle_control_mode.flag_armed || _vehicle_status.vehicle_type != vehicle_status_s::VEHICLE_TYPE_ROTARY_WING) {
+				_rate_control.resetIntegral();
+			}
+
+			// update saturation status from control allocation feedback
+			control_allocator_status_s control_allocator_status;
+
+			if (_control_allocator_status_sub.update(&control_allocator_status)) {
+				Vector<bool, 3> saturation_positive;
+				Vector<bool, 3> saturation_negative;
+
+				if (!control_allocator_status.torque_setpoint_achieved) {
+					for (size_t i = 0; i < 3; i++) {
+						if (control_allocator_status.unallocated_torque[i] > FLT_EPSILON) {
+							saturation_positive(i) = true;
+
+						} else if (control_allocator_status.unallocated_torque[i] < -FLT_EPSILON) {
+							saturation_negative(i) = true;
+						}
+					}
+				}
+
+				// TODO: send the unallocated value directly for better anti-windup
+				_rate_control.setSaturationStatus(saturation_positive, saturation_negative);
+			}
+
+			// run rate controller
+			Vector3f torque_setpoint =
+				_rate_control.update(rates, _rates_setpoint, angular_accel, dt, _maybe_landed || _landed);
+
+			if (_param_vector_gyro_ff.get()) {
+				const Vector3f inertia(_param_vector_ixx.get(), _param_vector_iyy.get(), _param_vector_izz.get());
+				const Vector3f scale = vector_control::torqueScale(_param_vector_tq_r.get(), _param_vector_tq_p.get(), _param_vector_tq_y.get());
+				torque_setpoint += rates.cross(inertia.emult(rates)).edivide(scale);
+			}
+
+			// apply low-pass filtering on yaw axis to reduce high frequency torque caused by rotor acceleration
+			torque_setpoint(2) = _output_lpf_yaw.update(torque_setpoint(2), dt);
+
+			// publish rate controller status
+			rate_ctrl_status_s rate_ctrl_status{};
+			_rate_control.getRateControlStatus(rate_ctrl_status);
+			rate_ctrl_status.timestamp = hrt_absolute_time();
+			_controller_status_pub.publish(rate_ctrl_status);
+
+			// publish thrust and torque setpoints
+			vehicle_thrust_setpoint_s vehicle_thrust_setpoint{};
+			vehicle_torque_setpoint_s vehicle_torque_setpoint{};
+
+			_thrust_setpoint.copyTo(vehicle_thrust_setpoint.xyz);
+			vehicle_torque_setpoint.xyz[0] = PX4_ISFINITE(torque_setpoint(0)) ? torque_setpoint(0) : 0.f;
+			vehicle_torque_setpoint.xyz[1] = PX4_ISFINITE(torque_setpoint(1)) ? torque_setpoint(1) : 0.f;
+			vehicle_torque_setpoint.xyz[2] = PX4_ISFINITE(torque_setpoint(2)) ? torque_setpoint(2) : 0.f;
+
+			// scale setpoints by battery status if enabled
+			if (_param_mc_bat_scale_en.get()) {
+				if (_battery_status_sub.updated()) {
+					battery_status_s battery_status;
+
+					if (_battery_status_sub.copy(&battery_status) && battery_status.connected && battery_status.scale > 0.f) {
+						_battery_status_scale = battery_status.scale;
+					}
+				}
+
+				if (_battery_status_scale > 0.f) {
+					for (int i = 0; i < 3; i++) {
+						vehicle_thrust_setpoint.xyz[i] = math::constrain(vehicle_thrust_setpoint.xyz[i] * _battery_status_scale, -1.f, 1.f);
+						vehicle_torque_setpoint.xyz[i] = math::constrain(vehicle_torque_setpoint.xyz[i] * _battery_status_scale, -1.f, 1.f);
+					}
+				}
+			}
+
+			// Dock fixes the final normalized collective throttle, after the normal
+			// battery scaling. Keep the rate controller's torque command untouched so
+			// the allocator can still correct attitude with individual motor outputs.
+			const hrt_abstime throttle_now = hrt_absolute_time();
+			const bool local_fresh = _local_pos.v_xy_valid && _local_pos.v_z_valid
+						 && _local_pos.timestamp > 0 && throttle_now >= _local_pos.timestamp
+						 && throttle_now - _local_pos.timestamp <= 250_ms;
+			const float measured_speed = local_fresh
+						     ? Vector3f(_local_pos.vx, _local_pos.vy, _local_pos.vz).norm() : NAN;
+			const float horizontal_speed = local_fresh ? Vector2f(_local_pos.vx, _local_pos.vy).norm() : NAN;
+			const bool throttle_allowed = _vehicle_control_mode.flag_armed
+						      && _vehicle_control_mode.flag_control_rates_enabled
+						      && _vehicle_control_mode.flag_multicopter_position_control_enabled
+						      && !_vehicle_control_mode.flag_control_termination_enabled
+						      && !_vehicle_status.failsafe
+						      && _vehicle_status.vehicle_type == vehicle_status_s::VEHICLE_TYPE_ROTARY_WING
+						      && !_landed && !_ground_contact;
+			const auto dock_request = _dock_thrust_control.update(_dock_thrust, throttle_now,
+						  _vehicle_control_mode.source_id, throttle_allowed, measured_speed);
+			const bool climb_selected = _param_dock_brake_enable.get() && _param_dock_brake_mode.get() == 1;
+			const bool climb_status_fresh = _dock_brake_status.timestamp != 0
+							&& throttle_now >= _dock_brake_status.timestamp
+							&& throttle_now - _dock_brake_status.timestamp <= 100_ms;
+			const bool climb_active = climb_selected && climb_status_fresh
+						  && _dock_brake_status.active && _dock_brake_status.climb;
+
+			if (_dock_fault_transfer.active() && !PX4_ISFINITE(measured_speed)) {
+				_dock_fault_transfer.cancel();
+			}
+
+			if (_dock_fault_transfer.active() && climb_selected && !climb_active
+			    && throttle_now > _dock_fault_handoff_time + 250_ms) {
+				_dock_fault_transfer.cancel();
+			}
+
+			if (_dock_fault_transfer.active()
+			    && (climb_selected ? climb_active && _dock_brake_status.complete
+				: measured_speed < math::constrain(_param_dock_recovery_yaw_speed.get(), .1f, 20.f))) {
+				_dock_fault_braking_complete = true;
+			}
+
+			const bool fault_thrust_slew = _param_dock_brake_enable.get() && _dock_fault_transfer.active()
+						       && (!climb_selected || climb_active);
+			// Braking attitude and thrust are computed together in vector_pos_control. Keep the
+			// final slew limiter, but allow that thrust to return to hover as speed decreases.
+			const float automatic_throttle = -vehicle_thrust_setpoint.xyz[2];
+			const float throttle_target = (dock_request.braking || fault_thrust_slew) ? automatic_throttle : dock_request.thrust;
+			const float throttle_slew_rate = climb_selected && (dock_request.braking || fault_thrust_slew)
+							 && (!climb_active || _dock_brake_status.capture || _dock_brake_status.complete)
+							 ? 0.f : fault_thrust_slew
+							 ? math::constrain(_param_dock_thrust_rate.get(), .01f, 2.f) : dock_request.slew_rate;
+			// The user's braking floor applies on the first pitch/roll transition cycle.
+			// It takes priority over the slew limiter, while MPC_THR_MAX remains a hard cap.
+			const float floor_release_speed = climb_active && _dock_brake_status.allow_floor
+							  ? .5f : _param_dock_brake_min_speed.get();
+			const float configured_braking_floor = DockThrottleSlew::brakingFloor(
+					(dock_request.braking || (fault_thrust_slew && !_dock_fault_braking_complete))
+					&& (!climb_selected || (climb_active && _dock_brake_status.allow_floor)),
+					horizontal_speed, floor_release_speed, _param_dock_brake_min_throttle.get());
+			const float braking_floor = climb_active && _dock_brake_status.allow_floor
+						    && (dock_request.braking || fault_thrust_slew)
+						    && PX4_ISFINITE(automatic_throttle)
+						    ? math::max(configured_braking_floor, automatic_throttle) : configured_braking_floor;
+			float collective = _dock_throttle_slew.update(automatic_throttle,
+					   throttle_target, throttle_slew_rate, dt,
+					   _param_mpc_thr_min.get(), _param_mpc_thr_max.get(), braking_floor);
+
+			if (climb_active && _dock_brake_status.capture
+			    && (dock_request.braking || fault_thrust_slew)
+			    && PX4_ISFINITE(collective) && PX4_ISFINITE(_dock_brake_status.capture_floor)) {
+				collective = math::max(collective,
+						       math::constrain(_dock_brake_status.capture_floor, 0.f, _param_mpc_thr_max.get()));
+				vehicle_thrust_setpoint.xyz[0] = 0.f;
+				vehicle_thrust_setpoint.xyz[1] = 0.f;
+				vehicle_thrust_setpoint.xyz[2] = -collective;
+			}
+
+			if (throttle_slew_rate > 0.f) {
+				vehicle_thrust_setpoint.xyz[0] = 0.f;
+				vehicle_thrust_setpoint.xyz[1] = 0.f;
+				vehicle_thrust_setpoint.xyz[2] = -collective;
+			}
+
+			if (fault_thrust_slew && _dock_fault_braking_complete
+			    && PX4_ISFINITE(automatic_throttle)
+			    && fabsf(collective - automatic_throttle) < .01f) {
+				_dock_fault_transfer.cancel();
+			}
+
+			// Position forces are NED commands, transported using the latest attitude at IMU rate.
+			// Attitude/body-rate Offboard and Acro keep their own body-frame thrust inputs.
+			vector_force_setpoint_s force{};
+			vehicle_attitude_s attitude{};
+
+			if (_vehicle_control_mode.flag_multicopter_position_control_enabled
+			    && _vector_force_sub.copy(&force) && force.timestamp >= _vector_force_activation
+			    && hrt_elapsed_time(&force.timestamp) < 200_ms
+			    && _vector_attitude_sub.copy(&attitude) && hrt_elapsed_time(&attitude.timestamp) < 100_ms) {
+				const Vector3f f(force.xyz);
+				const Quatf q(attitude.q);
+
+				if (f.isAllFinite() && q.isAllFinite() && fabsf(q.norm() - 1.f) < .05f) {
+					Vector3f force_body = vector_control::toBody(f, q);
+
+					if (_param_mc_bat_scale_en.get() && _battery_status_scale > 0.f) {
+						force_body *= _battery_status_scale;
+
+						for (int i = 0; i < 3; ++i) { force_body(i) = math::constrain(force_body(i), -1.f, 1.f); }
+					}
+
+					force_body.copyTo(vehicle_thrust_setpoint.xyz);
+				}
+			}
+
+			vehicle_thrust_setpoint.timestamp_sample = angular_velocity.timestamp_sample;
+			vehicle_thrust_setpoint.timestamp = hrt_absolute_time();
+			_vehicle_thrust_setpoint_pub.publish(vehicle_thrust_setpoint);
+
+			vehicle_torque_setpoint.timestamp_sample = angular_velocity.timestamp_sample;
+			vehicle_torque_setpoint.timestamp = hrt_absolute_time();
+			_vehicle_torque_setpoint_pub.publish(vehicle_torque_setpoint);
+
+			updateActuatorControlsStatus(vehicle_torque_setpoint, dt);
+
+		} else {
+			_dock_throttle_slew.reset();
+		}
+	}
+
+	perf_end(_loop_perf);
+}
+
+void VectorRateControl::updateActuatorControlsStatus(const vehicle_torque_setpoint_s &vehicle_torque_setpoint,
+		float dt)
+{
+	for (int i = 0; i < 3; i++) {
+		_control_energy[i] += vehicle_torque_setpoint.xyz[i] * vehicle_torque_setpoint.xyz[i] * dt;
+	}
+
+	_energy_integration_time += dt;
+
+	if (_energy_integration_time > 500e-3f) {
+
+		actuator_controls_status_s status;
+		status.timestamp = vehicle_torque_setpoint.timestamp;
+
+		for (int i = 0; i < 3; i++) {
+			status.control_power[i] = _control_energy[i] / _energy_integration_time;
+			_control_energy[i] = 0.f;
+		}
+
+		_actuator_controls_status_pub.publish(status);
+		_energy_integration_time = 0.f;
+	}
+}
+
+int VectorRateControl::task_spawn(int argc, char *argv[])
+{
+	bool vtol = false;
+
+	if (argc > 1) {
+		if (strcmp(argv[1], "vtol") == 0) {
+			vtol = true;
+		}
+	}
+
+	VectorRateControl *instance = new VectorRateControl(vtol);
+
+	if (instance) {
+		_object.store(instance);
+		_task_id = task_id_is_work_queue;
+
+		if (instance->init()) {
+			return PX4_OK;
+		}
+
+	} else {
+		PX4_ERR("alloc failed");
+	}
+
+	delete instance;
+	_object.store(nullptr);
+	_task_id = -1;
+
+	return PX4_ERROR;
+}
+
+int VectorRateControl::custom_command(int argc, char *argv[])
+{
+	return print_usage("unknown command");
+}
+
+int VectorRateControl::print_usage(const char *reason)
+{
+	if (reason) {
+		PX4_WARN("%s\n", reason);
+	}
+
+	PRINT_MODULE_DESCRIPTION(
+		R"DESCR_STR(
+### Description
+This implements the multicopter rate controller. It takes rate setpoints (in acro mode
+via `manual_control_setpoint` topic) as inputs and outputs actuator control messages.
+
+The controller has a PID loop for angular rate error.
+
+)DESCR_STR");
+
+	PRINT_MODULE_USAGE_NAME("vector_rate_control", "controller");
+	PRINT_MODULE_USAGE_COMMAND("start");
+	PRINT_MODULE_USAGE_ARG("vtol", "VTOL mode", true);
+	PRINT_MODULE_USAGE_DEFAULT_COMMANDS();
+
+	return 0;
+}
+
+extern "C" __EXPORT int vector_rate_control_main(int argc, char *argv[])
+{
+	return VectorRateControl::main(argc, argv);
+}

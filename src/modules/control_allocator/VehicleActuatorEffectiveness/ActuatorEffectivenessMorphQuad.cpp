@@ -28,6 +28,8 @@
 #include <px4_platform_common/log.h>
 #include <cmath>
 
+#include <lib/vector_control/VectorGeometry.hpp>
+
 using namespace matrix;
 
 namespace
@@ -137,6 +139,8 @@ void ActuatorEffectivenessMorphQuad::updateSetpoint(
 	const Vector3f tau_des(control_sp(ControlAxis::ROLL),
 			      control_sp(ControlAxis::PITCH),
 			      control_sp(ControlAxis::YAW));
+	const Vector3f torque_scale = vector_control::torqueScale(_tq_roll.get(), _tq_pitch.get(), _tq_yaw.get());
+	const Vector3f tau_physical = tau_des.emult(torque_scale);
 
 	// vehicle_thrust_setpoint 遵循 PX4 标准，三个推力分量均以整机最大推力
 	// 归一化。MorphQuad 的非线性分配在物理单位中工作，因此在这里恢复 N。
@@ -151,7 +155,7 @@ void ActuatorEffectivenessMorphQuad::updateSetpoint(
 	_allocation_saturated = false;
 
 	float t[NUM_ROTORS][3] {};
-	_allocation_saturated |= computeThrustVectors(f_req, tau_des, t);
+	_allocation_saturated |= computeThrustVectors(f_req, tau_physical, t);
 
 	float omega_cmd[NUM_ROTORS] {};
 	float alpha_cmd[NUM_ROTORS] {};
@@ -226,7 +230,7 @@ void ActuatorEffectivenessMorphQuad::updateSetpoint(
 		_beta_prev[i] = beta_step_limited * kServoAngleRange;
 	}
 
-	computeUnallocatedWrench(f_req, tau_des, actuator_sp);
+	computeUnallocatedWrench(f_req, tau_physical, actuator_sp);
 }
 
 Vector<float, ActuatorEffectivenessMorphQuad::WRENCH_AXES>
@@ -590,7 +594,8 @@ void ActuatorEffectivenessMorphQuad::getUnallocatedControl(
 	(void)matrix_index;
 
 	for (int i = 0; i < 3; ++i) {
-		status.unallocated_torque[i] = _unallocated_torque[i];
-		status.unallocated_thrust[i] = _unallocated_thrust[i];
+		const Vector3f scale = vector_control::torqueScale(_tq_roll.get(), _tq_pitch.get(), _tq_yaw.get());
+  status.unallocated_torque[i] = _unallocated_torque[i] / scale(i);
+  status.unallocated_thrust[i] = _unallocated_thrust[i] / math::max(4.f * _param_ca_mq_tmax.get(), .001f);
 	}
 }

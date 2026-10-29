@@ -1,0 +1,6 @@
+#!/bin/sh
+# @name voliro_t JSBSim software-in-the-loop
+# @type Voliro T
+# @class Copter
+. ${R}etc/init.d/airframes/19003_voliro_t
+param set-default SYS_HITL 0

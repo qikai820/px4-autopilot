@@ -1,0 +1,5 @@
+#!/bin/sh
+# Airframe selection for a fresh CUAV 7 Nano Voliro T parameter store.
+# A previously saved SYS_AUTOSTART is intentionally preserved.
+
+param set-default SYS_AUTOSTART 19003

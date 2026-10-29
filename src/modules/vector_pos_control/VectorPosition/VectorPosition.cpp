@@ -1,0 +1,402 @@
+/****************************************************************************
+ *
+ *   Copyright (c) 2018 - 2019 PX4 Development Team. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in
+ *    the documentation and/or other materials provided with the
+ *    distribution.
+ * 3. Neither the name PX4 nor the names of its contributors may be
+ *    used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+ * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
+ * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
+ * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+ * ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ *
+ ****************************************************************************/
+
+/**
+ * @file VectorPosition.cpp
+ */
+
+#include "VectorPosition.hpp"
+#include "ControlMath.hpp"
+#include <lib/vector_control/VectorGeometry.hpp>
+#include <float.h>
+#include <mathlib/mathlib.h>
+#include <px4_platform_common/defines.h>
+#include <geo/geo.h>
+
+using namespace matrix;
+
+const trajectory_setpoint_s VectorPosition::empty_trajectory_setpoint = {0, {NAN, NAN, NAN}, {NAN, NAN, NAN}, {NAN, NAN, NAN}, {NAN, NAN, NAN}, NAN, NAN};
+
+void VectorPosition::setVelocityGains(const Vector3f &P, const Vector3f &I, const Vector3f &D)
+{
+	_gain_vel_p = P;
+	_gain_vel_i = I;
+	_gain_vel_d = D;
+}
+
+void VectorPosition::setVelocityLimits(const float vel_horizontal, const float vel_up, const float vel_down)
+{
+	_lim_vel_horizontal = vel_horizontal;
+	_lim_vel_up = vel_up;
+	_lim_vel_down = vel_down;
+}
+
+void VectorPosition::setThrustLimits(const float min, const float max)
+{
+	// make sure there's always enough thrust vector length to infer the attitude
+	_lim_thr_min = math::max(min, 10e-4f);
+	_lim_thr_max = max;
+}
+
+void VectorPosition::setHorizontalThrustMargin(const float margin)
+{
+	_lim_thr_xy_margin = margin;
+}
+
+void VectorPosition::setDockBraking(bool enabled, float thrust, float rate, float speed)
+{
+	enabled = enabled && PX4_ISFINITE(thrust) && thrust >= 0.f && thrust <= 1.f
+		  && PX4_ISFINITE(rate) && rate > 0.f && PX4_ISFINITE(speed) && speed >= 2.f;
+
+	if (enabled && !_dock_braking) {
+		if (!_dock_brake_resume) {
+			// Start the rotation from the previous commanded attitude, including forward tilt.
+			_dock_brake_body_z = _thr_sp.isAllFinite() && _thr_sp.norm() > .001f
+					     ? -_thr_sp.normalized() : Vector3f(0.f, 0.f, 1.f);
+		}
+
+		// The approach can leave a large forward velocity integral. It must not
+		// become the normal-control direction blended into low-speed braking.
+		_vel_int.xy() = Vector2f();
+	}
+
+	_dock_braking = enabled;
+	_dock_brake_resume = false;
+
+	if (!enabled) { _dock_climb = false; }
+
+	_dock_brake_thrust = thrust;
+	_dock_brake_rate = rate;
+	_dock_brake_speed = speed;
+}
+
+void VectorPosition::updateHoverThrust(const float hover_thrust_new)
+{
+	// Given that the equation for thrust is T = a_sp * Th / g - Th
+	// with a_sp = desired acceleration, Th = hover thrust and g = gravity constant,
+	// we want to find the acceleration that needs to be added to the integrator in order obtain
+	// the same thrust after replacing the current hover thrust by the new one.
+	// T' = T => a_sp' * Th' / g - Th' = a_sp * Th / g - Th
+	// so a_sp' = (a_sp - g) * Th / Th' + g
+	// we can then add a_sp' - a_sp to the current integrator to absorb the effect of changing Th by Th'
+	const float previous_hover_thrust = _hover_thrust;
+	setHoverThrust(hover_thrust_new);
+
+	_vel_int(2) += (_acc_sp(2) - CONSTANTS_ONE_G) * previous_hover_thrust / _hover_thrust
+		       + CONSTANTS_ONE_G - _acc_sp(2);
+}
+
+void VectorPosition::setState(const VectorPositionStates &states)
+{
+	_pos = states.position;
+	_vel = states.velocity;
+	_yaw = states.yaw;
+	_vel_dot = states.acceleration;
+}
+
+void VectorPosition::setInputSetpoint(const trajectory_setpoint_s &setpoint)
+{
+	_pos_sp = Vector3f(setpoint.position);
+	_vel_sp = Vector3f(setpoint.velocity);
+	_acc_sp = Vector3f(setpoint.acceleration);
+	_yaw_sp = setpoint.yaw;
+	_yawspeed_sp = setpoint.yawspeed;
+}
+
+bool VectorPosition::update(const float dt)
+{
+	bool valid = _inputValid();
+
+	if (valid) {
+		_positionControl();
+		_velocityControl(dt);
+
+		_yawspeed_sp = PX4_ISFINITE(_yawspeed_sp) ? _yawspeed_sp : 0.f;
+		_yaw_sp = PX4_ISFINITE(_yaw_sp) ? _yaw_sp : _yaw; // TODO: better way to disable yaw control
+	}
+
+	// There has to be a valid output acceleration and thrust setpoint otherwise something went wrong
+	return valid && _acc_sp.isAllFinite() && _thr_sp.isAllFinite();
+}
+
+void VectorPosition::_positionControl()
+{
+	// P-position controller
+	Vector3f vel_sp_position = (_pos_sp - _pos).emult(_gain_pos_p);
+	// Position and feed-forward velocity setpoints or position states being NAN results in them not having an influence
+	VectorControlMath::addIfNotNanVector3f(_vel_sp, vel_sp_position);
+	// make sure there are no NAN elements for further reference while constraining
+	VectorControlMath::setZeroIfNanVector3f(vel_sp_position);
+
+	// Constrain horizontal velocity by prioritizing the velocity component along the
+	// the desired position setpoint over the feed-forward term.
+	_vel_sp.xy() = VectorControlMath::constrainXY(vel_sp_position.xy(), (_vel_sp - vel_sp_position).xy(), _lim_vel_horizontal);
+	// Constrain velocity in z-direction.
+	_vel_sp(2) = math::constrain(_vel_sp(2), -_lim_vel_up, _lim_vel_down);
+}
+
+void VectorPosition::_velocityControl(const float dt)
+{
+	// Constrain vertical velocity integral
+	_vel_int(2) = math::constrain(_vel_int(2), -CONSTANTS_ONE_G, CONSTANTS_ONE_G);
+
+	// PID velocity control
+	Vector3f vel_error = _vel_sp - _vel;
+	Vector3f acc_sp_velocity = vel_error.emult(_gain_vel_p) + _vel_int - _vel_dot.emult(_gain_vel_d);
+
+	// No control input from setpoints or corresponding states which are NAN
+	VectorControlMath::addIfNotNanVector3f(_acc_sp, acc_sp_velocity);
+
+	_accelerationControl();
+
+	// Integrator anti-windup in vertical direction
+	if ((_thr_sp(2) >= -_lim_thr_min && vel_error(2) >= 0.f) ||
+	    (_thr_sp(2) <= -_lim_thr_max && vel_error(2) <= 0.f)) {
+		vel_error(2) = 0.f;
+	}
+
+	// Prioritize vertical control while keeping a horizontal margin
+	const Vector2f thrust_sp_xy(_thr_sp);
+	const float thrust_sp_xy_norm = thrust_sp_xy.norm();
+	const float thrust_max_squared = math::sq(_lim_thr_max);
+
+	// Determine how much vertical thrust is left keeping horizontal margin
+	const float allocated_horizontal_thrust = math::min(thrust_sp_xy_norm, _lim_thr_xy_margin);
+	const float thrust_z_max_squared = thrust_max_squared - math::sq(allocated_horizontal_thrust);
+
+	// Saturate maximal vertical thrust
+	_thr_sp(2) = math::max(_thr_sp(2), -sqrtf(thrust_z_max_squared));
+
+	// Determine how much horizontal thrust is left after prioritizing vertical control
+	const float thrust_max_xy_squared = thrust_max_squared - math::sq(_thr_sp(2));
+	float thrust_max_xy = 0.f;
+
+	if (thrust_max_xy_squared > 0.f) {
+		thrust_max_xy = sqrtf(thrust_max_xy_squared);
+	}
+
+	// Saturate thrust in horizontal direction
+	if (thrust_sp_xy_norm > thrust_max_xy) {
+		_thr_sp.xy() = thrust_sp_xy / thrust_sp_xy_norm * thrust_max_xy;
+	}
+
+	// The downstream Dock throttle cannot respond to velocity-integral corrections.
+	// Hold the integrator until normal collective throttle control resumes.
+	const bool braking = _dockBrakeControl(dt);
+
+	if (_hold_velocity_integral || braking) {
+		return;
+	}
+
+	// Use tracking Anti-Windup for horizontal direction: during saturation, the integrator is used to unsaturate the output
+	// see Anti-Reset Windup for PID controllers, L.Rundqwist, 1990
+	const Vector2f acc_sp_xy_produced = Vector2f(_thr_sp) * (CONSTANTS_ONE_G / _hover_thrust);
+
+	// The produced acceleration can be greater or smaller than the desired acceleration due to the saturations and the actual vertical thrust (computed independently).
+	// The ARW loop needs to run if the signal is saturated only.
+	if (_acc_sp.xy().norm_squared() > acc_sp_xy_produced.norm_squared()) {
+		const float arw_gain = 2.f / _gain_vel_p(0);
+		const Vector2f acc_sp_xy = _acc_sp.xy();
+
+		vel_error.xy() = Vector2f(vel_error) - arw_gain * (acc_sp_xy - acc_sp_xy_produced);
+	}
+
+	// Make sure integral doesn't get NAN
+	VectorControlMath::setZeroIfNanVector3f(vel_error);
+
+	// Account for downstream motor/servo limits in the same NED normalized units.
+	if (_vector_airframe != 0 && _allocation_shortfall.isAllFinite()) {
+		for (int i = 0; i < 3; ++i) {
+			if (vel_error(i) * _allocation_shortfall(i) > 1e-5f) { vel_error(i) = 0.f; }
+		}
+	}
+
+// Update integral part of velocity control
+	_vel_int += vel_error.emult(_gain_vel_i) * dt;
+}
+
+bool VectorPosition::_dockBrakeControl(float dt)
+{
+	if (!_dock_braking || !_vel.isAllFinite() || !_thr_sp.isAllFinite()) {
+		return false;
+	}
+
+	const float speed = _vel.xy().norm();
+	const float weight = math::constrain((speed - .5f) / (_dock_brake_speed - .5f), 0.f, 1.f);
+	const float automatic_thrust = _thr_sp.norm();
+	Vector3f normal_body_z = automatic_thrust > .001f ? -_thr_sp / automatic_thrust : Vector3f(0.f, 0.f, 1.f);
+	Vector3f desired_body_z = normal_body_z;
+
+	if (weight > 0.f) {
+		// Body +Z points WITH velocity, so the rotor thrust (-Z) brakes AGAINST it.
+		// Heading is retained: forward flight gives nose-up pitch; lateral drift also uses roll.
+		const Vector2f direction = _vel.xy() / speed;
+		const float normal_along_motion = Vector2f(normal_body_z).dot(direction);
+
+		if (normal_along_motion < 0.f) {
+			// A forward-biased normal controller may point its thrust WITH motion.
+			// Remove that component before blending while retaining cross-track direction.
+			normal_body_z.xy() -= direction * normal_along_motion;
+			normal_body_z.normalize();
+		}
+
+		const float tilt_limit = _dock_climb ? math::min(_lim_tilt, _dock_climb_tilt) : _lim_tilt;
+		// Collect the braking angle as soon as the height preview enters capture.
+		// Keep a modest horizontal brake while vertical speed is arrested.
+		const float tilt = math::constrain(_dock_climb && _dock_climb_capture
+						   ? math::min(tilt_limit, math::radians(15.f)) : tilt_limit,
+						   0.f, math::radians(89.f));
+		const Vector3f brake_body_z(_vel(0) / speed * sinf(tilt), _vel(1) / speed * sinf(tilt), cosf(tilt));
+		desired_body_z = (normal_body_z * (1.f - weight) + brake_body_z * weight).normalized();
+		// Reserve speed for leveling out. A large tilt cannot disappear instantly and otherwise
+		// continues braking through zero speed. Use maximum thrust and a 0.2 s response allowance:
+		// dv <= (Tmax*g/Thover) * (theta^2/(2*rate) + 0.2*theta).
+		const float response_angle = .2f * _dock_brake_rate;
+		const float leveling_angle = sqrtf(response_angle * response_angle
+						   + 2.f * _dock_brake_rate * speed * _hover_thrust
+						   / (CONSTANTS_ONE_G * math::max(_lim_thr_max, .001f))) - response_angle;
+		VectorControlMath::limitTilt(desired_body_z, Vector3f(0.f, 0.f, 1.f), math::min(tilt, leveling_angle));
+	}
+
+	// Spherical interpolation bounds the total tilt-vector rotation, including entry and leveling.
+	const float angle = acosf(math::constrain(_dock_brake_body_z.dot(desired_body_z), -1.f, 1.f));
+	const float step = _dock_brake_rate * math::constrain(dt, 0.f, .1f);
+	const bool rotating = angle > math::max(step, .001f);
+
+	if (rotating) {
+		_dock_brake_body_z = (_dock_brake_body_z * sinf(angle - step) + desired_body_z * sinf(step)) / sinf(angle);
+		_dock_brake_body_z.normalize();
+
+	} else {
+		_dock_brake_body_z = desired_body_z;
+	}
+
+	VectorControlMath::limitTilt(_dock_brake_body_z, Vector3f(0.f, 0.f, 1.f),
+				     _dock_climb ? math::min(_lim_tilt, _dock_climb_tilt) : _lim_tilt);
+	// At speed, do not cut throttle to immediately cancel climb. At least preserve tilt-compensated
+	// hover thrust (or the configured floor). Height is allowed to change until braking fades.
+	const float floor = _dock_climb && _dock_climb_capture ? 0.f
+			    : math::max(_dock_brake_thrust, _hover_thrust / math::max(_dock_brake_body_z(2), .1f));
+	const float thrust = math::constrain(automatic_thrust + weight * math::max(0.f, floor - automatic_thrust),
+					     _lim_thr_min, _lim_thr_max);
+	_thr_sp = -_dock_brake_body_z * thrust;
+
+	if (weight > 0.f || rotating) {
+		// Log the acceleration corresponding to the modified thrust, not the discarded height demand.
+		_acc_sp = _thr_sp * (CONSTANTS_ONE_G / _hover_thrust) + Vector3f(0.f, 0.f, CONSTANTS_ONE_G);
+		return true;
+	}
+
+	return false;
+}
+
+void VectorPosition::_accelerationControl()
+{
+	if (_vector_airframe == vector_control::morphquad || _vector_airframe == vector_control::voliro_t) {
+		// Same velocity PID and hover-thrust calibration as MC, with a free force direction.
+		_thr_sp = (_acc_sp - Vector3f(0.f, 0.f, CONSTANTS_ONE_G)) * (_hover_thrust / CONSTANTS_ONE_G);
+		_thr_sp(2) = math::min(_thr_sp(2), -_lim_thr_min);
+		return;
+	}
+
+	// Assume standard acceleration due to gravity in vertical direction for attitude generation
+	float z_specific_force = -CONSTANTS_ONE_G;
+
+	if (!_decouple_horizontal_and_vertical_acceleration) {
+		// Include vertical acceleration setpoint for better horizontal acceleration tracking
+		z_specific_force += _acc_sp(2);
+	}
+
+	Vector3f body_z = Vector3f(-_acc_sp(0), -_acc_sp(1), -z_specific_force).normalized();
+	VectorControlMath::limitTilt(body_z, Vector3f(0, 0, 1), _lim_tilt);
+	// Convert to thrust assuming hover thrust produces standard gravity
+	const float thrust_ned_z = _acc_sp(2) * (_hover_thrust / CONSTANTS_ONE_G) - _hover_thrust;
+	// Project thrust to planned body attitude
+	const float cos_ned_body = (Vector3f(0, 0, 1).dot(body_z));
+	const float collective_thrust = math::min(thrust_ned_z / cos_ned_body, -_lim_thr_min);
+	_thr_sp = body_z * collective_thrust;
+}
+
+bool VectorPosition::_inputValid()
+{
+	bool valid = true;
+
+	// Every axis x, y, z needs to have some setpoint
+	for (int i = 0; i <= 2; i++) {
+		valid = valid && (PX4_ISFINITE(_pos_sp(i)) || PX4_ISFINITE(_vel_sp(i)) || PX4_ISFINITE(_acc_sp(i)));
+	}
+
+	// x and y input setpoints always have to come in pairs
+	valid = valid && (PX4_ISFINITE(_pos_sp(0)) == PX4_ISFINITE(_pos_sp(1)));
+	valid = valid && (PX4_ISFINITE(_vel_sp(0)) == PX4_ISFINITE(_vel_sp(1)));
+	valid = valid && (PX4_ISFINITE(_acc_sp(0)) == PX4_ISFINITE(_acc_sp(1)));
+
+	// For each controlled state the estimate has to be valid
+	for (int i = 0; i <= 2; i++) {
+		if (PX4_ISFINITE(_pos_sp(i))) {
+			valid = valid && PX4_ISFINITE(_pos(i));
+		}
+
+		if (PX4_ISFINITE(_vel_sp(i))) {
+			valid = valid && PX4_ISFINITE(_vel(i)) && PX4_ISFINITE(_vel_dot(i));
+		}
+	}
+
+	return valid;
+}
+
+void VectorPosition::getLocalPositionSetpoint(vehicle_local_position_setpoint_s &local_position_setpoint) const
+{
+	local_position_setpoint.x = _pos_sp(0);
+	local_position_setpoint.y = _pos_sp(1);
+	local_position_setpoint.z = _pos_sp(2);
+	local_position_setpoint.yaw = _yaw_sp;
+	local_position_setpoint.yawspeed = _yawspeed_sp;
+	local_position_setpoint.vx = _vel_sp(0);
+	local_position_setpoint.vy = _vel_sp(1);
+	local_position_setpoint.vz = _vel_sp(2);
+	_acc_sp.copyTo(local_position_setpoint.acceleration);
+	_thr_sp.copyTo(local_position_setpoint.thrust);
+}
+
+void VectorPosition::getAttitudeSetpoint(vehicle_attitude_setpoint_s &attitude_setpoint) const
+{
+	if (_vector_airframe == vector_control::morphquad || _vector_airframe == vector_control::voliro_t) {
+		vector_control::attitudeForForce(_thr_sp, _yaw_sp, _vector_airframe, _lim_tilt).copyTo(attitude_setpoint.q_d);
+
+	} else {
+		VectorControlMath::thrustToAttitude(_thr_sp, _yaw_sp, attitude_setpoint);
+	}
+
+	attitude_setpoint.yaw_sp_move_rate = _yawspeed_sp;
+}

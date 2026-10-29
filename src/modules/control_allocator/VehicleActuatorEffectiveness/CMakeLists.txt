@@ -31,6 +31,9 @@ px4_add_library(VehicleActuatorEffectiveness
 	ActuatorEffectivenessRoverAckermann.cpp
 	ActuatorEffectivenessMorphQuad.hpp
 	ActuatorEffectivenessMorphQuad.cpp
+	ActuatorEffectivenessVoliroT.cpp
+	ActuatorEffectivenessVoliroT.hpp
+	VoliroTAllocation.hpp
 	RpmControl.hpp
 	RpmControl.cpp
 )

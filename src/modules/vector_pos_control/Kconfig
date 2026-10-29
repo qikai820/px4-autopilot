@@ -1,0 +1,12 @@
+menuconfig MODULES_VECTOR_POS_CONTROL
+	bool "vector_pos_control"
+	default n
+	---help---
+		Enable support for vector_pos_control
+
+menuconfig USER_VECTOR_POS_CONTROL
+	bool "vector_pos_control running as userspace module"
+	default y
+	depends on BOARD_PROTECTED && MODULES_VECTOR_POS_CONTROL
+	---help---
+		Put vector_pos_control in userspace memory

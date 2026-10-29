@@ -1,30 +1,24 @@
 #!/bin/sh
-#
-# Apps for MorphQuad (vector-thrust) vehicles.
-# Starts the geometric controller and control allocator.
-#
-# NOTE: Script variables are declared/initialized/unset in the rcS script.
-#
-
-#
-# Start Control Allocator (uses ActuatorEffectivenessMorphQuad)
-#
+# MorphQuad and Voliro T: complete MC-derived control chain.
+# Fail boot instead of starting a second wrench publisher.
+if mc_pos_control status
+then
+ echo "ERROR: mc_pos_control already running"
+ exit 1
+fi
+if mc_att_control status
+then
+ echo "ERROR: mc_att_control already running"
+ exit 1
+fi
+if mc_rate_control status
+then
+ echo "ERROR: mc_rate_control already running"
+ exit 1
+fi
 control_allocator start
-
-#
-# Start split geometric controllers. geo_control remains available for manual
-# fallback, but must not run at the same time because it publishes the same
-# thrust and torque topics.
-#
-geo_pos_control start
-geo_att_control start
-
-#
-# Start flight mode manager (handles setpoint generation)
-#
 flight_mode_manager start
-
-#
-# Start land detector
-#
+vector_rate_control start
+vector_att_control start
+vector_pos_control start
 land_detector start multicopter

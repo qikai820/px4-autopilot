@@ -55,6 +55,7 @@
 #include <ActuatorEffectivenessHelicopterCoaxial.hpp>
 #include <ActuatorEffectivenessSpacecraft.hpp>
 #include <ActuatorEffectivenessMorphQuad.hpp>
+#include <ActuatorEffectivenessVoliroT.hpp>
 
 #include <ControlAllocation.hpp>
 #include <ControlAllocationPseudoInverse.hpp>
@@ -164,6 +165,7 @@ private:
 		SPACECRAFT_2D = 13,
 		SPACECRAFT_3D = 14,
 		MORPH_QUAD = 16,
+		VOLIRO_T = 17,
 	};
 
 	enum class FailureMode {

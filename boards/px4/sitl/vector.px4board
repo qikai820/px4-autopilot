@@ -1,0 +1,3 @@
+# Controller integration build: inherits the complete default MC/task/vector stack.
+# DDS is unrelated to this test and its optional vendor submodule is not required.
+CONFIG_MODULES_UXRCE_DDS_CLIENT=n

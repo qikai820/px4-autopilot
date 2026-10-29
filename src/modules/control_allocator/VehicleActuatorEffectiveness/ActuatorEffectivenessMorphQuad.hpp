@@ -32,6 +32,9 @@ private:
 	static constexpr int NR = 2;
 
 	DEFINE_PARAMETERS(
+  (ParamFloat<px4::params::VEC_TQ_R>) _tq_roll,
+  (ParamFloat<px4::params::VEC_TQ_P>) _tq_pitch,
+  (ParamFloat<px4::params::VEC_TQ_Y>) _tq_yaw,
 		(ParamFloat<px4::params::CA_MQ_L>)     _param_ca_mq_l,      ///< half arm length [m]
 		(ParamFloat<px4::params::CA_MQ_B>)     _param_ca_mq_b,      ///< half arm width [m]
 		(ParamFloat<px4::params::CA_MQ_Z>)     _param_ca_mq_z,      ///< rotor-plane z relative to CG, BODY FRD [m]

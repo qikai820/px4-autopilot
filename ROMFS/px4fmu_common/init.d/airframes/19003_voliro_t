@@ -1,0 +1,68 @@
+#!/bin/sh
+#
+# @name Voliro T - common-tilt coaxial front and reversible tail (example)
+# @type Voliro T
+# @class Copter
+#
+# Planar geometry: front span 0.90 m; M5-to-front line 0.78 m.
+# CG lies 0.03 m aft of front line on the symmetry axis; thrust and mass remain examples.
+# User-reported motors: M1-M4 Hobbywing 6208 KV310; M5 BSC2412 KV1900.
+# Front: 6S LiPo, Hobbywing 60A ESC, 22x7.8 prop; tail: 6S, Flycolor 45A BL-32 ESC.
+# Tail prop and installed coaxial/reverse thrust curves are unknown; thrust defaults remain examples.
+# This is the user's five-motor layout, not a commercial Voliro T firmware.
+# M1/M2 right, M3/M4 left; all four share one tilt servo. M5 is reversible.
+# Verify CG/geometry, motor reaction signs, thrust and servo scaling before use.
+# Lateral body force cannot be commanded independently; roll is still needed.
+# Large-angle/inverted hover is not enabled by this example.
+
+. ${R}etc/init.d/rc.vector_defaults
+set VEHICLE_TYPE vector
+param set-default CA_AIRFRAME 17
+param set-default CA_METHOD 0
+param set-default CA_R_REV 16
+param set-default CA_CT_X 0.03
+param set-default CA_CT_Y 0.45
+param set-default CA_CT_Z 0.0
+param set-default CA_CT_TAIL 0.75
+param set-default CA_CT_TMAX 39.5
+param set-default CA_CT_T5MAX 10.0
+param set-default CA_CT_KM 0.02
+param set-default CA_CT_ANGLE 120.0
+param set-default CA_CT_RATE 90.0
+# Normalization must match 4*CA_CT_TMAX + CA_CT_T5MAX.
+param set-default MPC_THR_HOVER 0.292
+param set-default MPC_MAN_TILT_MAX 20.0
+param set-default MPC_TILTMAX_AIR 20.0
+param set-default PWM_MAIN_FUNC1 101
+param set-default PWM_MAIN_FUNC2 102
+param set-default PWM_MAIN_FUNC3 103
+param set-default PWM_MAIN_FUNC4 104
+param set-default PWM_MAIN_FUNC5 105
+param set-default PWM_MAIN_FUNC6 201
+# HITL uses pwm_out_sim with the HIL_ACT prefix, independently of PWM_MAIN.
+# M1..M4: front coaxial motors, M5: reversible tail, Servo1: shared front tilt.
+param set-default HIL_ACT_FUNC1 101
+param set-default HIL_ACT_FUNC2 102
+param set-default HIL_ACT_FUNC3 103
+param set-default HIL_ACT_FUNC4 104
+param set-default HIL_ACT_FUNC5 105
+param set-default HIL_ACT_FUNC6 201
+
+# MC-derived vector controller: physical inertia (optional feedforward) and normalized torque scales.
+param set-default VEC_TQ_R 10.0
+param set-default VEC_TQ_P 10.0
+param set-default VEC_TQ_Y 10.0
+param set-default VEC_GYRO_FF 0
+
+# Preserve the previous vector controller's low-speed task envelope.
+param set-default MPC_XY_VEL_MAX 2.0
+param set-default MPC_VEL_MANUAL 2.0
+param set-default MPC_XY_CRUISE 2.0
+param set-default MPC_Z_VEL_MAX_UP 1.0
+param set-default MPC_Z_VEL_MAX_DN 1.0
+param set-default MPC_Z_V_AUTO_UP 1.0
+param set-default MPC_Z_V_AUTO_DN 1.0
+param set-default MPC_ACC_HOR 2.0
+param set-default MPC_ACC_HOR_MAX 2.0
+param set-default MPC_ACC_UP_MAX 1.0
+param set-default MPC_ACC_DOWN_MAX 1.0

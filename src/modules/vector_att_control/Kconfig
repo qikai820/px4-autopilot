@@ -1,0 +1,12 @@
+menuconfig MODULES_VECTOR_ATT_CONTROL
+	bool "vector_att_control"
+	default n
+	---help---
+		Enable support for vector_att_control
+
+menuconfig USER_VECTOR_ATT_CONTROL
+	bool "vector_att_control running as userspace module"
+	default n
+	depends on BOARD_PROTECTED && MODULES_VECTOR_ATT_CONTROL
+	---help---
+		Put vector_att_control in userspace memory
