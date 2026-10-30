@@ -5,7 +5,8 @@
 
 // BODY FRD. M1/M2 at (+x,+y,z), M3/M4 at (+x,-y,z), M5 at (-tail,0,0).
 // Front direction = (sin(tilt),0,-cos(tilt)); signed M5 thrust acts along -Z.
-// Coaxial reaction torque signs are +,-,+,- along the front thrust direction.
+// Viewed from above: M1 CCW, M2 CW, M3 CW, M4 CCW. Their reaction
+// torque signs along the front thrust direction are -,+,+,-.
 namespace voliro_t
 {
 struct Geometry {
@@ -27,7 +28,8 @@ inline void forward(const Geometry &g, Result &r)
 		const matrix::Vector3f p(g.x, i < 2 ? g.y : -g.y, g.z);
 		const matrix::Vector3f f = axis * r.thrust[i];
 		r.force += f;
-		r.torque += p.cross(f) + axis * ((i % 2 == 0 ? 1.f : -1.f) * g.km * r.thrust[i]);
+		const float reaction_sign = (i == 0 || i == 3) ? -1.f : 1.f;
+		r.torque += p.cross(f) + axis * (reaction_sign * g.km * r.thrust[i]);
 	}
 
 	r.force(2) -= r.thrust[4];
@@ -40,7 +42,15 @@ inline Result allocate(const Geometry &g, const matrix::Vector3f &force, const m
 	// The exact unconstrained force/pitch solution, before angular constraints:
 	// u=S*sin(a)=Fx; v=S*cos(a)=(My-tail*Fz-z*Fx)/(x+tail).
 	const float v = (torque(1) - g.tail * force(2) - g.z * force(0)) / (g.x + g.tail);
-	const float target = (fabsf(force(0)) + fabsf(v) > 1e-6f) ? atan2f(force(0), v) : previous_tilt;
+	// For a near-vertical upright lift request, a negative v would point the
+	// front rotors past 90 degrees to satisfy a small pitch moment (including
+	// the attitude correction before takeoff). Keep them upright and leave
+	// the infeasible moment in the allocation residual. Large horizontal force
+	// requests still permit the full common-tilt range.
+	const bool upright_lift_with_negative_front = force(2) < 0.f && v < 0.f
+			&& fabsf(force(0)) < .25f * fabsf(force(2));
+	const float target = upright_lift_with_negative_front ? 0.f
+			     : ((fabsf(force(0)) + fabsf(v) > 1e-6f) ? atan2f(force(0), v) : previous_tilt);
 	r.tilt = math::constrain(math::constrain(target, -angle_limit, angle_limit),
 				 previous_tilt - angle_step, previous_tilt + angle_step);
 	const float sn = sinf(r.tilt), cs = cosf(r.tilt);
@@ -63,8 +73,10 @@ inline Result allocate(const Geometry &g, const matrix::Vector3f &force, const m
 	const float left_room = math::max(0.f, math::min(left, 2.f * g.front_max - left));
 	const float room = right_room + left_room;
 	const float reaction = math::constrain((sn * torque(0) - cs * torque(2)) / g.km, -room, room);
-	const float dr = room > 1e-6f ? reaction * right_room / room : 0.f;
-	const float dl = reaction - dr;
+	// Right coaxial pair has -,+ reaction signs; the left pair has +,-.
+	// Thus the total reaction coefficient is -dr + dl.
+	const float dr = room > 1e-6f ? -reaction * right_room / room : 0.f;
+	const float dl = reaction + dr;
 	r.thrust[0] = .5f * (right + dr); r.thrust[1] = .5f * (right - dr);
 	r.thrust[2] = .5f * (left + dl); r.thrust[3] = .5f * (left - dl);
 	r.thrust[4] = tail;

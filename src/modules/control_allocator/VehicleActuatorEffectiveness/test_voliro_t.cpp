@@ -5,6 +5,19 @@ using namespace matrix;
 int main()
 {
  const voliro_t::Geometry g{.03f,.45f,0.f,.75f,39.5f,10.f,.02f};
+ // At zero tilt, each motor's yaw torque identifies its reaction sign.
+ const float expected_yaw_sign[4]{1.f,-1.f,-1.f,1.f};
+ for (int i=0;i<4;++i) {
+  voliro_t::Result single;
+  single.thrust[i]=1.f;
+  voliro_t::forward(g,single);
+  if (fabsf(single.torque(2)-expected_yaw_sign[i]*g.km)>1e-6f) return 6;
+ }
+ // A small negative pitch correction during takeoff must not send the front
+ // rotors towards 180 degrees while upward thrust is requested.
+ auto takeoff=voliro_t::allocate(g,Vector3f(.005f,0.f,-.168f),Vector3f(0.f,-.18f,0.f),
+                                0.f,math::radians(120.f),math::radians(2.f));
+ if (fabsf(takeoff.tilt)>1e-5f || takeoff.force(2)>0.f) return 5;
  for(int tail_sign=-1;tail_sign<=1;tail_sign+=2) {
  for(int degree=-100;degree<=100;degree+=5) {
   voliro_t::Result source; source.tilt=math::radians(static_cast<float>(degree));

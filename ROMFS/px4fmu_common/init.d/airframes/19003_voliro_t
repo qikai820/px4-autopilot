@@ -11,6 +11,10 @@
 # Tail prop and installed coaxial/reverse thrust curves are unknown; thrust defaults remain examples.
 # This is the user's five-motor layout, not a commercial Voliro T firmware.
 # M1/M2 right, M3/M4 left; all four share one tilt servo. M5 is reversible.
+# Viewed from above with the nose forward: M1 CCW, M2 CW, M3 CW, M4 CCW.
+# Match ESC direction and propeller handedness to these allocator reaction signs.
+# On CUAV 7 Nano, MAIN5/6 share a timer: M5 DShot and a PWM servo cannot use
+# MAIN5/6 together. Wire the shared tilt servo to MAIN7 (a separate timer).
 # Verify CG/geometry, motor reaction signs, thrust and servo scaling before use.
 # Lateral body force cannot be commanded independently; roll is still needed.
 # Large-angle/inverted hover is not enabled by this example.
@@ -42,7 +46,13 @@ param set-default PWM_MAIN_FUNC2 102
 param set-default PWM_MAIN_FUNC3 103
 param set-default PWM_MAIN_FUNC4 104
 param set-default PWM_MAIN_FUNC5 105
-param set-default PWM_MAIN_FUNC6 201
+param set-default PWM_MAIN_FUNC6 0
+param set-default PWM_MAIN_FUNC7 201
+# CUAV 7 Nano: TIM0=MAIN1-4, TIM1=MAIN5-6, TIM2=MAIN7-8.
+# DShot150 is the conservative initial rate; adjust only after checking ESC support.
+param set-default PWM_MAIN_TIM0 -5
+param set-default PWM_MAIN_TIM1 -5
+param set-default PWM_MAIN_TIM2 50
 # HITL uses pwm_out_sim with the HIL_ACT prefix, independently of PWM_MAIN.
 # M1..M4: front coaxial motors, M5: reversible tail, Servo1: shared front tilt.
 param set-default HIL_ACT_FUNC1 101
