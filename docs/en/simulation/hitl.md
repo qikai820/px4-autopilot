@@ -57,6 +57,36 @@ Core modules like commander and sensors have HITL modes at startup that bypass s
 
 In summary, HITL runs PX4 on the actual hardware using standard firmware, but SITL actually executes more of the standard system code.
 
+## HITL With Physical Actuators (Custom Firmware)
+
+This firmware also supports `SYS_HITL=3` for bench testing with an external HITL simulator.
+It starts `pwm_out_sim` for the simulator and the physical `dshot` and `pwm_out` drivers for DShot ESCs and PWM servos.
+`SYS_HITL=1` and `SYS_HITL=2` continue to use simulated outputs only.
+
+:::warning
+In mode 3, real motors and servos can move when armed or during actuator testing. HITL bypasses some real-sensor and power checks. Remove propellers, secure the vehicle, and verify the output mapping before enabling this mode. It is for bench testing, not flight.
+:::
+
+The firmware must include `pwm_out_sim`, `dshot`, and `pwm_out`. Configure `HIL_ACT_FUNC*` for the simulator and the board's `PWM_MAIN_FUNC*` or `PWM_AUX_FUNC*` for physical FMU outputs. Set the corresponding `PWM_MAIN_TIM*` or `PWM_AUX_TIM*` timer group to the protocol used by its pins. A timer group cannot run DShot and PWM at the same time.
+
+For the CUAV 7 Nano Voliro T airframe (19003), the defaults assign motors M1–M5 to MAIN1–5 and the shared tilt servo to MAIN7. MAIN1–6 use DShot150 and MAIN7–8 use PWM50. The simulator keeps its six channels in `HIL_ACT_FUNC1`–`HIL_ACT_FUNC6`. Saved parameter values can override airframe defaults, so inspect the actual output assignment and timer parameters on the controller.
+
+When troubleshooting physical outputs, check the timer parameters, controller state, and ESC response together. `dshot status` now also reports actual timer frequency, registers, and ordinary DShot DMA completion/error counts. DMA completion only confirms a memory-to-timer transfer; it does not confirm ESC power, correct signal wiring, or execution by the ESC. Numerical values in `actuator_outputs` likewise do not replace waveform and motor-response verification.
+
+The DShot driver uses a 500 microsecond backup scheduling interval to keep sending command frames when no new control data arrives, including stop frames while disarmed. The previous 50 millisecond backup interval could prevent ESC input detection with missing or slow HITL control updates. Check the actual driver scheduling interval using `dshot: interval` in `dshot status`. Timer frequencies such as 150000 Hz describe the DShot bit rate, which is separate from the command frame refresh rate.
+
+In a CUAV 7 Nano bench retest on 2026-10-30, MAIN1–4 used PWM400 (`PWM_MAIN_TIM0=400`), MAIN5–6 used DShot150 (`PWM_MAIN_TIM1=-5`), and MAIN7–8 used PWM100 (`PWM_MAIN_TIM2=100`). While disarmed, `actuator_test set -m 5 -v 0.1 -t 3` made the physical M5 motor spin and stop after approximately three seconds. The mean DShot scheduling interval was 505.13 microseconds, with zero DMA errors. This verifies the M5 command test in this configuration; it does not establish HITL automatic control, servo motion, or vehicle flight validation.
+
+After configuring the output assignments, select the mode and reboot:
+
+```sh
+param set SYS_HITL 3
+param save
+reboot
+```
+
+Check `pwm_out_sim status`, `dshot status`, and `pwm_out status` after boot. To return to normal HITL with no physical outputs, set `SYS_HITL` to `1` and reboot. Physical output behavior still follows arming and kill switch state; verify the board's safety switch behavior on the bench.
+
 ## Setting up HITL
 
 ## Check if HITL is in Firmware

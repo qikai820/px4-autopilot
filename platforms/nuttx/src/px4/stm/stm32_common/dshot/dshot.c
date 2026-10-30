@@ -40,6 +40,7 @@
 #include <px4_platform_common/micro_hal.h>
 #include <stm32_dma.h>
 #include <stm32_tim.h>
+#include <nuttx/irq.h>
 #include <px4_arch/dshot.h>
 #include <px4_arch/io_timer.h>
 #include <drivers/drv_dshot.h>
@@ -94,6 +95,7 @@ static void select_next_capture_channel(uint8_t timer_index);
 static uint8_t output_channel_from_timer_channel(uint8_t timer_index, uint8_t timer_channel);
 
 static void dma_burst_finished_callback(DMA_HANDLE handle, uint8_t status, void *arg);
+static void dma_output_finished_callback(DMA_HANDLE handle, uint8_t status, void *arg);
 static void capture_complete_callback(void *arg);
 
 static void process_capture_results(uint8_t timer_index, uint8_t channel_index);
@@ -109,6 +111,9 @@ typedef struct timer_config_t {
 	bool bidirectional;             // Timer in bidir (inverted) mode
 	int capture_channel_index;		// Timer channel currently being catured in bidirectional mode
 	uint8_t timer_index;            // Timer index. Necessary to have memory for passing pointer to hrt callback
+	volatile uint32_t output_complete;
+	volatile uint32_t output_errors;
+	volatile uint8_t last_output_status;
 } timer_config_t;
 
 static timer_config_t timer_configs[MAX_IO_TIMERS] = {};
@@ -383,12 +388,32 @@ void up_dshot_trigger()
 					       false);
 
 			} else {
-				stm32_dmastart(timer_configs[timer_index].dma_handle,  NULL, NULL, false);
+				stm32_dmastart(timer_configs[timer_index].dma_handle, dma_output_finished_callback,
+					       &timer_configs[timer_index].timer_index, false);
 			}
 
 			// Enable DMA update request
 			io_timer_update_dma_req(timer_index, true);
 		}
+	}
+}
+
+static void dma_output_finished_callback(DMA_HANDLE handle, uint8_t status, void *arg)
+{
+	// NuttX may dispatch a pending IRQ after its old flags were cleared.
+	if ((status & (DMA_STATUS_ERROR | DMA_STATUS_TCIF)) == 0) {
+		return;
+	}
+
+	const uint8_t timer_index = *((uint8_t *)arg);
+	(void)handle;
+	timer_configs[timer_index].last_output_status = status;
+
+	if (status & DMA_STATUS_ERROR) {
+		++timer_configs[timer_index].output_errors;
+
+	} else if (status & DMA_STATUS_TCIF) {
+		++timer_configs[timer_index].output_complete;
 	}
 }
 
@@ -671,8 +696,42 @@ void up_bdshot_status(void)
 {
 	PX4_INFO("dshot driver stats:");
 
+	for (unsigned timer = 0; timer < MAX_IO_TIMERS; ++timer) {
+		if (!timer_configs[timer].initialized) {
+			continue;
+		}
+
+		const uint32_t base = io_timers[timer].base;
+		const uint32_t psc = getreg32(base + STM32_GTIM_PSC_OFFSET);
+		const uint32_t arr = getreg32(base + STM32_GTIM_ARR_OFFSET);
+		const uint64_t divisor = ((uint64_t)psc + 1) * ((uint64_t)arr + 1);
+		const uint32_t rate = io_timers[timer].clock_freq / divisor;
+		irqstate_t flags = px4_enter_critical_section();
+		const unsigned remaining = timer_configs[timer].dma_handle ? stm32_dmaresidual(timer_configs[timer].dma_handle) : 0;
+		px4_leave_critical_section(flags);
+		PX4_INFO("Timer %u: requested %lu Hz, actual %lu Hz, PSC %lu ARR %lu",
+			 timer, (unsigned long)_dshot_frequency, (unsigned long)rate, (unsigned long)psc, (unsigned long)arr);
+		PX4_INFO("  CR1 0x%lx CCER 0x%lx DIER 0x%lx DCR 0x%lx",
+			 (unsigned long)getreg32(base + STM32_GTIM_CR1_OFFSET),
+			 (unsigned long)getreg32(base + STM32_GTIM_CCER_OFFSET),
+			 (unsigned long)getreg32(base + STM32_GTIM_DIER_OFFSET),
+			 (unsigned long)getreg32(base + STM32_GTIM_DCR_OFFSET));
+		PX4_INFO("  DMA map 0x%lx buffer 0x%lx remaining %u",
+			 (unsigned long)io_timers[timer].dshot.dma_map_up,
+			 (unsigned long)(uintptr_t)dshot_output_buffer[timer], remaining);
+
+		if (!timer_configs[timer].bidirectional) {
+			PX4_INFO("  DMA complete %lu errors %lu last status 0x%x",
+				 (unsigned long)timer_configs[timer].output_complete,
+				 (unsigned long)timer_configs[timer].output_errors, timer_configs[timer].last_output_status);
+		}
+	}
+
 	if (_bidirectional) {
 		PX4_INFO("Bidirectional DShot enabled");
+
+	} else {
+		return;
 	}
 
 	uint8_t timer_index = _bidi_timer_index;

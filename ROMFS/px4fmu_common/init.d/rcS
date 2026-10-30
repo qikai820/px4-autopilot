@@ -467,8 +467,17 @@ else
 	then
 		commander start -h
 
-		if ! pwm_out_sim start -m hil
+		if pwm_out_sim start -m hil
 		then
+			# Explicit bench HITL mode: keep the simulated output stream and
+			# start the real FMU outputs as well. Normal HITL/SIH stay simulated-only.
+			if param compare SYS_HITL 3
+			then
+				echo "WARNING [init] HITL physical actuator outputs enabled"
+				dshot start
+				pwm_out start
+			fi
+		else
 			tune_control play error
 		fi
 

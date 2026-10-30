@@ -72,11 +72,14 @@ PARAM_DEFINE_INT32(SYS_AUTOCONFIG, 0);
  * Set to 'external HITL', if the system should perform as if it were a real
  * vehicle (the only difference to a real system is then only the parameter
  * value, which can be used for log analysis).
+ * With physical actuator outputs enabled, HITL still skips some sensor and
+ * power checks. Real motors and servos can move; use only on a secured bench.
  *
  * @value -1 external HITL
  * @value 0 HITL and SIH disabled
  * @value 1 HITL enabled
  * @value 2 SIH enabled
+ * @value 3 HITL with physical actuator outputs enabled
  * @reboot_required true
  *
  * @group System

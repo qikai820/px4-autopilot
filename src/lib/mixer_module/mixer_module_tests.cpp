@@ -33,6 +33,9 @@
 
 #include <gtest/gtest.h>
 #include <array>
+#include <atomic>
+#include <hrt_work.h>
+#include <px4_platform_common/px4_work_queue/WorkQueueManager.hpp>
 
 #include <parameters/param.h>
 #include <uORB/topics/actuator_motors.h>
@@ -171,7 +174,7 @@ public:
 	uint16_t outputs[MAX_ACTUATORS] {};
 	int num_outputs{0};
 	int num_updates{0};
-	bool was_scheduled{false};
+	std::atomic_bool was_scheduled{false};
 	bool mixer_changed{false};
 
 private:
@@ -180,6 +183,32 @@ private:
 	uORB::Publication<actuator_servos_s> _actuator_servos_pub{ORB_ID(actuator_servos)};
 	uORB::Publication<actuator_armed_s> _actuator_armed_pub{ORB_ID(actuator_armed)};
 };
+
+TEST_F(MixerModuleTest, output_keepalive_without_new_controls)
+{
+	hrt_init();
+	hrt_work_queue_init();
+	ASSERT_EQ(px4::WorkQueueManagerStart(), 0);
+	OutputModuleTest test_module;
+	test_module.configureFunctions({0, 0, 0, 0, (int)OutputFunction::Motor5});
+	MixingOutput mixing_output{PARAM_PREFIX, MAX_NUM_OUTPUTS, test_module, MixingOutput::SchedulingPolicy::Auto, false, false};
+	mixing_output.setMaxOutputInterval(500_us);
+	test_module.sendActuatorArmed(false);
+	test_module.sendMotors({0.f, 0.f, 0.f, 0.f, 0.1f}, 1u << 4);
+	mixing_output.updateSubscriptions(false);
+
+	// Publish controls only once. Every output update must schedule another
+	// wakeup well before the default 50 ms backup, even without new data.
+	for (int cycle = 0; cycle < 3; ++cycle) {
+		test_module.was_scheduled = false;
+		mixing_output.update();
+		px4_usleep(5000);
+		EXPECT_TRUE(test_module.was_scheduled.load());
+	}
+
+	mixing_output.unregister();
+	test_module.ScheduleClear();
+}
 
 TEST_F(MixerModuleTest, basic)
 {

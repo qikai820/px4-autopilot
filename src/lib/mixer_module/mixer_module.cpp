@@ -329,12 +329,16 @@ bool MixingOutput::updateSubscriptions(bool allow_wq_switch)
 		fixed_rate_scheduling_interval = _max_topic_update_interval_us;
 	}
 
+	if (_max_output_interval_us != 0) {
+		fixed_rate_scheduling_interval = math::min(fixed_rate_scheduling_interval, _max_output_interval_us);
+	}
+
 	if (_scheduling_policy == SchedulingPolicy::Auto) {
 		if (_subscription_callback) {
 			if (_subscription_callback->registerCallback()) {
 				PX4_DEBUG("Scheduling via callback");
 				_has_backup_schedule = true;
-				_interface.ScheduleDelayed(50_ms);
+				_interface.ScheduleDelayed(backupSchedulingInterval());
 
 			} else {
 				PX4_ERR("registerCallback failed, scheduling at fixed rate");
@@ -443,7 +447,7 @@ bool MixingOutput::update()
 	}
 
 	if (_has_backup_schedule) {
-		_interface.ScheduleDelayed(50_ms);
+		_interface.ScheduleDelayed(backupSchedulingInterval());
 	}
 
 	// check for actuator test

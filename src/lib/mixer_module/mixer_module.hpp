@@ -163,6 +163,9 @@ public:
 
 	void setMaxTopicUpdateRate(unsigned max_topic_update_interval_us);
 
+	/** Bound the output scheduling interval even without new control data. Set before updateSubscriptions(). */
+	void setMaxOutputInterval(hrt_abstime interval) { _max_output_interval_us = interval; }
+
 	const actuator_armed_s &armed() const { return _armed; }
 
 	void setAllFailsafeValues(uint16_t value);
@@ -210,6 +213,10 @@ protected:
 	uint16_t output_limit_calc_single(int i, float value) const;
 
 private:
+	hrt_abstime backupSchedulingInterval() const
+	{
+		return _max_output_interval_us != 0 && _max_output_interval_us < 50_ms ? _max_output_interval_us : 50_ms;
+	}
 
 	bool isPrearmed() const
 	{
@@ -266,6 +273,7 @@ private:
 	actuator_armed_s _armed{};
 
 	unsigned _max_topic_update_interval_us{0}; ///< max topic update interval (0=unlimited)
+	hrt_abstime _max_output_interval_us{0}; ///< optional output keepalive deadline (0=default scheduling)
 
 	bool _throttle_armed{false};
 	bool _ignore_lockdown{false}; ///< if true, ignore the _armed.lockdown flag (for HIL outputs)

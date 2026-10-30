@@ -57,6 +57,34 @@ Core modules like commander and sensors have HITL modes at startup that bypass s
 
 完成所有的配置设定后 <strong x-id="1">关闭</strong> <em x-id="3">QGroundControl</em> 并断开飞控板与计算机的连接。
 
+## 同时驱动实物电机和舵机的 HITL 模式（定制固件）
+
+此固件新增 `SYS_HITL=3`，用于外部仿真器参与的台架测试。该模式同时启动 `pwm_out_sim`（向仿真器提供输出）、`dshot`（DShot 电调）和 `pwm_out`（PWM 舵机）。原有的 `SYS_HITL=1` 和 `2` 仍只启用仿真输出。
+
+:::warning
+模式 3 下，解锁或执行器测试可能使真实电机、舵机运动；HITL 会跳过部分真实传感器和电源检查。启用前拆桨、固定机体并核对输出映射。此模式仅用于台架，不用于飞行。
+:::
+
+固件必须包含 `pwm_out_sim`、`dshot` 和 `pwm_out`。使用 `HIL_ACT_FUNC*` 配置仿真器通道，使用飞控对应的 `PWM_MAIN_FUNC*` 或 `PWM_AUX_FUNC*` 配置 FMU 实物通道；各 `PWM_MAIN_TIM*` 或 `PWM_AUX_TIM*` 定时器组需选择对应输出协议。同一组引脚不能同时使用 DShot 和 PWM。
+
+CUAV 7 Nano 的 Voliro T 机型（19003）默认把 M1–M5 接到 MAIN1–5、共倾转舵机接到 MAIN7；MAIN1–6 使用 DShot150，MAIN7–8 使用 PWM50。仿真器仍使用 `HIL_ACT_FUNC1`–`HIL_ACT_FUNC6` 六个通道。已保存的参数可能覆盖机型默认值，需在飞控上核对实际输出映射和定时器参数。
+
+排查实物输出时，同时检查定时器参数、飞控状态和电调响应。`dshot status` 现在还会报告实际定时器频率、寄存器以及普通 DShot 的 DMA 完成/错误计数。DMA 完成只表示内存到定时器的传输完成，不能证明电调已上电、信号线连接正确或电调已执行命令；`actuator_outputs` 中的数值也不能替代实际波形和电机响应验证。
+
+DShot 驱动将无新控制数据时的后备调度间隔设为 500 微秒，以持续发送指令帧，包括未解锁时的停止帧。原有 50 毫秒后备间隔在 HITL 控制数据缺失或低频更新时可能使电调无法完成输入信号识别。`dshot status` 的 `dshot: interval` 可用于核对实际驱动调度间隔；状态中的 150000 Hz 等定时器频率表示 DShot 位速率，与指令帧刷新率不同。
+
+2026-10-30 的 CUAV 7 Nano 台架复测中，保持 MAIN1–4 为 PWM400（`PWM_MAIN_TIM0=400`）、MAIN5–6 为 DShot150（`PWM_MAIN_TIM1=-5`）、MAIN7–8 为 PWM100（`PWM_MAIN_TIM2=100`），未解锁执行 `actuator_test set -m 5 -v 0.1 -t 3`，实体 M5 正常转动并在约 3 秒后停止。DShot 平均调度间隔为 505.13 微秒，DMA 错误计数为 0。该结果确认此配置下的 M5 命令测试通过；不代表已完成 HITL 自动控制、舵机运动或整机飞行验证。
+
+完成通道配置后，在飞控终端执行并重启：
+
+```sh
+param set SYS_HITL 3
+param save
+reboot
+```
+
+启动后检查 `pwm_out_sim status`、`dshot status` 和 `pwm_out status`。恢复不驱动实物输出的普通 HITL 时，设置 `SYS_HITL=1` 并重启。实物输出仍受解锁和急停状态控制；安全开关的实际行为需在台架上确认。
+
 ## 配置 HITL
 
 ## Check if HITL is in Firmware

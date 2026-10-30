@@ -44,6 +44,10 @@ px4::atomic_bool DShot::_request_telemetry_init{false};
 DShot::DShot() :
 	OutputModuleInterface(MODULE_NAME, px4::wq_configurations::hp_default)
 {
+	// DShot needs recurring packets, including stop packets before arming.
+	// The default 50 ms mixer backup violates ESC startup signal timeouts
+	// when HITL/control topics are absent or arrive at a low rate.
+	_mixing_output.setMaxOutputInterval(500_us);
 	_mixing_output.setAllDisarmedValues(DSHOT_DISARM_VALUE);
 	_mixing_output.setAllMinValues(DSHOT_MIN_THROTTLE);
 	_mixing_output.setAllMaxValues(DSHOT_MAX_THROTTLE);
@@ -58,6 +62,7 @@ DShot::~DShot()
 	up_dshot_arm(false);
 
 	perf_free(_cycle_perf);
+	perf_free(_interval_perf);
 	perf_free(_bdshot_rpm_perf);
 	perf_free(_dshot_telem_perf);
 
@@ -471,6 +476,7 @@ void DShot::Run()
 	}
 
 	perf_begin(_cycle_perf);
+	perf_count(_interval_perf);
 
 	_mixing_output.update();
 
@@ -724,6 +730,7 @@ int DShot::print_status()
 	PX4_INFO("Outputs used: 0x%" PRIx32, _output_mask);
 	PX4_INFO("Outputs on: %s", _outputs_on ? "yes" : "no");
 	perf_print_counter(_cycle_perf);
+	perf_print_counter(_interval_perf);
 	perf_print_counter(_bdshot_rpm_perf);
 	perf_print_counter(_dshot_telem_perf);
 
@@ -734,10 +741,8 @@ int DShot::print_status()
 		_telemetry->printStatus();
 	}
 
-	/* Print dshot status */
-	if (_bidirectional_dshot_enabled) {
-		up_bdshot_status();
-	}
+	/* Include hardware timer/DMA status for ordinary DShot as well. */
+	up_bdshot_status();
 
 	return 0;
 }
