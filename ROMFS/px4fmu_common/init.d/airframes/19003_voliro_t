@@ -33,6 +33,10 @@ param set-default CA_CT_RATE 90.0
 param set-default MPC_THR_HOVER 0.292
 param set-default MPC_MAN_TILT_MAX 20.0
 param set-default MPC_TILTMAX_AIR 20.0
+# RC AUX1 commands body pitch in Position/Position Slow/Hold after RC_MAP_AUX1 is assigned.
+param set-default VEC_AUX_ATT 1
+param set-default VT_PITCH_MAX 10.0
+param set-default VT_PITCH_RATE 20.0
 param set-default PWM_MAIN_FUNC1 101
 param set-default PWM_MAIN_FUNC2 102
 param set-default PWM_MAIN_FUNC3 103

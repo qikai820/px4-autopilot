@@ -203,8 +203,9 @@ public:
 	 * This attitude setpoint was generated from the resulting acceleration setpoint after position and velocity control.
 	 * It needs to be executed by the attitude controller to achieve velocity and position tracking.
 	 * @param attitude_setpoint reference to struct to fill up
+	 * @param pitch_setpoint independent body pitch target for Voliro T position control
 	 */
-	void getAttitudeSetpoint(vehicle_attitude_setpoint_s &attitude_setpoint) const;
+	void getAttitudeSetpoint(vehicle_attitude_setpoint_s &attitude_setpoint, float pitch_setpoint = 0.f) const;
 
 	/**
 	 * All setpoints are set to NAN (uncontrolled). Timestampt zero.

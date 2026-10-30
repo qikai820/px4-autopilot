@@ -61,10 +61,27 @@ int main()
 	auto mq = vector_control::attitudeForForce(force, .3f, 16, .6f); assert(fabsf(Eulerf(mq).phi()) < 1e-5f);
 	assert(fabsf(Eulerf(mq).theta()) < 1e-5f);
 	auto vt = vector_control::attitudeForForce(force, .3f, 17, .6f); assert(fabsf(vector_control::toBody(force, vt)(1)) < 1e-5f);
+	for (float yaw : {-.8f, 0.f, .8f}) {
+		for (float pitch : {math::radians(-10.f), 0.f, math::radians(10.f)}) {
+			const Quatf q = vector_control::attitudeForForce(force, yaw, 17, .6f, pitch);
+			assert(fabsf(Eulerf(q).theta() - pitch) < 1e-5f);
+			assert(fabsf(vector_control::toBody(force, q)(1)) < 1e-5f);
+		}
+	}
+	const Quatf limited_pitch = vector_control::attitudeForForce(force, 0.f, 17,
+								 math::radians(15.f), math::radians(10.f));
+	assert(acosf(Dcmf(limited_pitch)(2, 2)) < math::radians(15.f) + 1e-5f);
 // Voliro T allocation respects force/torque signs, bounds and the reversible tail.
 	const voliro_t::Geometry g{.03f, .45f, 0.f, .75f, 39.5f, 10.f, .02f};
 	const auto result = voliro_t::allocate(g, Vector3f(0.f, 0.f, -49.05f), Vector3f{}, 0.f, 2.f, 2.f);
 	assert((result.force - Vector3f(0.f, 0.f, -49.05f)).norm() < .05f); assert(result.torque.norm() < .05f);
+	for (float pitch : {math::radians(-10.f), math::radians(10.f)}) {
+		const Quatf pitched(Eulerf(0.f, pitch, 0.f));
+		const Vector3f hover_body = vector_control::toBody(Vector3f(0.f, 0.f, -49.05f), pitched);
+		const auto pitched_hover = voliro_t::allocate(g, hover_body, Vector3f{}, 0.f, 2.f, 2.f);
+		near(pitched_hover.force, hover_body, 1e-4f);
+		near(pitched_hover.torque, Vector3f{}, 1e-4f);
+	}
 
 // Downstream actuator shortfall must stop position-integral growth in the unavailable direction.
 	VectorPosition limited_position; setup(limited_position); limited_position.setVectorAirframe(16);

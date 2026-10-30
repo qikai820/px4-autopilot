@@ -389,10 +389,11 @@ void VectorPosition::getLocalPositionSetpoint(vehicle_local_position_setpoint_s 
 	_thr_sp.copyTo(local_position_setpoint.thrust);
 }
 
-void VectorPosition::getAttitudeSetpoint(vehicle_attitude_setpoint_s &attitude_setpoint) const
+void VectorPosition::getAttitudeSetpoint(vehicle_attitude_setpoint_s &attitude_setpoint, float pitch_setpoint) const
 {
 	if (_vector_airframe == vector_control::morphquad || _vector_airframe == vector_control::voliro_t) {
-		vector_control::attitudeForForce(_thr_sp, _yaw_sp, _vector_airframe, _lim_tilt).copyTo(attitude_setpoint.q_d);
+		vector_control::attitudeForForce(_thr_sp, _yaw_sp, _vector_airframe, _lim_tilt,
+						 pitch_setpoint).copyTo(attitude_setpoint.q_d);
 
 	} else {
 		VectorControlMath::thrustToAttitude(_thr_sp, _yaw_sp, attitude_setpoint);

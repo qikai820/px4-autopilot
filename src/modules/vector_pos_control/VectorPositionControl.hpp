@@ -143,6 +143,7 @@ private:
 	vehicle_attitude_s _vehicle_attitude{};
 	vehicle_angular_velocity_s _vehicle_angular_velocity{};
 	control_allocator_status_s _control_allocator_status{};
+	float _voliro_pitch_setpoint{0.f};
 	hrt_abstime _dock_climb_allocation_bad_since{0};
 	hrt_abstime _dock_climb_attitude_bad_since{0};
 
@@ -167,6 +168,9 @@ private:
 		(ParamInt<px4::params::CA_AIRFRAME>) _param_vector_airframe,
 		(ParamBool<px4::params::VEC_AUX_ATT>) _param_vector_aux_att,
 		(ParamFloat<px4::params::MPC_MAN_TILT_MAX>) _param_vector_aux_max,
+		(ParamFloat<px4::params::VT_PITCH_MAX>) _param_vt_pitch_max,
+		(ParamFloat<px4::params::VT_PITCH_RATE>) _param_vt_pitch_rate,
+		(ParamInt<px4::params::RC_MAP_AUX1>) _param_rc_map_aux1,
 		// Position Control
 		(ParamFloat<px4::params::VPC_XY_P>)         _param_mpc_xy_p,
 		(ParamFloat<px4::params::VPC_Z_P>)          _param_mpc_z_p,

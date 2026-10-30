@@ -410,6 +410,7 @@ void VectorPositionControl::Run()
 				} else if (previous_position_control_enabled && !_vehicle_control_mode.flag_multicopter_position_control_enabled) {
 					// clear existing setpoint when controller is no longer active
 					_setpoint = VectorPosition::empty_trajectory_setpoint;
+					_voliro_pitch_setpoint = 0.f;
 				}
 			}
 		}
@@ -832,13 +833,38 @@ void VectorPositionControl::Run()
 
 			// Publish attitude setpoint output
 			vehicle_attitude_setpoint_s attitude_setpoint{};
-			_control.getAttitudeSetpoint(attitude_setpoint);
-			// Optional MorphQuad independent attitude inputs; standard flight-task stick mapping remains active.
 			manual_control_setpoint_s manual{};
+			const bool manual_fresh = _vector_manual_sub.copy(&manual) && manual.valid
+					  && hrt_elapsed_time(&manual.timestamp) < 500_ms;
+			const bool voliro_airframe = _param_vector_airframe.get() == vector_control::voliro_t;
+			const bool user_hold = _vehicle_status.nav_state == vehicle_status_s::NAVIGATION_STATE_AUTO_LOITER;
+			const bool manual_position = _vehicle_status.nav_state == vehicle_status_s::NAVIGATION_STATE_POSCTL
+						     || _vehicle_status.nav_state == vehicle_status_s::NAVIGATION_STATE_POSITION_SLOW;
+			const bool voliro_pitch_allowed = voliro_airframe && _param_vector_aux_att.get() && control_update_success
+						      && (manual_position || user_hold) && !_vehicle_status.failsafe
+						      && _vehicle_control_mode.flag_armed && !_vehicle_land_detected.landed
+						      && !_vehicle_land_detected.ground_contact;
+			float pitch_target = 0.f;
+
+			if (voliro_pitch_allowed && _param_rc_map_aux1.get() > 0 && manual_fresh
+			    && manual.data_source == manual_control_setpoint_s::SOURCE_RC && PX4_ISFINITE(manual.aux1)) {
+				pitch_target = math::constrain(manual.aux1, -1.f, 1.f)
+					       * math::radians(_param_vt_pitch_max.get());
+			}
+
+			if (!voliro_airframe || !_vehicle_control_mode.flag_armed || _vehicle_land_detected.landed) {
+				_voliro_pitch_setpoint = 0.f;
+
+			} else {
+				const float max_step = math::radians(_param_vt_pitch_rate.get()) * dt;
+				_voliro_pitch_setpoint += math::constrain(pitch_target - _voliro_pitch_setpoint, -max_step, max_step);
+			}
+
+			_control.getAttitudeSetpoint(attitude_setpoint, _voliro_pitch_setpoint);
+			// Optional MorphQuad independent attitude inputs; standard flight-task stick mapping remains active.
 
 			if (_param_vector_aux_att.get() && _param_vector_airframe.get() == vector_control::morphquad
-			    && _vehicle_control_mode.flag_control_manual_enabled && _vector_manual_sub.copy(&manual)
-			    && manual.valid && hrt_elapsed_time(&manual.timestamp) < 500_ms) {
+			    && _vehicle_control_mode.flag_control_manual_enabled && manual_fresh) {
 				const float limit = math::radians(_param_vector_aux_max.get());
 				Quatf(Eulerf(math::constrain(manual.aux1, -1.f, 1.f) * limit,
 					     math::constrain(manual.aux2, -1.f, 1.f) * limit, local_pos_sp.yaw)).copyTo(attitude_setpoint.q_d);
