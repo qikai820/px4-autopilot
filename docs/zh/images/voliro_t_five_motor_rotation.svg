@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 660" role="img" aria-labelledby="title desc">
+  <title id="title">Voliro T 衍生五电机平台旋向示意</title>
+  <desc id="desc">机头朝上，从上方观察。上层左 M3 顺时针，右 M1 逆时针；下层左 M4 逆时针，右 M2 顺时针；尾部 M5 建议正推力顺时针，反推力逆时针，待实测确认。</desc>
+  <defs>
+    <style>
+      text{font-family:'Noto Sans CJK SC','Microsoft YaHei',sans-serif;fill:#14243b}
+      .title{font-size:29px;font-weight:700}.sub{font-size:16px;fill:#475569}.panel{fill:#fff;stroke:#d7e0eb;stroke-width:2}.head{font-size:21px;font-weight:700}
+      .arm{stroke:#8da0b6;stroke-width:13;stroke-linecap:round}.body{fill:#dce8f5;stroke:#7793ad;stroke-width:2}.rotor{fill:#fff;stroke-width:5}
+      .cw{stroke:#1478bd}.ccw{stroke:#d77418}.tail{stroke:#596e8d}.label{font-size:22px;font-weight:700;text-anchor:middle}.small{font-size:16px;text-anchor:middle}.note{font-size:16px;fill:#475569}
+    </style>
+  </defs>
+  <rect width="1000" height="660" fill="#f4f7fb"/>
+  <text x="50" y="55" class="title">五电机布局与转向</text>
+  <text x="50" y="84" class="sub">顶视 · 机头朝上 · 左右按机体左/右 · ↻ CW 顺时针 · ↺ CCW 逆时针</text>
+  <rect x="35" y="110" width="450" height="405" rx="18" class="panel"/>
+  <rect x="515" y="110" width="450" height="405" rx="18" class="panel"/>
+  <text x="65" y="151" class="head">上层旋翼</text><text x="545" y="151" class="head">下层旋翼</text>
+  <text x="260" y="185" class="small">↑ 机头 / +X</text><text x="740" y="185" class="small">↑ 机头 / +X</text>
+  <path d="M145 255 H375 M260 255 V412" class="arm"/><path d="M625 255 H855 M740 255 V412" class="arm"/>
+  <ellipse cx="260" cy="263" rx="29" ry="53" class="body"/><ellipse cx="740" cy="263" rx="29" ry="53" class="body"/>
+  <path d="M260 210 L247 230 H273 Z M740 210 L727 230 H753 Z" fill="#3c668a"/>
+  <circle cx="145" cy="255" r="53" class="rotor cw"/><circle cx="375" cy="255" r="53" class="rotor ccw"/>
+  <circle cx="625" cy="255" r="53" class="rotor ccw"/><circle cx="855" cy="255" r="53" class="rotor cw"/>
+  <text x="145" y="250" class="label">M3</text><text x="145" y="278" class="small">↻ CW</text>
+  <text x="375" y="250" class="label">M1</text><text x="375" y="278" class="small">↺ CCW</text>
+  <text x="625" y="250" class="label">M4</text><text x="625" y="278" class="small">↺ CCW</text>
+  <text x="855" y="250" class="label">M2</text><text x="855" y="278" class="small">↻ CW</text>
+  <text x="145" y="339" class="small">左前上</text><text x="375" y="339" class="small">右前上</text>
+  <text x="625" y="339" class="small">左前下</text><text x="855" y="339" class="small">右前下</text>
+  <circle cx="260" cy="412" r="34" fill="#f8fafc" stroke="#596e8d" stroke-width="4"/>
+  <circle cx="740" cy="412" r="34" fill="#f8fafc" stroke="#596e8d" stroke-width="4"/>
+  <text x="260" y="420" class="label">M5</text><text x="740" y="420" class="label">M5</text>
+  <text x="260" y="472" class="small">↻ 正升力 / ↺ 反推力（建议）</text><text x="740" y="472" class="small">↻ 正升力 / ↺ 反推力（建议）</text>
+  <rect x="35" y="532" width="930" height="103" rx="14" fill="#e8eef6"/>
+  <text x="55" y="564" class="note">前部两组共轴：M1 与 M2 同轴反转；M3 与 M4 同轴反转。四台电机由 S1 同步倾转。</text>
+  <text x="55" y="593" class="note">M5 建议定义：正升力 ↻ CW、反推力 ↺ CCW；实际旋向必须按桨叶手性及台架推力确认。</text>
+  <text x="55" y="620" class="note">前部左右中心距 0.90 m；前电机连线至 M5 为 0.78 m；图形仅表达拓扑，非比例工程图。</text>
+</svg>

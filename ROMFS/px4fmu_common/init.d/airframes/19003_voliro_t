@@ -5,7 +5,8 @@
 # @class Copter
 #
 # Planar geometry: front span 0.90 m; M5-to-front line 0.78 m.
-# CG lies 0.03 m aft of front line on the symmetry axis; thrust and mass remain examples.
+# CG lies 0.14 m aft of front line on the symmetry axis (2026-10-30 measurement).
+# Tail arm is 0.78 - 0.14 = 0.64 m; thrust and mass remain examples.
 # User-reported motors: M1-M4 Hobbywing 6208 KV310; M5 BSC2412 KV1900.
 # Front: 6S LiPo, Hobbywing 60A ESC, 22x7.8 prop; tail: 6S, Flycolor 45A BL-32 ESC.
 # Tail prop and installed coaxial/reverse thrust curves are unknown; thrust defaults remain examples.
@@ -24,15 +25,23 @@ set VEHICLE_TYPE vector
 param set-default CA_AIRFRAME 17
 param set-default CA_METHOD 0
 param set-default CA_R_REV 16
-param set-default CA_CT_X 0.03
+param set-default CA_CT_X 0.14
 param set-default CA_CT_Y 0.45
 param set-default CA_CT_Z 0.0
-param set-default CA_CT_TAIL 0.75
+param set-default CA_CT_TAIL 0.64
 param set-default CA_CT_TMAX 39.5
 param set-default CA_CT_T5MAX 10.0
 param set-default CA_CT_KM 0.02
 param set-default CA_CT_ANGLE 120.0
 param set-default CA_CT_RATE 90.0
+# M5 command protection: full -1..+1 sweep in >=0.4 s, Schmitt thresholds,
+# 40 ms sustained reverse request and 80 ms of exact zero before reversal.
+# Initial bench settings, not calibrated motor stopping times.
+param set-default CA_R5_SLEW 0.4
+param set-default CA_CT_T5_DZ 0.03
+param set-default CA_CT_T5_HYST 0.10
+param set-default CA_CT_T5_HOLD 0.04
+param set-default CA_CT_T5_WAIT 0.08
 # Normalization must match 4*CA_CT_TMAX + CA_CT_T5MAX.
 param set-default MPC_THR_HOVER 0.292
 param set-default MPC_MAN_TILT_MAX 20.0

@@ -199,6 +199,13 @@ public:
 				    ActuatorVector &actuator_sp, const ActuatorVector &actuator_min, const ActuatorVector &actuator_max) {}
 
 	/**
+	 * Final actuator-specific constraints and achieved-control feedback.
+	 * Called after common slew limiting and clipping. Implementations that
+	 * modify outputs must preserve the bounds passed to updateSetpoint().
+	 */
+	virtual void updateSetpointAfterSlew(float dt, int matrix_index, ActuatorVector &actuator_sp, bool armed) {}
+
+	/**
 	 * Get a bitmask of motors to be stopped
 	 */
 	virtual uint32_t getStoppedMotors() const { return _stopped_motors_mask; }

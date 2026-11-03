@@ -11,24 +11,26 @@ constexpr int voliro_t = 17;
 inline matrix::Quatf attitudeForForce(const matrix::Vector3f &force, float yaw, int airframe, float tilt_limit,
 				     float pitch_setpoint = 0.f)
 {
-	float roll = 0.f;
-	float pitch = 0.f;
-
 	if (airframe == voliro_t) {
-		pitch = math::constrain(pitch_setpoint, -tilt_limit, tilt_limit);
+		// Bank the force plane before applying the independent body pitch.
+		// Rz(yaw)*Ry(pitch)*Rx(roll) becomes singular when the projected
+		// force crosses body Z=0, even at moderate pitch. Rz*Rx*Ry keeps
+		// body Y perpendicular to the force independently of pitch, including
+		// +/-90 degrees. The position tilt limit bounds bank; VT_PITCH_MAX
+		// separately bounds independent pitch at the caller.
+		float bank = 0.f;
 
 		if (force.norm() > 1e-5f) {
-			// The common front tilt cannot produce body-Y force. Choose roll using
-			// the requested pitch so the position force remains in the XZ plane.
-			const float forward = cosf(yaw) * force(0) + sinf(yaw) * force(1);
 			const float lateral = -sinf(yaw) * force(0) + cosf(yaw) * force(1);
-			const float vertical = sinf(pitch) * forward + cosf(pitch) * force(2);
-			const float max_roll = acosf(math::constrain(cosf(tilt_limit) / math::max(cosf(pitch), 1e-5f), 0.f, 1.f));
-			roll = math::constrain(atan2f(lateral, math::max(-vertical, 1e-5f)), -max_roll, max_roll);
+			bank = math::constrain(atan2f(lateral, math::max(-force(2), 1e-5f)), -tilt_limit, tilt_limit);
 		}
+
+		return matrix::Quatf(matrix::Eulerf(0.f, 0.f, yaw))
+		       * matrix::Quatf(matrix::Eulerf(bank, 0.f, 0.f))
+		       * matrix::Quatf(matrix::Eulerf(0.f, pitch_setpoint, 0.f));
 	}
 
-	return matrix::Quatf(matrix::Eulerf(roll, pitch, yaw));
+	return matrix::Quatf(matrix::Eulerf(0.f, 0.f, yaw));
 }
 inline matrix::Vector3f toBody(const matrix::Vector3f &force, const matrix::Quatf &q)
 {

@@ -1,4 +1,5 @@
 #include "../VectorPosition/VectorPosition.hpp"
+#include "../VectorAttitudeSwitches.hpp"
 #include "../../mc_pos_control/PositionControl/PositionControl.hpp"
 #include "../../vector_att_control/VectorAttitude/VectorAttitude.hpp"
 #include "../../mc_att_control/AttitudeControl/AttitudeControl.hpp"
@@ -20,6 +21,21 @@ template<class C> void setup(C &c)
 }
 int main()
 {
+// Verify mapping, channel bounds, leveling priority and loss behavior.
+	float channels[] = {1.f, -1.f};
+	auto sw = vector_control::attitudeSwitches(1, 2, true, channels, 2, 2);
+	assert(sw.valid && sw.enabled && !sw.level);
+	assert(vector_control::independentAttitudeTarget(sw.valid, sw.enabled, sw.level, .4f) == .4f);
+	channels[0] = -1.f;
+	sw = vector_control::attitudeSwitches(1, 2, true, channels, 2, 2);
+	assert(sw.valid && !sw.enabled && !sw.level);
+	assert(vector_control::independentAttitudeTarget(sw.valid, sw.enabled, sw.level, .4f) == 0.f);
+	channels[1] = 1.f;
+	sw = vector_control::attitudeSwitches(1, 2, true, channels, 2, 2);
+	assert(sw.level && vector_control::independentAttitudeTarget(sw.valid, sw.enabled, sw.level, .4f) == 0.f);
+	assert(!vector_control::attitudeSwitches(1, 2, false, channels, 2, 2).valid);
+	assert(!vector_control::attitudeSwitches(3, 0, true, channels, 3, 2).valid);
+	assert(vector_control::attitudeSwitches(0, 0, false, channels, 0, 2).enabled);
 // Before geometry adaptation, the copied controllers preserve the complete MC numerical behavior.
 	PositionControl original; VectorPosition copy; setup(original); setup(copy);
 
@@ -64,13 +80,33 @@ int main()
 	for (float yaw : {-.8f, 0.f, .8f}) {
 		for (float pitch : {math::radians(-10.f), 0.f, math::radians(10.f)}) {
 			const Quatf q = vector_control::attitudeForForce(force, yaw, 17, .6f, pitch);
-			assert(fabsf(Eulerf(q).theta() - pitch) < 1e-5f);
 			assert(fabsf(vector_control::toBody(force, q)(1)) < 1e-5f);
 		}
 	}
-	const Quatf limited_pitch = vector_control::attitudeForForce(force, 0.f, 17,
-								 math::radians(15.f), math::radians(10.f));
-	assert(acosf(Dcmf(limited_pitch)(2, 2)) < math::radians(15.f) + 1e-5f);
+// Sweep independent pitch through both vertical orientations with lateral force.
+// Compare rotations, not Euler angles (Euler yaw/roll are undefined at 90 deg).
+	for (float yaw : {-.8f, 0.f, .8f}) {
+		Quatf previous;
+		for (int degrees = -120; degrees <= 120; ++degrees) {
+			const Quatf q = vector_control::attitudeForForce(force, yaw, 17, .6f, math::radians(float(degrees)));
+			assert(q.isAllFinite());
+			assert(fabsf(vector_control::toBody(force, q)(1)) < 1e-5f);
+			if (degrees > -120) { assert((previous.inversed() * q).canonical().imag().norm() < .01f); }
+			previous = q;
+		}
+	}
+// Reproduce the old force-projection zero crossing from the negative-pitch log.
+	Quatf previous_force;
+	for (int i = 0; i <= 100; ++i) {
+		const Vector3f crossing_force(-.15f - .0003f * i, -.0002f, -.25f + .0003f * i);
+		const Quatf q = vector_control::attitudeForForce(crossing_force, 0.f, 17, 1.55f, math::radians(-55.7f));
+		assert(fabsf(vector_control::toBody(crossing_force, q)(1)) < 1e-5f);
+		if (i > 0) { assert((previous_force.inversed() * q).canonical().imag().norm() < .001f); }
+		previous_force = q;
+	}
+	const Vector3f bank_force(0.f, .3f, -.3f);
+	const Quatf bank_limited = vector_control::attitudeForForce(bank_force, 0.f, 17, math::radians(15.f));
+	assert(fabsf(Eulerf(bank_limited).phi() - math::radians(15.f)) < 1e-5f);
 // Voliro T allocation respects force/torque signs, bounds and the reversible tail.
 	const voliro_t::Geometry g{.03f, .45f, 0.f, .75f, 39.5f, 10.f, .02f};
 	const auto result = voliro_t::allocate(g, Vector3f(0.f, 0.f, -49.05f), Vector3f{}, 0.f, 2.f, 2.f);
@@ -118,6 +154,65 @@ int main()
 
 	assert(orientation.canonical().imag().norm() < .02f); assert(omega.norm() < .05f);
 
+// Small attitude/rate disturbances at and across vertical pitch. The actual
+// allocator transports roll/yaw demand between thrust difference and reaction
+// torque; include finite servo rate and its residual in rate anti-windup.
+	for (float degrees : {-100.f, -90.f, -80.f, 80.f, 90.f, 100.f}) {
+		VectorAttitude att; att.setFullAttitude(true);
+		att.setProportionalGain(Vector3f(4.f, 4.f, 2.8f), 1.f);
+		att.setRateLimit(Vector3f(2.f, 2.f, 2.f));
+		VectorRateCore rate90;
+		rate90.setPidGains(Vector3f(.15f, .15f, .2f), Vector3f(.2f, .2f, .1f), Vector3f(.003f, .003f, 0.f));
+		rate90.setIntegratorLimit(Vector3f(.3f, .3f, .3f));
+		const Vector3f world_force(0.f, 0.f, -49.05f);
+		const Quatf target = vector_control::attitudeForForce(world_force, .3f, 17, .6f, math::radians(degrees));
+		att.setAttitudeSetpoint(target, 0.f);
+		Quatf q = target * Quatf(Eulerf(.03f, -.02f, .03f));
+		Vector3f w(.02f, -.02f, .02f), acc{};
+		float servo = math::radians(degrees);
+		for (int k = 0; k < 8000; ++k) {
+			const Vector3f demand = rate90.update(w, att.update(q), acc, .0025f, false) * 10.f;
+			const auto a = voliro_t::allocate(g, vector_control::toBody(world_force, q), demand, servo, 2.0944f, .003927f);
+			servo = a.tilt;
+			const Vector3f residual = demand - a.torque;
+			rate90.setSaturationStatus(Vector3<bool>(residual(0) > 1e-4f, residual(1) > 1e-4f, residual(2) > 1e-4f),
+				Vector3<bool>(residual(0) < -1e-4f, residual(1) < -1e-4f, residual(2) < -1e-4f));
+			acc = (a.torque - w.cross(inertia.emult(w))).edivide(inertia);
+			w += acc * .0025f; q = q * Quatf(AxisAnglef(w * .0025f)); q.normalize();
+			assert(w.isAllFinite() && w.norm() < 5.f);
+		}
+		assert((q.inversed() * target).canonical().imag().norm() < .01f);
+		assert(w.norm() < .05f);
+	}
+
+// Transition from level to each vertical orientation, dwell, and return.
+	for (float direction : {-1.f, 1.f}) {
+		VectorAttitude att; att.setFullAttitude(true);
+		att.setProportionalGain(Vector3f(4.f, 4.f, 2.8f), 1.f);
+		att.setRateLimit(Vector3f(2.f, 2.f, 2.f));
+		VectorRateCore rate90;
+		rate90.setPidGains(Vector3f(.15f, .15f, .2f), Vector3f(.2f, .2f, .1f), Vector3f(.003f, .003f, 0.f));
+		rate90.setIntegratorLimit(Vector3f(.3f, .3f, .3f));
+		Quatf q; Vector3f w{}, acc{}; float servo = 0.f;
+		for (int k = 0; k < 8000; ++k) {
+			const float t = k * .0025f;
+			const float pitch = direction * math::radians(15.f) * math::constrain(math::min(t, 16.f - t), 0.f, 6.f);
+			att.setAttitudeSetpoint(vector_control::attitudeForForce(Vector3f(0.f, 0.f, -49.05f), 0.f, 17, .6f, pitch), 0.f);
+			const Vector3f demand = rate90.update(w, att.update(q), acc, .0025f, false) * 10.f;
+			const auto a = voliro_t::allocate(g, vector_control::toBody(Vector3f(0.f, 0.f, -49.05f), q), demand, servo, 2.0944f, .003927f);
+			servo = a.tilt;
+			const Vector3f residual = demand - a.torque;
+			rate90.setSaturationStatus(Vector3<bool>(residual(0) > 1e-4f, residual(1) > 1e-4f, residual(2) > 1e-4f),
+				Vector3<bool>(residual(0) < -1e-4f, residual(1) < -1e-4f, residual(2) < -1e-4f));
+			acc = (a.torque - w.cross(inertia.emult(w))).edivide(inertia);
+			w += acc * .0025f; q = q * Quatf(AxisAnglef(w * .0025f)); q.normalize();
+			assert(w.isAllFinite() && w.norm() < 2.f);
+			const Quatf target = vector_control::attitudeForForce(Vector3f(0.f, 0.f, -49.05f), 0.f, 17, .6f, pitch);
+			assert((q.inversed() * target).canonical().imag().norm() < .08f);
+		}
+		assert(q.canonical().imag().norm() < .01f && w.norm() < .05f);
+	}
+
 // Execute a simple point-mass waypoint sequence using the actual copied position core for both models.
 	for (int model : {16, 17}) {
 		VectorPosition controller; setup(controller); controller.setVectorAirframe(model);
@@ -136,5 +231,5 @@ int main()
 			assert((pos - target).norm() < .1f);
 		}
 	}
-	puts("PASS: MC numerical equivalence, quaternion continuity, force frames, Voliro T allocation/rigid-body loop and waypoint tracking (point-mass model)");
+	puts("PASS: MC equivalence, force-plane continuity, +/-90-degree ideal rigid-body recovery/transitions, allocation and point-mass waypoints");
 }

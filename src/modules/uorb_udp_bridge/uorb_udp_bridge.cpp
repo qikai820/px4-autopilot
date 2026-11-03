@@ -28,7 +28,7 @@ using namespace time_literals;
 class UorbUdpBridge final : public ModuleBase<UorbUdpBridge>
 {
 public:
-	static constexpr unsigned GENERIC_TOPIC_COUNT{13};
+	static constexpr unsigned GENERIC_TOPIC_COUNT{20};
 	UorbUdpBridge() = default;
 	~UorbUdpBridge() override
 	{
@@ -74,7 +74,7 @@ public:
 		if (reason) { PX4_WARN("%s", reason); }
 		PX4_INFO("usage: uorb_udp_bridge {start|stop|status}");
 		PX4_INFO("  uorb_udp_bridge config <ip> [port] [rate_hz]");
-		PX4_INFO("  default: 192.168.3.109:9870, 20 Hz");
+		PX4_INFO("  default: 192.168.3.100:9870, 20 Hz");
 		return 0;
 	}
 
@@ -492,7 +492,15 @@ private:
 			// camera pitch/yaw are target image errors, not servo feedback.
 			"dock_guidance_setpoint",
 			"vehicle_thrust_setpoint",
-			"hover_thrust_estimate"
+			"hover_thrust_estimate",
+			// EKF output and diagnostics (uORB instance 0).
+			"vehicle_global_position",
+			"estimator_states",
+			"estimator_status",
+			"estimator_status_flags",
+			"estimator_sensor_bias",
+			"estimator_innovations",
+			"estimator_innovation_test_ratios"
 		};
 		static_assert(sizeof(names) / sizeof(names[0]) == GENERIC_TOPIC_COUNT,
 			      "generic topic count does not match topic registry");
@@ -572,7 +580,8 @@ private:
 	const hrt_abstime _topic_interval_us[GENERIC_TOPIC_COUNT] {
 		20_ms, 20_ms, 20_ms, 20_ms, 100_ms, 500_ms,
 		20_ms, 20_ms, 20_ms, 20_ms, 20_ms,
-		20_ms, 20_ms
+		20_ms, 20_ms,
+		100_ms, 100_ms, 100_ms, 100_ms, 100_ms, 100_ms, 100_ms
 	};
 	hrt_abstime _last_topic_send[GENERIC_TOPIC_COUNT]{};
 };

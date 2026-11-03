@@ -69,6 +69,7 @@
 #include <uORB/topics/vehicle_attitude.h>
 #include <uORB/topics/vector_force_setpoint.h>
 #include <uORB/topics/manual_control_setpoint.h>
+#include <uORB/topics/rc_channels.h>
 #include <uORB/topics/vehicle_angular_velocity.h>
 #include <uORB/topics/parameter_update.h>
 #include <uORB/topics/trajectory_setpoint.h>
@@ -144,6 +145,8 @@ private:
 	vehicle_angular_velocity_s _vehicle_angular_velocity{};
 	control_allocator_status_s _control_allocator_status{};
 	float _voliro_pitch_setpoint{0.f};
+	float _morph_roll_setpoint{0.f};
+	float _morph_pitch_setpoint{0.f};
 	hrt_abstime _dock_climb_allocation_bad_since{0};
 	hrt_abstime _dock_climb_attitude_bad_since{0};
 
@@ -163,6 +166,7 @@ private:
 	};
 
 	uORB::Subscription _vector_manual_sub{ORB_ID(manual_control_setpoint)};
+	uORB::Subscription _vector_rc_sub{ORB_ID(rc_channels)};
 	uORB::Publication<vector_force_setpoint_s> _force_pub{ORB_ID(vector_force_setpoint)};
 	DEFINE_PARAMETERS(
 		(ParamInt<px4::params::CA_AIRFRAME>) _param_vector_airframe,
@@ -171,6 +175,8 @@ private:
 		(ParamFloat<px4::params::VT_PITCH_MAX>) _param_vt_pitch_max,
 		(ParamFloat<px4::params::VT_PITCH_RATE>) _param_vt_pitch_rate,
 		(ParamInt<px4::params::RC_MAP_AUX1>) _param_rc_map_aux1,
+		(ParamInt<px4::params::RC_MAP_VECTOR_SW>) _param_rc_map_vector_sw,
+		(ParamInt<px4::params::RC_MAP_LEVEL_SW>) _param_rc_map_level_sw,
 		// Position Control
 		(ParamFloat<px4::params::VPC_XY_P>)         _param_mpc_xy_p,
 		(ParamFloat<px4::params::VPC_Z_P>)          _param_mpc_z_p,

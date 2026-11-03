@@ -32,6 +32,7 @@
  ****************************************************************************/
 
 #include "VectorPositionControl.hpp"
+#include "VectorAttitudeSwitches.hpp"
 #include <lib/vector_control/VectorGeometry.hpp>
 
 #include <float.h>
@@ -411,6 +412,8 @@ void VectorPositionControl::Run()
 					// clear existing setpoint when controller is no longer active
 					_setpoint = VectorPosition::empty_trajectory_setpoint;
 					_voliro_pitch_setpoint = 0.f;
+					_morph_roll_setpoint = 0.f;
+					_morph_pitch_setpoint = 0.f;
 				}
 			}
 		}
@@ -836,6 +839,15 @@ void VectorPositionControl::Run()
 			manual_control_setpoint_s manual{};
 			const bool manual_fresh = _vector_manual_sub.copy(&manual) && manual.valid
 					  && hrt_elapsed_time(&manual.timestamp) < 500_ms;
+			rc_channels_s rc{};
+			const bool rc_fresh = _vector_rc_sub.copy(&rc) && !rc.signal_lost && rc.timestamp != 0
+					      && hrt_elapsed_time(&rc.timestamp) < 500_ms;
+			const auto switches = vector_control::attitudeSwitches(_param_rc_map_vector_sw.get(),
+					_param_rc_map_level_sw.get(), rc_fresh, rc.channels, rc.channel_count,
+					sizeof(rc.channels) / sizeof(rc.channels[0]));
+			const bool switches_valid = switches.valid;
+			const bool vector_enabled = switches.enabled;
+			const bool level_requested = switches.level;
 			const bool voliro_airframe = _param_vector_airframe.get() == vector_control::voliro_t;
 			const bool user_hold = _vehicle_status.nav_state == vehicle_status_s::NAVIGATION_STATE_AUTO_LOITER;
 			const bool manual_position = _vehicle_status.nav_state == vehicle_status_s::NAVIGATION_STATE_POSCTL
@@ -844,13 +856,13 @@ void VectorPositionControl::Run()
 						      && (manual_position || user_hold) && !_vehicle_status.failsafe
 						      && _vehicle_control_mode.flag_armed && !_vehicle_land_detected.landed
 						      && !_vehicle_land_detected.ground_contact;
-			float pitch_target = 0.f;
-
-			if (voliro_pitch_allowed && _param_rc_map_aux1.get() > 0 && manual_fresh
-			    && manual.data_source == manual_control_setpoint_s::SOURCE_RC && PX4_ISFINITE(manual.aux1)) {
-				pitch_target = math::constrain(manual.aux1, -1.f, 1.f)
-					       * math::radians(_param_vt_pitch_max.get());
-			}
+			const bool voliro_input_valid = voliro_pitch_allowed && manual_fresh
+						&& manual.data_source == manual_control_setpoint_s::SOURCE_RC
+						&& _param_rc_map_aux1.get() > 0 && PX4_ISFINITE(manual.aux1);
+			const float pitch_demand = voliro_input_valid ? math::constrain(manual.aux1, -1.f, 1.f)
+					   * math::radians(_param_vt_pitch_max.get()) : 0.f;
+			const float pitch_target = vector_control::independentAttitudeTarget(voliro_input_valid && switches_valid,
+					   vector_enabled, level_requested, pitch_demand);
 
 			if (!voliro_airframe || !_vehicle_control_mode.flag_armed || _vehicle_land_detected.landed) {
 				_voliro_pitch_setpoint = 0.f;
@@ -866,8 +878,25 @@ void VectorPositionControl::Run()
 			if (_param_vector_aux_att.get() && _param_vector_airframe.get() == vector_control::morphquad
 			    && _vehicle_control_mode.flag_control_manual_enabled && manual_fresh) {
 				const float limit = math::radians(_param_vector_aux_max.get());
-				Quatf(Eulerf(math::constrain(manual.aux1, -1.f, 1.f) * limit,
-					     math::constrain(manual.aux2, -1.f, 1.f) * limit, local_pos_sp.yaw)).copyTo(attitude_setpoint.q_d);
+				const bool configured = _param_rc_map_vector_sw.get() > 0 || _param_rc_map_level_sw.get() > 0;
+				float roll_target = 0.f;
+				float morph_pitch_target = 0.f;
+
+				if (switches_valid && !level_requested) {
+					if (vector_enabled && PX4_ISFINITE(manual.aux1) && PX4_ISFINITE(manual.aux2)) {
+						roll_target = math::constrain(manual.aux1, -1.f, 1.f) * limit;
+						morph_pitch_target = math::constrain(manual.aux2, -1.f, 1.f) * limit;
+					}
+				}
+
+				const float max_step = configured ? math::radians(_param_vt_pitch_rate.get()) * dt : 2.f * limit;
+				_morph_roll_setpoint += math::constrain(roll_target - _morph_roll_setpoint, -max_step, max_step);
+				_morph_pitch_setpoint += math::constrain(morph_pitch_target - _morph_pitch_setpoint, -max_step, max_step);
+				Quatf(Eulerf(_morph_roll_setpoint, _morph_pitch_setpoint, local_pos_sp.yaw)).copyTo(attitude_setpoint.q_d);
+
+			} else {
+				_morph_roll_setpoint = 0.f;
+				_morph_pitch_setpoint = 0.f;
 			}
 
 			const Vector3f force_ned(local_pos_sp.thrust);

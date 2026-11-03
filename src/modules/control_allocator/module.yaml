@@ -637,7 +637,7 @@ parameters:
             unit: m
             min: 0.001
             max: 3.0
-            default: 0.03
+            default: 0.14
         CA_CT_Y:
             description:
                 short: Front half span
@@ -664,7 +664,7 @@ parameters:
             unit: m
             min: 0.01
             max: 3.0
-            default: 0.75
+            default: 0.64
         CA_CT_TMAX:
             description:
                 short: Maximum front motor thrust
@@ -683,6 +683,61 @@ parameters:
             min: 0.01
             max: 500.0
             default: 10.0
+        CA_CT_T5_DZ:
+            description:
+                short: Tail motor stop deadband
+                long: |
+                  Voliro T M5 absolute normalized motor command below which the target is zero.
+                  This is a command threshold after thrust-to-command conversion, not a thrust fraction.
+                  Existing output ramps down according to CA_R5_SLEW. Zero disables the deadband.
+            type: float
+            min: 0
+            max: 0.5
+            decimal: 3
+            increment: 0.01
+            default: 0.03
+        CA_CT_T5_HYST:
+            description:
+                short: Tail motor start/reverse threshold
+                long: |
+                  Minimum absolute normalized M5 command to start from zero or request opposite rotation.
+                  A running motor can continue in its current direction down to CA_CT_T5_DZ.
+                  The effective threshold is at least CA_CT_T5_DZ. Zero disables this extra hysteresis.
+            type: float
+            min: 0
+            max: 0.8
+            decimal: 3
+            increment: 0.01
+            default: 0.10
+        CA_CT_T5_HOLD:
+            description:
+                short: Tail motor reversal confirmation
+                long: |
+                  Opposite M5 demand must continuously exceed CA_CT_T5_HYST for this duration.
+                  The old direction ramps down immediately; brief opposite requests never start reverse rotation.
+                  Zero disables confirmation time. This protection applies to allocated commands, not actuator tests.
+            type: float
+            unit: s
+            min: 0
+            max: 1
+            decimal: 3
+            increment: 0.01
+            default: 0.04
+        CA_CT_T5_WAIT:
+            description:
+                short: Tail motor zero dwell before reversal
+                long: |
+                  Continuous time at exactly zero M5 command before starting the opposite direction.
+                  Countdown starts after the output has ramped to zero. This is a timed stop request,
+                  not measured rotor standstill. Tune with the installed motor and ESC.
+                  Zero removes the timed dwell but still requires a zero-command sample on reversal.
+            type: float
+            unit: s
+            min: 0
+            max: 2
+            decimal: 3
+            increment: 0.01
+            default: 0.08
         CA_CT_KM:
             description:
                 short: Reaction torque coefficient

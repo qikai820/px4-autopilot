@@ -661,6 +661,9 @@ else
 	if param greater SYS_HITL 0
 	then
 		uorb_udp_bridge start
+	elif param greater -s UORB_UDP_EN 0
+	then
+		uorb_udp_bridge start
 	fi
 
 #

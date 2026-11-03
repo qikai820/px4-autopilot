@@ -447,6 +447,7 @@ ControlAllocator::Run()
 			}
 
 			_control_allocation[i]->clipActuatorSetpoint();
+			_actuator_effectiveness->updateSetpointAfterSlew(dt, i, _control_allocation[i]->_actuator_sp, _armed);
 		}
 	}
 

@@ -3,6 +3,12 @@ module_name: uORB UDP JSON bridge
 parameters:
     - group: System
       definitions:
+        UORB_UDP_EN:
+            description:
+                short: Start the uORB UDP bridge automatically
+                long: Start the UDP telemetry bridge at boot. HIL also starts the bridge independently of this parameter.
+            type: boolean
+            default: 0
         UORB_UDP_MAX_HZ:
             description:
                 short: Maximum uORB UDP update rate

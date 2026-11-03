@@ -49,7 +49,11 @@ inline Result allocate(const Geometry &g, const matrix::Vector3f &force, const m
 	// requests still permit the full common-tilt range.
 	const bool upright_lift_with_negative_front = force(2) < 0.f && v < 0.f
 			&& fabsf(force(0)) < .25f * fabsf(force(2));
-	const float target = upright_lift_with_negative_front ? 0.f
+	// At zero collective, manual attitude feedback can still request pitch
+	// torque. It must not turn atan2(0, negative v) into a 180-degree tilt
+	// request on arming. Center the servo at the normal slew rate instead.
+	const bool no_force = force.norm_squared() <= 1e-12f;
+	const float target = no_force || upright_lift_with_negative_front ? 0.f
 			     : ((fabsf(force(0)) + fabsf(v) > 1e-6f) ? atan2f(force(0), v) : previous_tilt);
 	r.tilt = math::constrain(math::constrain(target, -angle_limit, angle_limit),
 				 previous_tilt - angle_step, previous_tilt + angle_step);

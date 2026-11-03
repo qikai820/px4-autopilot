@@ -32,6 +32,7 @@
  ****************************************************************************/
 
 #include "DShot.h"
+#include "DShot3D.hpp"
 
 #include <px4_arch/io_timer.h>
 
@@ -437,32 +438,8 @@ bool DShot::updateOutputs(uint16_t outputs[MAX_ACTUATORS],
 
 uint16_t DShot::convert_output_to_3d_scaling(uint16_t output)
 {
-	// DShot 3D splits the throttle ranges in two.
-	// This is in terms of DShot values, code below is in terms of actuator_output
-	// Direction 1) 48 is the slowest, 1047 is the fastest.
-	// Direction 2) 1049 is the slowest, 2047 is the fastest.
-	if (output >= _param_dshot_3d_dead_l.get() && output < _param_dshot_3d_dead_h.get()) {
-		return DSHOT_DISARM_VALUE;
-	}
-
-	bool upper_range = output >= 1000;
-
-	if (upper_range) {
-		output -= 1000;
-
-	} else {
-		output = 999 - output; // lower range is inverted
-	}
-
-	float max_output = 999.f;
-	float min_output = max_output * _param_dshot_min.get();
-	output = math::min(max_output, (min_output + output * (max_output - min_output) / max_output));
-
-	if (upper_range) {
-		output += 1000;
-	}
-
-	return output;
+	return dshot3d::convertOutput(output, _param_dshot_min.get(),
+				    _param_dshot_3d_dead_l.get(), _param_dshot_3d_dead_h.get());
 }
 
 void DShot::Run()

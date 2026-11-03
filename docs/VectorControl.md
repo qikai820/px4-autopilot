@@ -48,6 +48,24 @@ body axes are FRD.
   assigned to the common-tilt mechanism. Its allocator handles four front motors,
   one reversible tail motor and one common tilt servo. It cannot independently
   produce body-Y force; that residual participates in position anti-windup.
+  Its target rotation is `Rz(yaw) * Rx(bank) * Ry(independent_pitch)`.
+  Bank comes from lateral/world-vertical force, before independent pitch, so
+  a forward-force correction cannot cause a near-90-degree bank jump when
+  projected body-Z force crosses zero. `MPC_TILTMAX_AIR` limits bank separately
+  from `VT_PITCH_MAX` (up to 120 degrees). At vertical pitch the reference yaw
+  describes the force-plane orientation; Euler heading/roll are singular and
+  must not be used to judge quaternion continuity. The common-tilt allocator
+  already transforms roll/yaw moments into arm-force difference and rotor
+  reaction torque. Near 90-degree servo tilt, body-roll authority is limited
+  by reaction torque, so simultaneous large moments may remain infeasible.
+* `RC_MAP_VECTOR_SW` and `RC_MAP_LEVEL_SW` assign calibrated RC channels (1–18;
+  0 leaves each switch unassigned). A positive channel value enables attitude
+  changes or requests leveling respectively. When vector control is switched off, or leveling is requested, the independent
+  attitude target slews to zero at `VT_PITCH_RATE`. Leveling overrides the enable
+  switch. For Voliro T this affects pitch,
+  while roll still follows lateral force demand; MorphQuad uses both roll and
+  pitch. The switches only operate where `VEC_AUX_ATT` is active. Invalid or
+  stale RC input removes the independent command. Heading is not leveled.
 * The attitude copy uses full shortest-path quaternion feedback and publishes the
   actual body-rate target in `vehicle_rates_setpoint`. Yaw feedforward retains the
   original world-Z convention. Acro/body-rate inputs bypass the attitude loop.
@@ -77,6 +95,19 @@ Control parameter groups:
 * `CA_CT_*`: Voliro T geometry/actuators. The existing parameter keys and airframe
   ID 17 are retained to preserve saved geometry; displayed aircraft/source names
   are Voliro T.
+
+Voliro T's 2026-10-30 CG correction uses front/tail arms of 0.14/0.64 m.
+M5 now has command slew, start/reverse hysteresis, sustained-reversal confirmation
+and an exact-zero dwell. Allocation residuals include final protected commands.
+See [Voliro T tail protection](VoliroTTailProtection.md) for parameters, existing
+parameter-store migration and validation limits.
+
+At zero requested force, Voliro T centers its common-tilt servo at `CA_CT_RATE`
+even if manual attitude feedback requests pitch torque. This avoids a negative
+pitch correction turning `atan2(0, negative)` into a tilt-limit command immediately
+after arming at minimum throttle. A nonzero force request still uses normal
+allocation. Neutral is `actuator_servos.control[0] = 0`, which is a servo-center
+PWM command, not an absence of PWM pulses.
 
 Existing saved `GC_*`, `GPC_*`, `GAC_*` parameters do not tune the new controllers.
 Airframe defaults use the new namespace. Selecting a different airframe does not
@@ -116,6 +147,17 @@ allocator and ideal rigid-body dynamics; and track a waypoint sequence with both
 position mappings in an ideal point-mass model. These are host simulations, not
 HIL or flight validation. They do not model measured ESC curves, sensor latency,
 gimbal dynamics or structural vibration.
+
+The vertical-pitch regressions sweep quaternion targets through -120 to +120
+degrees, reproduce a logged force-projection zero crossing, and recover small
+attitude/rate disturbances at +/-80, +/-90 and +/-100 degrees using the actual
+allocator, finite tilt slew and allocation feedback in ideal rigid-body dynamics.
+They also ramp from level to each +/-90-degree target at 15 deg/s, dwell for
+four seconds, return to level and settle, checking quaternion tracking error.
+These tests establish mathematical continuity and ideal small-disturbance
+recovery, not stability of the deployed JSBSim/ESC/servo system. Match the
+deployed model geometry, forward/reverse thrust curves and actuator latency
+before validating large-angle transitions in HIL.
 
 Before flight acceptance, validate both vector models with their actual JSBSim
 actuator curves, first hover then a QGC mission with pause/resume, manual takeover,

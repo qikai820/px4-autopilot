@@ -3,3 +3,4 @@
 # A previously saved SYS_AUTOSTART is intentionally preserved.
 
 param set-default SYS_AUTOSTART 19003
+param set-default UORB_UDP_EN 1
