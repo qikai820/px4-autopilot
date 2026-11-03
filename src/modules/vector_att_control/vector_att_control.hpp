@@ -54,6 +54,8 @@
 #include <uORB/topics/vehicle_land_detected.h>
 #include <uORB/topics/vehicle_local_position.h>
 #include <uORB/topics/vehicle_rates_setpoint.h>
+#include <uORB/topics/vector_attitude_reference.h>
+#include <uORB/topics/vector_rate_reference.h>
 #include <uORB/topics/vehicle_status.h>
 #include <lib/mathlib/math/filter/AlphaFilter.hpp>
 #include <lib/slew_rate/SlewRate.hpp>
@@ -80,6 +82,7 @@ public:
 	static int print_usage(const char *reason = nullptr);
 
 	bool init();
+	int print_status() override;
 
 private:
 	void Run() override;
@@ -103,6 +106,7 @@ private:
 
 	uORB::Subscription _hover_thrust_estimate_sub{ORB_ID(hover_thrust_estimate)};
 	uORB::Subscription _vehicle_attitude_setpoint_sub{ORB_ID(vehicle_attitude_setpoint)};
+	uORB::Subscription _vector_reference_sub{ORB_ID(vector_attitude_reference)};
 	uORB::Subscription _autotune_attitude_control_status_sub{ORB_ID(autotune_attitude_control_status)};
 	uORB::Subscription _manual_control_setpoint_sub{ORB_ID(manual_control_setpoint)};
 	uORB::Subscription _vehicle_control_mode_sub{ORB_ID(vehicle_control_mode)};
@@ -114,6 +118,9 @@ private:
 
 	uORB::Publication<vehicle_rates_setpoint_s>     _vehicle_rates_setpoint_pub{ORB_ID(vehicle_rates_setpoint)};    /**< rate setpoint publication */
 	uORB::Publication<vehicle_attitude_setpoint_s>  _vehicle_attitude_setpoint_pub;
+	uORB::Publication<vector_rate_reference_s> _vector_rate_reference_pub{ORB_ID(vector_rate_reference)};
+	vector_attitude_reference_s _vector_reference{};
+	bool _dynamics_enabled{false}; // latched at startup (VT_CTRL_MODE requires reboot)
 
 	manual_control_setpoint_s       _manual_control_setpoint {};    /**< manual control setpoint */
 	vehicle_control_mode_s          _vehicle_control_mode {};       /**< vehicle control mode */
@@ -148,6 +155,11 @@ private:
 	uint8_t _quat_reset_counter{0};
 
 	DEFINE_PARAMETERS(
+		(ParamInt<px4::params::VT_CTRL_MODE>) _param_control_mode,
+		(ParamInt<px4::params::CA_AIRFRAME>) _param_vector_airframe,
+		(ParamFloat<px4::params::VT_BANK_P>) _param_bank_p,
+		(ParamFloat<px4::params::VT_PITCH_P>) _param_pitch_p,
+		(ParamFloat<px4::params::VT_HEAD_P>) _param_heading_p,
 		(ParamInt<px4::params::VC_AIRMODE>)         _param_mc_airmode,
 		(ParamFloat<px4::params::VC_MAN_TILT_TAU>)  _param_mc_man_tilt_tau,
 

@@ -54,6 +54,7 @@
 #include <uORB/topics/vehicle_attitude.h>
 #include <uORB/topics/home_position.h>
 #include <lib/geo/geo.h>
+#include <lib/vector_control/VectorGeometry.hpp>
 
 class FlightTask : public ModuleParams
 {
@@ -63,6 +64,7 @@ public:
 	{
 		_resetSetpoints();
 		_constraints = empty_constraints;
+		_vector_heading_enabled = _param_vt_control_mode.get() == 1 && _param_vector_airframe.get() == 17;
 	}
 
 	virtual ~FlightTask() = default;
@@ -157,6 +159,8 @@ public:
 protected:
 	uORB::SubscriptionData<vehicle_local_position_s> _sub_vehicle_local_position{ORB_ID(vehicle_local_position)};
 	uORB::SubscriptionData<home_position_s> _sub_home_position{ORB_ID(home_position)};
+	uORB::Subscription _vector_attitude_sub{ORB_ID(vehicle_attitude)};
+	bool _vector_heading_enabled{false};
 	uORB::Subscription _vehicle_local_position_setpoint_sub{ORB_ID(vehicle_local_position_setpoint)};
 
 	/** Reset all setpoints to NAN */
@@ -244,6 +248,8 @@ protected:
 	landing_gear_s _gear{};
 
 	DEFINE_PARAMETERS_CUSTOM_PARENT(ModuleParams,
+					(ParamInt<px4::params::VT_CTRL_MODE>) _param_vt_control_mode,
+					(ParamInt<px4::params::CA_AIRFRAME>) _param_vector_airframe,
 					(ParamFloat<px4::params::MPC_XY_VEL_MAX>) _param_mpc_xy_vel_max,
 					(ParamFloat<px4::params::MPC_Z_VEL_MAX_DN>) _param_mpc_z_vel_max_dn,
 					(ParamFloat<px4::params::MPC_Z_VEL_MAX_UP>) _param_mpc_z_vel_max_up

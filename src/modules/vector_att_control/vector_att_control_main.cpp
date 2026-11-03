@@ -50,6 +50,8 @@
 #include <mathlib/math/Functions.hpp>
 
 #include "VectorAttitude/VectorAttitudeMath.hpp"
+#include <lib/vector_control/VectorReferenceValidity.hpp>
+#include <lib/vector_control/VectorGeometry.hpp>
 
 using namespace matrix;
 
@@ -61,6 +63,7 @@ VectorAttitudeControl::VectorAttitudeControl(bool vtol) :
 	_vtol(vtol)
 {
 	parameters_updated();
+	_dynamics_enabled = _param_control_mode.get() == 1 && _param_vector_airframe.get() == 17;
 	// Rate of change 5% per second -> 1.6 seconds to ramp to default 8% MPC_MANTHR_MIN
 	_manual_throttle_minimum.setSlewRate(0.05f);
 	// Rate of change 50% per second -> 2 seconds to ramp to 100%
@@ -72,6 +75,12 @@ VectorAttitudeControl::VectorAttitudeControl(bool vtol) :
 VectorAttitudeControl::~VectorAttitudeControl()
 {
 	perf_free(_loop_perf);
+}
+
+int VectorAttitudeControl::print_status()
+{
+	PX4_INFO("Voliro dynamics: %s (startup setting)", _dynamics_enabled ? "enabled" : "disabled");
+	return 0;
 }
 
 bool
@@ -146,7 +155,7 @@ VectorAttitudeControl::generate_attitude_setpoint(const Quatf &q, float dt)
 		_yaw_setpoint_stabilized = NAN;
 	}
 
-	const float yaw = Eulerf(q).psi();
+	const float yaw = _dynamics_enabled ? vector_control::forcePlaneHeading(q) : Eulerf(q).psi();
 	const float yaw_stick_input = math::expo_deadzone(_manual_control_setpoint.yaw, .6f, _param_man_deadzone.get());
 	_stick_yaw.generateYawSetpoint(attitude_setpoint.yaw_sp_move_rate, _yaw_setpoint_stabilized, yaw_stick_input, yaw, dt,
 				       _unaided_heading);
@@ -280,7 +289,7 @@ VectorAttitudeControl::Run()
 
 			if (_vehicle_local_position_sub.copy(&vehicle_local_position)) {
 				_heading_good_for_control = vehicle_local_position.heading_good_for_control;
-				_unaided_heading = vehicle_local_position.unaided_heading;
+				_unaided_heading = _dynamics_enabled ? NAN : vehicle_local_position.unaided_heading;
 			}
 		}
 
@@ -304,7 +313,7 @@ VectorAttitudeControl::Run()
 				_man_roll_input_filter.reset(0.f);
 				_man_pitch_input_filter.reset(0.f);
 				_yaw_setpoint_stabilized = NAN;
-				_stick_yaw.reset(Eulerf(q).psi(), _unaided_heading);
+				_stick_yaw.reset(_dynamics_enabled ? vector_control::forcePlaneHeading(q) : Eulerf(q).psi(), _unaided_heading);
 			}
 
 			// Check for new attitude setpoint
@@ -317,6 +326,9 @@ VectorAttitudeControl::Run()
 					_attitude_control.setAttitudeSetpoint(Quatf(vehicle_attitude_setpoint.q_d), vehicle_attitude_setpoint.yaw_sp_move_rate);
 					_thrust_setpoint_body = Vector3f(vehicle_attitude_setpoint.thrust_body);
 					_last_attitude_setpoint = vehicle_attitude_setpoint.timestamp;
+					_vector_reference = {};
+
+					if (_dynamics_enabled) { _vector_reference_sub.copy(&_vector_reference); }
 				}
 			}
 
@@ -340,12 +352,40 @@ VectorAttitudeControl::Run()
 				_quat_reset_counter = v_att.quat_reset_counter;
 			}
 
+			const bool reference_valid = _dynamics_enabled && _vehicle_control_mode.flag_multicopter_position_control_enabled
+						     && _vector_reference.valid
+						     && vector_control::referenceMatches(hrt_absolute_time(), _last_attitude_setpoint,
+								     _vector_reference.timestamp, _vector_reference.timestamp_sample,
+								     _vector_reference.quat_reset_counter, v_att.quat_reset_counter)
+						     && PX4_ISFINITE(_vector_reference.heading)
+						     && Vector3f(_vector_reference.omega_ned).isAllFinite()
+						     && Vector3f(_vector_reference.alpha_ned).isAllFinite();
+
+			// Loss of an optional feedforward message must not switch feedback
+			// gains back to the legacy body-axis controller at a large attitude.
+			float feedback_heading = NAN;
+
+			if (_dynamics_enabled) {
+				feedback_heading = reference_valid ? _vector_reference.heading
+						   : vector_control::forcePlaneHeading(_attitude_control.attitudeSetpoint());
+
+				if (!PX4_ISFINITE(feedback_heading)) { feedback_heading = vector_control::forcePlaneHeading(q); }
+			}
+
+			if (_dynamics_enabled && PX4_ISFINITE(feedback_heading)) {
+				_attitude_control.setTaskReference(Vector3f(_param_bank_p.get(), _param_pitch_p.get(), _param_heading_p.get()),
+								   feedback_heading, reference_valid ? Vector3f(_vector_reference.omega_ned) : Vector3f{});
+
+			} else {
+				_attitude_control.clearTaskReference();
+			}
+
 			Vector3f rates_sp = _attitude_control.update(q);
 
 			const hrt_abstime now = hrt_absolute_time();
 			autotune_attitude_control_status_s pid_autotune;
 
-			if (_autotune_attitude_control_status_sub.copy(&pid_autotune)) {
+			if (!_dynamics_enabled && _autotune_attitude_control_status_sub.copy(&pid_autotune)) {
 				if ((pid_autotune.state == autotune_attitude_control_status_s::STATE_ROLL
 				     || pid_autotune.state == autotune_attitude_control_status_s::STATE_PITCH
 				     || pid_autotune.state == autotune_attitude_control_status_s::STATE_YAW
@@ -363,13 +403,30 @@ VectorAttitudeControl::Run()
 			_thrust_setpoint_body.copyTo(rates_setpoint.thrust_body);
 			rates_setpoint.timestamp = hrt_absolute_time();
 
+			if (_dynamics_enabled) {
+				vector_rate_reference_s reference{};
+				reference.timestamp = rates_setpoint.timestamp;
+				reference.timestamp_sample = v_att.timestamp_sample;
+				reference.reference_timestamp = _vector_reference.timestamp;
+				reference.quat_reset_counter = v_att.quat_reset_counter;
+				reference.valid = reference_valid;
+
+				if (reference_valid) {
+					Vector3f(_vector_reference.omega_ned).copyTo(reference.omega_ned);
+					Vector3f(_vector_reference.alpha_ned).copyTo(reference.alpha_ned);
+				}
+
+				// Publish sidecar first; the rate loop accepts only an exact timestamp pair.
+				_vector_rate_reference_pub.publish(reference);
+			}
+
 			_vehicle_rates_setpoint_pub.publish(rates_setpoint);
 
 		} else {
 			_man_roll_input_filter.reset(0.f);
 			_man_pitch_input_filter.reset(0.f);
 			_yaw_setpoint_stabilized = NAN;
-			_stick_yaw.reset(Eulerf(q).psi(), _unaided_heading);
+			_stick_yaw.reset(_dynamics_enabled ? vector_control::forcePlaneHeading(q) : Eulerf(q).psi(), _unaided_heading);
 		}
 
 		if (_landed) {

@@ -1,13 +1,37 @@
 #include "ActuatorEffectivenessVoliroT.hpp"
 #include <cstdio>
 #include <cstdlib>
+static bool dynamics_mode = false;
+static vector_actuator_status_s published_status{};
+ORB_DEFINE(vector_actuator_status, struct vector_actuator_status_s, sizeof(vector_actuator_status_s), 0,
+	   static_cast<orb_id_size_t>(ORB_ID::vector_actuator_status), 1);
+// Transport-only stubs: exercise the real effectiveness implementation and
+// capture its optional diagnostic publication without starting a uORB service.
+const orb_metadata *get_orb_meta(ORB_ID) { return nullptr; }
+extern "C" orb_advert_t orb_advertise(const orb_metadata *, const void *) { return &published_status; }
+int uORB::Manager::orb_unadvertise(orb_advert_t) { return 0; }
+uint8_t uORB::Manager::orb_get_queue_size(const void *) { return 1; }
+int uORB::Manager::orb_publish(const orb_metadata *, orb_advert_t, const void *data)
+{
+	published_status = *static_cast<const vector_actuator_status_s *>(data);
+	return 0;
+}
 #undef param_get
 extern "C" void param_set_used(param_t) {}
 extern "C" int param_get(param_t p, void *value)
 {
+	if (static_cast<px4::params>(p) == px4::params::VT_CTRL_MODE) {
+		*static_cast<int32_t *>(value) = dynamics_mode ? 1 : 0;
+		return 0;
+	}
+
 	float v = 0.f;
 
 	switch (static_cast<px4::params>(p)) {
+	case px4::params::VT_REACT_FILT: v = 2.f; break;
+
+	case px4::params::VT_MOT_TAU: v = .1f; break;
+
 	case px4::params::CA_CT_X: v = .14f; break;
 
 	case px4::params::CA_CT_Y: v = .45f; break;
@@ -144,4 +168,29 @@ int main()
 	effectiveness.updateSetpointAfterSlew(.01f, 0, output, true);
 	check(fabsf(output(4) - .05f) < 1e-6f, "rearm starts from zero state");
 	std::puts("PASS: actual Voliro T effectiveness guard, single slew stage, final-command residuals and disarm reset");
+
+	dynamics_mode = true;
+	ActuatorEffectivenessVoliroT dynamic_effectiveness(nullptr);
+	demand.zero(); demand(3) = 5.04f * 9.80665f / 168.f;
+
+	for (int i = 0; i < 150; ++i) {
+		dynamic_effectiveness.updateSetpoint(demand, 0, output, minimum, maximum);
+		dynamic_effectiveness.updateSetpointAfterSlew(.01f, 0, output, true);
+	}
+
+	demand(2) = .03f; // body-Z bank torque at vertical common tilt
+	dynamic_effectiveness.updateSetpoint(demand, 0, output, minimum, maximum);
+	dynamic_effectiveness.updateSetpointAfterSlew(.01f, 0, output, true);
+	dynamic_effectiveness.getUnallocatedControl(0, status);
+	check(fabsf(status.unallocated_torque[2]) < 1e-5f, "vertical bank torque bypasses reaction filtering");
+	demand(0) = .03f; // body-X reaction torque at vertical common tilt
+	dynamic_effectiveness.updateSetpoint(demand, 0, output, minimum, maximum);
+	dynamic_effectiveness.updateSetpointAfterSlew(.01f, 0, output, true);
+	dynamic_effectiveness.getUnallocatedControl(0, status);
+	check(status.unallocated_torque[0] > .01f, "vertical reaction torque is filtered and reported as shortfall");
+	check(published_status.prediction_enabled && published_status.armed, "actuator prediction is explicitly labeled");
+	dynamic_effectiveness.updateSetpointAfterSlew(.01f, 0, output, false);
+	dynamic_effectiveness.updateSetpointAfterSlew(.01f, 0, output, false);
+	check(!published_status.armed && !published_status.prediction_enabled, "disarm invalidates dynamic prediction");
+	std::puts("PASS: vertical reaction/bank filtering, residuals, prediction labeling and disarm reset");
 }

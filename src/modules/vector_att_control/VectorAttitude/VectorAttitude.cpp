@@ -97,6 +97,12 @@ matrix::Vector3f VectorAttitude::update(const Quatf &q) const
 	// calculate angular rates setpoint
 	Vector3f rate_setpoint = eq.emult(_proportional_gain);
 
+	if (_task_reference) {
+		const Dcmf task_to_body = Dcmf(q).transpose() * Dcmf(Eulerf(0.f, 0.f, _task_heading));
+		rate_setpoint = task_to_body * _task_gain.emult(task_to_body.transpose() * eq)
+				+ Dcmf(q).transpose() * _omega_ned;
+	}
+
 	// Feed forward the yaw setpoint rate.
 	// yawspeed_setpoint is the feed forward commanded rotation around the world z-axis,
 	// but we need to apply it in the body frame (because _rates_sp is expressed in the body frame).
@@ -104,7 +110,7 @@ matrix::Vector3f VectorAttitude::update(const Quatf &q) const
 	// and multiply it by the yaw setpoint rate (yawspeed_setpoint).
 	// This yields a vector representing the commanded rotatation around the world z-axis expressed in the body frame
 	// such that it can be added to the rates setpoint.
-	if (std::isfinite(_yawspeed_setpoint)) {
+	if (!_task_reference && std::isfinite(_yawspeed_setpoint)) {
 		rate_setpoint += q.inversed().dcm_z() * _yawspeed_setpoint;
 	}
 

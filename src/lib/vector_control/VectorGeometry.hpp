@@ -7,9 +7,19 @@ namespace vector_control
 constexpr int morphquad = 16;
 constexpr int voliro_t = 17;
 
+/** Heading of Rz(heading)*Rx(bank)*Ry(pitch), defined through pitch +/-90
+ * provided force-plane bank stays away from +/-90. */
+inline float forcePlaneHeading(const matrix::Quatf &q)
+{
+	if (!q.isAllFinite() || fabsf(q.norm_squared() - 1.f) > .01f) { return NAN; }
+
+	const matrix::Vector3f y = matrix::Dcmf(q).col(1);
+	return y.xy().norm_squared() > .01f ? atan2f(-y(0), y(1)) : NAN;
+}
+
 // Force is normalized by total installed thrust, in world NED. Body axes are FRD.
 inline matrix::Quatf attitudeForForce(const matrix::Vector3f &force, float yaw, int airframe, float tilt_limit,
-				     float pitch_setpoint = 0.f)
+				      float pitch_setpoint = 0.f)
 {
 	if (airframe == voliro_t) {
 		// Bank the force plane before applying the independent body pitch.

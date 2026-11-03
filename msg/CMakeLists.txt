@@ -38,6 +38,10 @@ include(px4_list_make_absolute)
 
 set(msg_files
 	VectorForceSetpoint.msg
+	VectorAttitudeReference.msg
+	VectorRateReference.msg
+	VectorRateControlStatus.msg
+	VectorActuatorStatus.msg
 	ActionRequest.msg
 	ActuatorArmed.msg
 	ActuatorControlsStatus.msg

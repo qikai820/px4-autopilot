@@ -80,7 +80,19 @@ public:
 		_attitude_setpoint_q = qd;
 		_attitude_setpoint_q.normalize();
 		_yawspeed_setpoint = yawspeed_setpoint;
+		_task_reference = false;
 	}
+
+	/** Task axes are heading-aligned horizontal X/Y and world down Z. */
+	void setTaskReference(const matrix::Vector3f &gain, float heading, const matrix::Vector3f &omega_ned)
+	{
+		_task_gain = gain;
+		_task_heading = heading;
+		_omega_ned = omega_ned;
+		_task_reference = true;
+	}
+	void clearTaskReference() { _task_reference = false; }
+	const matrix::Quatf &attitudeSetpoint() const { return _attitude_setpoint_q; }
 
 	/**
 	 * Adjust last known attitude setpoint by a delta rotation
@@ -91,6 +103,13 @@ public:
 	{
 		_attitude_setpoint_q = q_delta * _attitude_setpoint_q;
 		_attitude_setpoint_q.normalize();
+
+		if (_task_reference) {
+			const matrix::Dcmf delta(q_delta);
+			const matrix::Vector3f heading = delta * matrix::Vector3f(cosf(_task_heading), sinf(_task_heading), 0.f);
+			_task_heading = atan2f(heading(1), heading(0));
+			_omega_ned = delta * _omega_ned;
+		}
 	}
 
 	/**
@@ -104,6 +123,9 @@ public:
 
 private:
 	bool _full_attitude{false};
+	bool _task_reference{false};
+	matrix::Vector3f _task_gain{}, _omega_ned{};
+	float _task_heading{0.f};
 	matrix::Vector3f _proportional_gain;
 	matrix::Vector3f _rate_limit;
 	float _yaw_w{0.f}; ///< yaw weight [0,1] to deprioritize caompared to roll and pitch

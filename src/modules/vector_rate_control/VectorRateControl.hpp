@@ -37,6 +37,9 @@
 #include "../vector_pos_control/DockThrustControl.hpp"
 #include "../vector_pos_control/DockFaultTransfer.hpp"
 #include "RateControl/rate_control.hpp"
+#include <lib/vector_control/VectorAngularAccelerationControl.hpp>
+#include <uORB/topics/vector_rate_reference.h>
+#include <uORB/topics/vector_rate_control_status.h>
 #include <lib/mathlib/math/filter/AlphaFilter.hpp>
 #include <uORB/topics/vector_force_setpoint.h>
 #include <uORB/topics/vehicle_attitude.h>
@@ -87,6 +90,7 @@ public:
 	static int print_usage(const char *reason = nullptr);
 
 	bool init();
+	int print_status() override;
 
 private:
 	void Run() override;
@@ -99,6 +103,14 @@ private:
 	void updateActuatorControlsStatus(const vehicle_torque_setpoint_s &vehicle_torque_setpoint, float dt);
 
 	VectorRateCore _rate_control; ///< class for rate control calculations
+	vector_control::AngularAccelerationControl _acceleration_control;
+	bool _dynamics_enabled{false};
+	uORB::Subscription _vector_reference_sub{ORB_ID(vector_rate_reference)};
+	uORB::Publication<vector_rate_control_status_s> _vector_status_pub{ORB_ID(vector_rate_control_status)};
+	vector_rate_reference_s _vector_reference{};
+	control_allocator_status_s _allocation_feedback{};
+	hrt_abstime _rates_timestamp{0};
+	hrt_abstime _last_vector_status{0};
 
 	uORB::Subscription _battery_status_sub{ORB_ID(battery_status)};
 	uORB::Subscription _dock_thrust_sub{ORB_ID(dock_guidance_thrust)};
@@ -157,6 +169,19 @@ private:
 	uORB::Subscription _vector_force_sub{ORB_ID(vector_force_setpoint)};
 	uORB::Subscription _vector_attitude_sub{ORB_ID(vehicle_attitude)};
 	DEFINE_PARAMETERS(
+		(ParamInt<px4::params::VT_CTRL_MODE>) _param_control_mode,
+		(ParamInt<px4::params::CA_AIRFRAME>) _param_vector_airframe,
+		(ParamFloat<px4::params::VT_RATE_PX>) _param_rate_px,
+		(ParamFloat<px4::params::VT_RATE_PY>) _param_rate_py,
+		(ParamFloat<px4::params::VT_RATE_PZ>) _param_rate_pz,
+		(ParamFloat<px4::params::VT_RATE_IX>) _param_rate_ix,
+		(ParamFloat<px4::params::VT_RATE_IY>) _param_rate_iy,
+		(ParamFloat<px4::params::VT_RATE_IZ>) _param_rate_iz,
+		(ParamFloat<px4::params::VT_RATE_DX>) _param_rate_dx,
+		(ParamFloat<px4::params::VT_RATE_DY>) _param_rate_dy,
+		(ParamFloat<px4::params::VT_RATE_DZ>) _param_rate_dz,
+		(ParamFloat<px4::params::VT_RATE_ILIM>) _param_rate_ilim,
+		(ParamFloat<px4::params::VT_RATE_AW>) _param_rate_aw,
 		(ParamBool<px4::params::VEC_GYRO_FF>) _param_vector_gyro_ff,
 		(ParamFloat<px4::params::VEC_IXX>) _param_vector_ixx,
 		(ParamFloat<px4::params::VEC_IYY>) _param_vector_iyy,

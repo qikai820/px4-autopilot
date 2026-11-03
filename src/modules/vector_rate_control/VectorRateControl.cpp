@@ -39,6 +39,7 @@
 #include <mathlib/math/Limits.hpp>
 #include <mathlib/math/Functions.hpp>
 #include <px4_platform_common/events.h>
+#include <lib/vector_control/VectorReferenceValidity.hpp>
 
 using namespace matrix;
 using namespace time_literals;
@@ -54,12 +55,19 @@ VectorRateControl::VectorRateControl(bool vtol) :
 	_vehicle_status.vehicle_type = vehicle_status_s::VEHICLE_TYPE_ROTARY_WING;
 
 	parameters_updated();
+	_dynamics_enabled = _param_control_mode.get() == 1 && _param_vector_airframe.get() == 17;
 	_controller_status_pub.advertise();
 }
 
 VectorRateControl::~VectorRateControl()
 {
 	perf_free(_loop_perf);
+}
+
+int VectorRateControl::print_status()
+{
+	PX4_INFO("Voliro dynamics: %s (startup setting)", _dynamics_enabled ? "enabled" : "disabled");
+	return 0;
 }
 
 bool
@@ -98,6 +106,10 @@ VectorRateControl::parameters_updated()
 				  radians(_param_mc_acro_y_max.get()));
 
 	_output_lpf_yaw.setCutoffFreq(_param_mc_yaw_tq_cutoff.get());
+	_acceleration_control.configure(Vector3f(_param_rate_px.get(), _param_rate_py.get(), _param_rate_pz.get()),
+					Vector3f(_param_rate_ix.get(), _param_rate_iy.get(), _param_rate_iz.get()),
+					Vector3f(_param_rate_dx.get(), _param_rate_dy.get(), _param_rate_dz.get()),
+					_param_rate_ilim.get(), _param_rate_aw.get());
 }
 
 void
@@ -172,6 +184,7 @@ VectorRateControl::Run()
 		vehicle_rates_setpoint_s vehicle_rates_setpoint{};
 
 		if (_vehicle_control_mode.flag_control_manual_enabled && !_vehicle_control_mode.flag_control_attitude_enabled) {
+			_vector_reference = {};
 			// generate the rate setpoint from sticks
 			manual_control_setpoint_s manual_control_setpoint;
 
@@ -202,6 +215,15 @@ VectorRateControl::Run()
 				_rates_setpoint(1) = PX4_ISFINITE(vehicle_rates_setpoint.pitch) ? vehicle_rates_setpoint.pitch : rates(1);
 				_rates_setpoint(2) = PX4_ISFINITE(vehicle_rates_setpoint.yaw)   ? vehicle_rates_setpoint.yaw   : rates(2);
 				_thrust_setpoint = Vector3f(vehicle_rates_setpoint.thrust_body);
+				_rates_timestamp = vehicle_rates_setpoint.timestamp;
+				_vector_reference = {};
+
+				if (_dynamics_enabled) { _vector_reference_sub.copy(&_vector_reference); }
+
+				if (vehicle_rates_setpoint.reset_integral) {
+					_rate_control.resetIntegral();
+					_acceleration_control.reset();
+				}
 			}
 		}
 
@@ -211,12 +233,14 @@ VectorRateControl::Run()
 			// reset integral if disarmed
 			if (!_vehicle_control_mode.flag_armed || _vehicle_status.vehicle_type != vehicle_status_s::VEHICLE_TYPE_ROTARY_WING) {
 				_rate_control.resetIntegral();
+				_acceleration_control.reset();
 			}
 
 			// update saturation status from control allocation feedback
 			control_allocator_status_s control_allocator_status;
 
 			if (_control_allocator_status_sub.update(&control_allocator_status)) {
+				_allocation_feedback = control_allocator_status;
 				Vector<bool, 3> saturation_positive;
 				Vector<bool, 3> saturation_negative;
 
@@ -236,21 +260,77 @@ VectorRateControl::Run()
 			}
 
 			// run rate controller
-			Vector3f torque_setpoint =
-				_rate_control.update(rates, _rates_setpoint, angular_accel, dt, _maybe_landed || _landed);
+			Vector3f torque_setpoint{};
+			const Vector3f inertia(math::max(_param_vector_ixx.get(), .001f), math::max(_param_vector_iyy.get(), .001f),
+					       math::max(_param_vector_izz.get(), .001f));
+			const Vector3f scale = vector_control::torqueScale(_param_vector_tq_r.get(), _param_vector_tq_p.get(), _param_vector_tq_y.get());
 
-			if (_param_vector_gyro_ff.get()) {
-				const Vector3f inertia(_param_vector_ixx.get(), _param_vector_iyy.get(), _param_vector_izz.get());
-				const Vector3f scale = vector_control::torqueScale(_param_vector_tq_r.get(), _param_vector_tq_p.get(), _param_vector_tq_y.get());
+			if (_dynamics_enabled) {
+				vehicle_attitude_s attitude{};
+				const bool feedforward_valid = _vehicle_control_mode.flag_multicopter_position_control_enabled
+							       && _vector_reference.valid
+							       && _vector_attitude_sub.copy(&attitude) && hrt_elapsed_time(&attitude.timestamp) < 100_ms
+							       && vector_control::referenceMatches(hrt_absolute_time(), _rates_timestamp,
+									       _vector_reference.timestamp, _vector_reference.timestamp_sample,
+									       _vector_reference.quat_reset_counter, attitude.quat_reset_counter)
+							       && Quatf(attitude.q).isAllFinite() && fabsf(Quatf(attitude.q).norm_squared() - 1.f) < .01f
+							       && Vector3f(_vector_reference.omega_ned).isAllFinite()
+							       && Vector3f(_vector_reference.alpha_ned).isAllFinite();
+				Vector3f alpha_ff{}, unallocated_torque{};
+
+				if (feedforward_valid) {
+					const Dcmf world_to_body = Dcmf(Quatf(attitude.q)).transpose();
+					alpha_ff = world_to_body * Vector3f(_vector_reference.alpha_ned)
+						   - rates.cross(world_to_body * Vector3f(_vector_reference.omega_ned));
+				}
+
+				if (_allocation_feedback.timestamp != 0 && hrt_elapsed_time(&_allocation_feedback.timestamp) < 100_ms
+				    && Vector3f(_allocation_feedback.unallocated_torque).isAllFinite()) {
+					unallocated_torque = Vector3f(_allocation_feedback.unallocated_torque).emult(scale);
+				}
+
+				const Vector3f alpha_fb = _acceleration_control.update(_rates_setpoint - rates, angular_accel, alpha_ff,
+							  unallocated_torque.edivide(inertia), dt, _maybe_landed || _landed || !_vehicle_control_mode.flag_armed);
+				const Vector3f gyro = rates.cross(inertia.emult(rates));
+				const Vector3f torque = inertia.emult(alpha_ff + alpha_fb) + gyro;
+				torque_setpoint = torque.edivide(scale);
+
+				if (hrt_elapsed_time(&_last_vector_status) >= 20_ms) {
+					vector_rate_control_status_s status{};
+					status.timestamp = hrt_absolute_time();
+					status.timestamp_sample = angular_velocity.timestamp_sample;
+					(_rates_setpoint - rates).copyTo(status.rate_error);
+					alpha_ff.copyTo(status.alpha_feedforward); alpha_fb.copyTo(status.alpha_feedback);
+					_acceleration_control.integral().copyTo(status.alpha_integral);
+					gyro.copyTo(status.torque_gyro); torque.copyTo(status.torque_command);
+					unallocated_torque.copyTo(status.torque_unallocated);
+					status.feedforward_valid = feedforward_valid;
+					_vector_status_pub.publish(status);
+					_last_vector_status = status.timestamp;
+				}
+
+			} else {
+				torque_setpoint = _rate_control.update(rates, _rates_setpoint, angular_accel, dt, _maybe_landed || _landed);
+			}
+
+			if (!_dynamics_enabled && _param_vector_gyro_ff.get()) {
 				torque_setpoint += rates.cross(inertia.emult(rates)).edivide(scale);
 			}
 
 			// apply low-pass filtering on yaw axis to reduce high frequency torque caused by rotor acceleration
-			torque_setpoint(2) = _output_lpf_yaw.update(torque_setpoint(2), dt);
+			if (!_dynamics_enabled) { torque_setpoint(2) = _output_lpf_yaw.update(torque_setpoint(2), dt); }
 
 			// publish rate controller status
 			rate_ctrl_status_s rate_ctrl_status{};
 			_rate_control.getRateControlStatus(rate_ctrl_status);
+
+			if (_dynamics_enabled) {
+				const Vector3f integral = _acceleration_control.integral().emult(inertia).edivide(scale);
+				rate_ctrl_status.rollspeed_integ = integral(0);
+				rate_ctrl_status.pitchspeed_integ = integral(1);
+				rate_ctrl_status.yawspeed_integ = integral(2);
+			}
+
 			rate_ctrl_status.timestamp = hrt_absolute_time();
 			_controller_status_pub.publish(rate_ctrl_status);
 

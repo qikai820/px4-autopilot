@@ -13,8 +13,9 @@ build=Path(args.build).resolve() if args.build else root/'build/cuav_7-nano_voli
 with tempfile.TemporaryDirectory(prefix='voliro-t-test-') as temp:
     includes=[build,build/'src/lib',root/'platforms/common',root/'platforms/common/include',
               root/'platforms/posix/include',root/'src',root/'src/modules',root/'src/include',
-              root/'src/lib',root/'src/lib/matrix',root/'src/lib/control_allocation',source]
-    common=['g++','-std=gnu++17','-O2','-D__PX4_POSIX','-D__EXPORT=']+['-I'+str(i) for i in includes]
+              root/'src/lib',root/'src/lib/matrix',root/'src/lib/control_allocation',
+              root/'platforms/posix/src/px4/common/include',root/'platforms/posix/src/px4/generic/generic/include',root/'boards/px4/sitl/src',source]
+    common=['g++','-std=gnu++17','-O2','-D__PX4_POSIX','-D__PX4_LINUX','-D__EXPORT=']+['-I'+str(i) for i in includes]
     for name,sources in [('test',['test_voliro_t.cpp']),
                          ('effectiveness',['test_voliro_t_effectiveness.cpp','ActuatorEffectivenessVoliroT.cpp'])]:
         binary=str(Path(temp)/name)

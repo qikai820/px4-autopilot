@@ -67,6 +67,9 @@
 #include <uORB/topics/dock_brake_status.h>
 #include <uORB/topics/control_allocator_status.h>
 #include <uORB/topics/vehicle_attitude.h>
+#include <uORB/topics/vector_attitude_reference.h>
+#include <uORB/topics/vector_actuator_status.h>
+#include <lib/vector_control/VectorAttitudeReference.hpp>
 #include <uORB/topics/vector_force_setpoint.h>
 #include <uORB/topics/manual_control_setpoint.h>
 #include <uORB/topics/rc_channels.h>
@@ -100,6 +103,7 @@ public:
 	static int print_usage(const char *reason = nullptr);
 
 	bool init();
+	int print_status() override;
 
 private:
 	void Run() override;
@@ -145,6 +149,12 @@ private:
 	vehicle_angular_velocity_s _vehicle_angular_velocity{};
 	control_allocator_status_s _control_allocator_status{};
 	float _voliro_pitch_setpoint{0.f};
+	bool _dynamics_enabled{false};
+	vector_control::AttitudeReference _attitude_reference;
+	matrix::Vector3f _reference_shortfall{};
+	uint8_t _reference_reset_counter{0};
+	uORB::Publication<vector_attitude_reference_s> _reference_pub{ORB_ID(vector_attitude_reference)};
+	uORB::Subscription _actuator_prediction_sub{ORB_ID(vector_actuator_status)};
 	float _morph_roll_setpoint{0.f};
 	float _morph_pitch_setpoint{0.f};
 	hrt_abstime _dock_climb_allocation_bad_since{0};
@@ -169,6 +179,14 @@ private:
 	uORB::Subscription _vector_rc_sub{ORB_ID(rc_channels)};
 	uORB::Publication<vector_force_setpoint_s> _force_pub{ORB_ID(vector_force_setpoint)};
 	DEFINE_PARAMETERS(
+		(ParamInt<px4::params::VT_CTRL_MODE>) _param_control_mode,
+		(ParamFloat<px4::params::VT_REF_FREQ>) _param_reference_frequency,
+		(ParamFloat<px4::params::VT_BANK_RATE>) _param_bank_rate,
+		(ParamFloat<px4::params::VT_BANK_ACC>) _param_bank_acc,
+		(ParamFloat<px4::params::VT_PITCH_ACC>) _param_pitch_acc,
+		(ParamFloat<px4::params::VT_HEAD_RATE>) _param_heading_rate,
+		(ParamFloat<px4::params::VT_HEAD_ACC>) _param_heading_acc,
+		(ParamFloat<px4::params::VT_POS_AW>) _param_position_aw,
 		(ParamInt<px4::params::CA_AIRFRAME>) _param_vector_airframe,
 		(ParamBool<px4::params::VEC_AUX_ATT>) _param_vector_aux_att,
 		(ParamFloat<px4::params::MPC_MAN_TILT_MAX>) _param_vector_aux_max,

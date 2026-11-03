@@ -11,7 +11,20 @@ namespace voliro_t
 {
 struct Geometry {
 	float x, y, z, tail, front_max, tail_max, km;
+	float tail_reverse_max{0.f}; // zero preserves the legacy symmetric map
 };
+inline float tailMax(const Geometry &g, float signed_value)
+{
+	return signed_value < 0.f && g.tail_reverse_max > 0.f ? g.tail_reverse_max : g.tail_max;
+}
+inline float tailThrust(const Geometry &g, float command)
+{
+	return command * fabsf(command) * tailMax(g, command);
+}
+inline float tailCommand(const Geometry &g, float thrust)
+{
+	return copysignf(sqrtf(fabsf(thrust) / tailMax(g, thrust)), thrust);
+}
 struct Result {
 	float thrust[5] {};
 	float tilt{0.f};
@@ -35,10 +48,39 @@ inline void forward(const Geometry &g, Result &r)
 	r.force(2) -= r.thrust[4];
 	r.torque(1) -= g.tail * r.thrust[4];
 }
-inline Result allocate(const Geometry &g, const matrix::Vector3f &force, const matrix::Vector3f &torque,
-		       float previous_tilt, float angle_limit, float angle_step)
+struct ForcePitchSolution {
+	float tilt{0.f}, front_sum{0.f}, tail{0.f};
+};
+
+inline float reactionTorque(float tilt, const matrix::Vector3f &torque)
 {
-	Result r;
+	return sinf(tilt) * torque(0) - cosf(tilt) * torque(2);
+}
+
+/** Stateful actuator-mode filter. The state is a scalar rotor reaction torque,
+ * not a body-Z component; it remains meaningful while the common tilt moves. */
+class ReactionTorqueFilter
+{
+public:
+	float update(float demand, float cutoff, float dt)
+	{
+		if (!PX4_ISFINITE(demand)) { reset(); return 0.f; }
+
+		if (cutoff <= 0.f) { _state = demand; }
+
+		else if (PX4_ISFINITE(dt) && dt > 0.f) { _state += (1.f - expf(-2.f * M_PI_F * cutoff * math::min(dt, .02f))) * (demand - _state); }
+
+		return _state;
+	}
+	void reset() { _state = 0.f; }
+private:
+	float _state{0.f};
+};
+
+inline ForcePitchSolution allocateForcePitch(const Geometry &g, const matrix::Vector3f &force, const matrix::Vector3f &torque,
+		float previous_tilt, float angle_limit, float angle_step)
+{
+	ForcePitchSolution r;
 	// The exact unconstrained force/pitch solution, before angular constraints:
 	// u=S*sin(a)=Fx; v=S*cos(a)=(My-tail*Fz-z*Fx)/(x+tail).
 	const float v = (torque(1) - g.tail * force(2) - g.z * force(0)) / (g.x + g.tail);
@@ -67,24 +109,71 @@ inline Result allocate(const Geometry &g, const matrix::Vector3f &force, const m
 	const float aa = a.dot(a), ab = a.dot(b), bb = b.dot(b);
 	const float det = aa * bb - ab * ab;
 	float sum = math::constrain((a.dot(w) * bb - b.dot(w) * ab) / det, 0.f, 4.f * g.front_max);
-	const float tail = math::constrain((b.dot(w) - ab * sum) / bb, -g.tail_max, g.tail_max);
+	const float tail = math::constrain((b.dot(w) - ab * sum) / bb, -tailMax(g, -1.f), g.tail_max);
 	// Refit sum if tail saturation changed the solution.
 	sum = math::constrain(a.dot(w - b * tail) / aa, 0.f, 4.f * g.front_max);
+	r.front_sum = sum;
+	r.tail = tail;
+	return r;
+}
+
+inline Result allocateRollYaw(const Geometry &g, const ForcePitchSolution &solution,
+			      const matrix::Vector3f &torque, float reaction_torque)
+{
+	Result r;
+	r.tilt = solution.tilt;
+	const float sum = solution.front_sum;
+	const float sn = sinf(r.tilt), cs = cosf(r.tilt);
 	const float difference = math::constrain(-(cs * torque(0) + sn * torque(2)) / g.y,
 				 -math::min(sum, 4.f * g.front_max - sum), math::min(sum, 4.f * g.front_max - sum));
 	const float right = .5f * (sum + difference), left = .5f * (sum - difference);
 	const float right_room = math::max(0.f, math::min(right, 2.f * g.front_max - right));
 	const float left_room = math::max(0.f, math::min(left, 2.f * g.front_max - left));
 	const float room = right_room + left_room;
-	const float reaction = math::constrain((sn * torque(0) - cs * torque(2)) / g.km, -room, room);
+	const float reaction = math::constrain(reaction_torque / g.km, -room, room);
 	// Right coaxial pair has -,+ reaction signs; the left pair has +,-.
 	// Thus the total reaction coefficient is -dr + dl.
 	const float dr = room > 1e-6f ? -reaction * right_room / room : 0.f;
 	const float dl = reaction + dr;
 	r.thrust[0] = .5f * (right + dr); r.thrust[1] = .5f * (right - dr);
 	r.thrust[2] = .5f * (left + dl); r.thrust[3] = .5f * (left - dl);
-	r.thrust[4] = tail;
+	r.thrust[4] = solution.tail;
 	forward(g, r);
 	return r;
+}
+
+/** Refit the front force when M5 protection makes the requested tail thrust
+ * unavailable. A small, bounded force deviation can retain pitch damping
+ * while the tail is in its deadband or waiting to reverse. The original
+ * requested wrench is retained for final-command residual reporting. */
+inline ForcePitchSolution refitForTail(const Geometry &g, const matrix::Vector3f &force,
+				       const matrix::Vector3f &torque, float tail_thrust, float previous_tilt, float angle_limit, float angle_step)
+{
+	ForcePitchSolution result;
+	result.tail = math::constrain(tail_thrust, -tailMax(g, -1.f), g.tail_max);
+	matrix::Vector2f front(force(0), -force(2) - result.tail); // (S sin a, S cos a)
+	const matrix::Vector2f arm(g.z, g.x);
+	const float pitch_error = torque(1) + g.tail * result.tail - arm.dot(front);
+	// Weighted least squares: retain 80% of the feasible pitch correction.
+	matrix::Vector2f correction = arm * (pitch_error / math::max(1.25f * arm.norm_squared(), 1e-6f));
+	const float force_budget = .15f * force.norm();
+
+	if (correction.norm() > force_budget && correction.norm() > 1e-6f) { correction *= force_budget / correction.norm(); }
+
+	front += correction;
+	const bool upright_lift_with_negative_front = force(2) < 0.f && front(1) < 0.f
+			&& fabsf(force(0)) < .25f * fabsf(force(2));
+	const float target = !upright_lift_with_negative_front && front.norm_squared() > 1e-10f ? atan2f(front(0), front(1)) : 0.f;
+	result.tilt = math::constrain(math::constrain(target, -angle_limit, angle_limit),
+				      previous_tilt - angle_step, previous_tilt + angle_step);
+	result.front_sum = math::constrain(front.dot(matrix::Vector2f(sinf(result.tilt), cosf(result.tilt))), 0.f, 4.f * g.front_max);
+	return result;
+}
+
+inline Result allocate(const Geometry &g, const matrix::Vector3f &force, const matrix::Vector3f &torque,
+		       float previous_tilt, float angle_limit, float angle_step)
+{
+	const auto solution = allocateForcePitch(g, force, torque, previous_tilt, angle_limit, angle_step);
+	return allocateRollYaw(g, solution, torque, reactionTorque(solution.tilt, torque));
 }
 } // namespace voliro_t

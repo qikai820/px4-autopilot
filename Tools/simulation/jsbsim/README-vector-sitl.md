@@ -1,5 +1,9 @@
 # PX4 + JSBSim 纯软件 UDP 仿真
 
+Voliro T 新增大角度控制模式的算法、参数匹配和离线闭环验证见
+[大角度控制实现与验证](../../../docs/VoliroT_large_angle_control.md)。
+`VT_CTRL_MODE` 默认关闭；本入口沿用所选机架和已有参数，不会自动启用或覆盖模型标定。
+
 从 JSBSim 项目目录使用新入口。模型、执行器配置和场景来自原来的
 `./scripts/run.sh voliro_t -s scene/LSZH.xml`；新入口为其生成私有 UDP 配置，
 并启动本机 PX4 POSIX 实例。默认不解锁。

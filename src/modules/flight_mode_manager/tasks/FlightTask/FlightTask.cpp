@@ -133,6 +133,17 @@ void FlightTask::_evaluateVehicleLocalPosition()
 		_unaided_yaw = _sub_vehicle_local_position.get().unaided_heading;
 		_is_yaw_good_for_control = _sub_vehicle_local_position.get().heading_good_for_control;
 
+		if (_vector_heading_enabled) {
+			vehicle_attitude_s attitude{};
+			const bool fresh = _vector_attitude_sub.copy(&attitude) && attitude.timestamp <= _time_stamp_current
+					   && _time_stamp_current - attitude.timestamp < _timeout;
+			_yaw = fresh ? vector_control::forcePlaneHeading(matrix::Quatf(attitude.q)) : NAN;
+			// unaided_heading uses the conventional Euler chart. Mixing it with
+			// force-plane heading would falsely trigger StickYaw convergence resets.
+			_unaided_yaw = NAN;
+			_is_yaw_good_for_control = _is_yaw_good_for_control && PX4_ISFINITE(_yaw);
+		}
+
 		// position
 		if (_sub_vehicle_local_position.get().xy_valid) {
 			_position(0) = _sub_vehicle_local_position.get().x;

@@ -243,6 +243,11 @@ void VectorPosition::_velocityControl(const float dt)
 
 // Update integral part of velocity control
 	_vel_int += vel_error.emult(_gain_vel_i) * dt;
+
+	if (_allocation_aw_gain > 0.f && _allocation_shortfall.isAllFinite()) {
+		// Normalized force shortfall -> acceleration, matching _vel_int units.
+		_vel_int -= _allocation_shortfall * (_allocation_aw_gain * CONSTANTS_ONE_G / _hover_thrust * dt);
+	}
 }
 
 bool VectorPosition::_dockBrakeControl(float dt)
