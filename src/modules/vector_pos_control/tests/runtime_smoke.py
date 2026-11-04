@@ -6,11 +6,13 @@ p=argparse.ArgumentParser(description=__doc__);p.add_argument('build',type=Path)
 for instance,kind,airframe,mode,modules in [(72,'vector',16,0,['vector_pos_control','vector_att_control','vector_rate_control']),
                                          (73,'vector',17,0,['vector_pos_control','vector_att_control','vector_rate_control']),
                                          (74,'mc',0,0,['mc_pos_control','mc_att_control','mc_rate_control']),
-                                         (75,'vector',17,1,['vector_pos_control','vector_att_control','vector_rate_control'])]:
+                                         (75,'vector',17,1,['vector_pos_control','vector_att_control','vector_rate_control']),
+                                         (76,'vector',17,0,['vector_pos_control','vector_att_control','vector_rate_control']),
+                                         (77,'vector',17,1,['vector_pos_control','vector_att_control','vector_rate_control'])]:
     with tempfile.TemporaryDirectory(prefix='px4-control-smoke-') as temp:
         startup=Path(temp)/'startup.sh'
         lines=['#!/bin/sh',f'. "{build}/bin/px4-alias.sh"',f'param select "{temp}/params.bson"',
-               f'param set CA_AIRFRAME {airframe}',f'param set VT_CTRL_MODE {mode}',
+               f'param set CA_AIRFRAME {airframe}',f'param set VT_CTRL_MODE {mode}',f'param set VT_TILT_EN {int(instance >= 76)}',
                'param set MAV_TYPE 2',f'. "{build}/etc/init.d/rc.{kind}_apps"']
         for module in modules+['control_allocator','flight_mode_manager']:
             lines.append(f'{module} status || exit 1')
@@ -30,4 +32,4 @@ for instance,kind,airframe,mode,modules in [(72,'vector',16,0,['vector_pos_contr
             expected = 'enabled' if mode == 1 and airframe == 17 else 'disabled'
             if output.count(f'Voliro dynamics: {expected} (startup setting)') != 3:
                 raise RuntimeError(output)
-        print(f'PASS startup/status: {kind}, CA_AIRFRAME={airframe}, VT_CTRL_MODE={mode}; instance {instance}')
+        print(f'PASS startup/status: {kind}, CA_AIRFRAME={airframe}, VT_CTRL_MODE={mode}, VT_TILT_EN={int(instance >= 76)}; instance {instance}')

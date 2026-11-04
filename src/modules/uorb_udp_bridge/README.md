@@ -47,3 +47,28 @@ It covers the entire +/-160-degree sweep, actual/target shared conversion,
 quaternion reconstruction/sign equivalence, small normalization errors,
 legacy airframes, and invalid/singular inputs. It does not constitute a live
 receiver or hardware UDP validation.
+
+## Voliro tilt monitoring
+
+The bridge exports the complete `voliro_tilt_status` message using the same
+generic JSON serialization. Keys include:
+
+- `voliro_tilt_status/tilt_command`
+- `voliro_tilt_status/tilt_expected`
+- `voliro_tilt_status/tilt_observed`
+- `voliro_tilt_status/tilt_error`
+- `voliro_tilt_status/error_duration`
+- `voliro_tilt_status/enabled`
+- `voliro_tilt_status/armed`
+- `voliro_tilt_status/observation_valid`
+- `voliro_tilt_status/fallback`
+
+Angles are in radians, `error_duration` is in seconds, and the two source
+timestamps are in microseconds. Boolean flags use the bridge's existing numeric
+0/1 encoding. Invalid values, including an invalid `tilt_error`, become JSON
+`null`. `tilt_observed` is a motion-based estimate, not servo position feedback.
+
+The topic has a 20 ms minimum send interval (up to 50 Hz), also limited by the
+bridge's configured rate, `UORB_UDP_MAX_HZ`, and new source publications. The
+default bridge rate remains 20 Hz. See [tilt monitoring and fallback](../../../docs/VoliroT_tilt_monitor.md)
+for the publisher's enable parameter and monitoring behavior.

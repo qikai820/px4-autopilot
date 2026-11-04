@@ -70,6 +70,9 @@
 #include <uORB/topics/vector_attitude_reference.h>
 #include <uORB/topics/vector_actuator_status.h>
 #include <lib/vector_control/VectorAttitudeReference.hpp>
+#include <lib/vector_control/VoliroTiltMonitor.hpp>
+#include <uORB/topics/voliro_tilt_status.h>
+#include <uORB/topics/vehicle_acceleration.h>
 #include <uORB/topics/vector_force_setpoint.h>
 #include <uORB/topics/manual_control_setpoint.h>
 #include <uORB/topics/rc_channels.h>
@@ -107,6 +110,7 @@ public:
 
 private:
 	void Run() override;
+	void updateVoliroTiltMonitor(hrt_abstime now);
 
 	VectorTakeoffHandling _takeoff; /**< state machine and ramp to bring the vehicle off the ground without jumps */
 
@@ -155,6 +159,12 @@ private:
 	uint8_t _reference_reset_counter{0};
 	uORB::Publication<vector_attitude_reference_s> _reference_pub{ORB_ID(vector_attitude_reference)};
 	uORB::Subscription _actuator_prediction_sub{ORB_ID(vector_actuator_status)};
+	uORB::Subscription _vehicle_acceleration_sub{ORB_ID(vehicle_acceleration)};
+	uORB::Publication<voliro_tilt_status_s> _tilt_status_pub{ORB_ID(voliro_tilt_status)};
+	vector_control::VoliroTiltMonitor _tilt_monitor;
+	matrix::Quatf _last_attitude_target{};
+	bool _last_attitude_target_valid{false};
+	uint8_t _fallback_reset_counter{0};
 	float _morph_roll_setpoint{0.f};
 	float _morph_pitch_setpoint{0.f};
 	hrt_abstime _dock_climb_allocation_bad_since{0};
@@ -187,6 +197,19 @@ private:
 		(ParamFloat<px4::params::VT_HEAD_RATE>) _param_heading_rate,
 		(ParamFloat<px4::params::VT_HEAD_ACC>) _param_heading_acc,
 		(ParamFloat<px4::params::VT_POS_AW>) _param_position_aw,
+		(ParamBool<px4::params::VT_TILT_EN>) _param_tilt_monitor_enable,
+		(ParamFloat<px4::params::VT_TILT_ERR>) _param_tilt_error,
+		(ParamFloat<px4::params::VT_TILT_T>) _param_tilt_error_time,
+		(ParamFloat<px4::params::VT_SRV_TAU>) _param_servo_tau,
+		(ParamFloat<px4::params::CA_CT_RATE>) _param_servo_rate,
+		(ParamFloat<px4::params::CA_CT_X>) _param_front_x,
+		(ParamFloat<px4::params::CA_CT_Z>) _param_front_z,
+		(ParamFloat<px4::params::CA_CT_TAIL>) _param_tail_arm,
+		(ParamFloat<px4::params::CA_CT_TMAX>) _param_front_max,
+		(ParamFloat<px4::params::CA_CT_T5MAX>) _param_tail_max,
+		(ParamFloat<px4::params::VEC_IXX>) _param_inertia_x,
+		(ParamFloat<px4::params::VEC_IYY>) _param_inertia_y,
+		(ParamFloat<px4::params::VEC_IZZ>) _param_inertia_z,
 		(ParamInt<px4::params::CA_AIRFRAME>) _param_vector_airframe,
 		(ParamBool<px4::params::VEC_AUX_ATT>) _param_vector_aux_att,
 		(ParamFloat<px4::params::MPC_MAN_TILT_MAX>) _param_vector_aux_max,

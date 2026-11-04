@@ -87,7 +87,7 @@ def main():
     tests = Path(__file__).resolve().parent
     with tempfile.TemporaryDirectory(prefix="vector-control-test-") as temp:
         executable = str(Path(temp) / "test")
-        for name in ("test_vector_control", "test_vector_reference", "test_voliro_dynamics"):
+        for name in ("test_vector_control", "test_vector_reference", "test_voliro_tilt_monitor", "test_voliro_dynamics"):
             subprocess.run(common + [str(tests / (name + ".cpp")), "-o", executable], check=True, cwd=root)
             arguments = [str(args.csv.resolve())] if name == "test_voliro_dynamics" and args.csv else []
             subprocess.run([executable] + arguments, check=True)

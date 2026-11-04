@@ -235,7 +235,10 @@ void VectorPosition::_velocityControl(const float dt)
 	VectorControlMath::setZeroIfNanVector3f(vel_error);
 
 	// Account for downstream motor/servo limits in the same NED normalized units.
-	if (_vector_airframe != 0 && _allocation_shortfall.isAllFinite()) {
+	// A fixed-rotor MC produces horizontal force by rotating, not by directly
+	// allocating body X/Y thrust. Feeding its transient lateral shortfall back
+	// here would cancel the velocity demand before the attitude can respond.
+	if (_vector_airframe != 0 && !_multicopter_fallback && _allocation_shortfall.isAllFinite()) {
 		for (int i = 0; i < 3; ++i) {
 			if (vel_error(i) * _allocation_shortfall(i) > 1e-5f) { vel_error(i) = 0.f; }
 		}
@@ -244,7 +247,7 @@ void VectorPosition::_velocityControl(const float dt)
 // Update integral part of velocity control
 	_vel_int += vel_error.emult(_gain_vel_i) * dt;
 
-	if (_allocation_aw_gain > 0.f && _allocation_shortfall.isAllFinite()) {
+	if (_allocation_aw_gain > 0.f && !_multicopter_fallback && _allocation_shortfall.isAllFinite()) {
 		// Normalized force shortfall -> acceleration, matching _vel_int units.
 		_vel_int -= _allocation_shortfall * (_allocation_aw_gain * CONSTANTS_ONE_G / _hover_thrust * dt);
 	}
@@ -327,7 +330,7 @@ bool VectorPosition::_dockBrakeControl(float dt)
 
 void VectorPosition::_accelerationControl()
 {
-	if (_vector_airframe == vector_control::morphquad || _vector_airframe == vector_control::voliro_t) {
+	if (!_multicopter_fallback && (_vector_airframe == vector_control::morphquad || _vector_airframe == vector_control::voliro_t)) {
 		// Same velocity PID and hover-thrust calibration as MC, with a free force direction.
 		_thr_sp = (_acc_sp - Vector3f(0.f, 0.f, CONSTANTS_ONE_G)) * (_hover_thrust / CONSTANTS_ONE_G);
 		_thr_sp(2) = math::min(_thr_sp(2), -_lim_thr_min);
@@ -396,7 +399,7 @@ void VectorPosition::getLocalPositionSetpoint(vehicle_local_position_setpoint_s 
 
 void VectorPosition::getAttitudeSetpoint(vehicle_attitude_setpoint_s &attitude_setpoint, float pitch_setpoint) const
 {
-	if (_vector_airframe == vector_control::morphquad || _vector_airframe == vector_control::voliro_t) {
+	if (!_multicopter_fallback && (_vector_airframe == vector_control::morphquad || _vector_airframe == vector_control::voliro_t)) {
 		vector_control::attitudeForForce(_thr_sp, _yaw_sp, _vector_airframe, _lim_tilt,
 						 pitch_setpoint).copyTo(attitude_setpoint.q_d);
 

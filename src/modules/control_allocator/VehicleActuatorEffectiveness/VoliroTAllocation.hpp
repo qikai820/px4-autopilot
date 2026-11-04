@@ -146,6 +146,44 @@ inline ForcePitchSolution allocateForcePitch(const Geometry &g, const matrix::Ve
 	return r;
 }
 
+/** Fixed observed tilt: prioritize feasible pitch torque, then fit force.
+ * Used only by the latched multicopter fallback, never by normal allocation. */
+inline ForcePitchSolution allocateAtTilt(const Geometry &g, const matrix::Vector3f &force,
+				       const matrix::Vector3f &torque, float tilt)
+{
+	const float sn = sinf(tilt), cs = cosf(tilt), h = g.z * sn + g.x * cs;
+	float lower = 0.f, upper = 4.f * g.front_max;
+
+	if (fabsf(h) > 1e-5f) {
+		const float s1 = (torque(1) - g.tail * tailMax(g, -1.f)) / h;
+		const float s2 = (torque(1) + g.tail * g.tail_max) / h;
+		lower = math::max(lower, math::min(s1, s2));
+		upper = math::min(upper, math::max(s1, s2));
+
+	} else if (-torque(1) / g.tail < -tailMax(g, -1.f) || -torque(1) / g.tail > g.tail_max) {
+		lower = upper + 1.f;
+	}
+
+	if (lower <= upper) {
+		const matrix::Vector2f axis(sn, -cs - h / g.tail);
+		const matrix::Vector2f demand(force(0), force(2) - torque(1) / g.tail);
+		const float sum = math::constrain(axis.dot(demand) / math::max(axis.norm_squared(), 1e-6f), lower, upper);
+		return {tilt, sum, math::constrain((h * sum - torque(1)) / g.tail, -tailMax(g, -1.f), g.tail_max)};
+	}
+
+	// An infeasible moment is reported as shortfall rather than expanding limits.
+	return allocateForcePitch(g, force, torque, tilt, M_PI_F, 0.f);
+}
+
+inline ForcePitchSolution refitAtTiltForTail(const Geometry &g, const matrix::Vector3f &force,
+		const matrix::Vector3f &torque, float tilt, float tail)
+{
+	const float h = g.z * sinf(tilt) + g.x * cosf(tilt);
+	const float sum = fabsf(h) > 1e-5f ? (torque(1) + g.tail * tail) / h
+			 : force(0) * sinf(tilt) - (force(2) + tail) * cosf(tilt);
+	return {tilt, math::constrain(sum, 0.f, 4.f * g.front_max), tail};
+}
+
 inline Result allocateRollYaw(const Geometry &g, const ForcePitchSolution &solution,
 			      const matrix::Vector3f &torque, float reaction_torque)
 {

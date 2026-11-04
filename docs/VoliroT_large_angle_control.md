@@ -134,7 +134,22 @@ MPC_THR_HOVER=0.2942
 `VT_PITCH_MAX` 的参数上限和控制硬限幅为 160°。19003 机架的新默认值为 160°，
 公共倾角 `CA_CT_ANGLE` 新默认值也为 160°；通用参数默认值仍为 10°。已有保存参数不会被
 set-default 覆盖，需要显式设置 `VT_PITCH_MAX=160` 和 `CA_CT_ANGLE=160`；参考速率由 `VT_PITCH_RATE` 控制。
-RC AUX1、向量开关、回平开关及允许模式沿用原实现。更改模式或几何不应在飞行中热切换。
+RC AUX1 在 Position、Position Slow、Hold 模式下控制独立俯仰。
+`RC_MAP_VECTOR_SW` 仅作为 AUX1 使能开关：开启跟随 AUX1，关闭回平；0 表示不使用该使能开关。
+`RC_MAP_LEVEL_SW` 保留更高优先级的一键回平。更改模式或几何不应在飞行中热切换。
+
+例如使用 CH6 调节俯仰、CH9 使能、CH8 一键回平：
+
+```text
+VEC_AUX_ATT=1
+RC_MAP_AUX1=6
+RC_MAP_VECTOR_SW=9
+RC_MAP_LEVEL_SW=8
+```
+
+CH9 开且 CH8 关时跟随 AUX1；CH9 关或 CH8 开时回平。
+回平沿用俯仰参考的速度和加速度约束，解除回平后恢复当前 AUX1 对应的目标。
+遥控无效、过时或倾转故障降级时不接受独立俯仰输入。
 
 新模式初始增益：任务 bank/pitch/heading 为 2/2/1；角速度 P 为 8/12/8，
 I 为 1/0.3/1，D 为 0.3/0.3/0.3。它们是本次模型测试的起点，需在匹配模型的板上 HIL 中复测。

@@ -5,7 +5,9 @@
 #include "VoliroTTailMotor.hpp"
 #include "VoliroTActuatorDynamics.hpp"
 #include <uORB/Publication.hpp>
+#include <uORB/Subscription.hpp>
 #include <uORB/topics/vector_actuator_status.h>
+#include <uORB/topics/voliro_tilt_status.h>
 
 class ActuatorEffectivenessVoliroT : public ModuleParams, public ActuatorEffectiveness
 {
@@ -28,7 +30,12 @@ private:
 	voliro_t::ReactionTorqueFilter _reaction_filter;
 	voliro_t::ActuatorDynamics _actuator_prediction;
 	uORB::Publication<vector_actuator_status_s> _status_pub{ORB_ID(vector_actuator_status)};
+	uORB::Subscription _tilt_status_sub{ORB_ID(voliro_tilt_status)};
 	bool _dynamics_enabled{false};
+	bool _armed{false}, _fallback_latched{false};
+	bool _fallback_observation_fresh{false};
+	float _fallback_tilt{0.f};
+	uint64_t _last_disarmed{0};
 	float _reaction_requested{0.f}, _reaction_filtered{0.f};
 	uint64_t _last_status{0};
 	float _tail_request{0.f}, _tail_minimum{-1.f}, _tail_maximum{1.f};
@@ -36,6 +43,8 @@ private:
 	uint64_t _last_update{0};
 	DEFINE_PARAMETERS(
 		(ParamInt<px4::params::VT_CTRL_MODE>) _control_mode,
+		(ParamBool<px4::params::VT_TILT_EN>) _tilt_monitor_enable,
+		(ParamFloat<px4::params::VT_PITCH_RATE>) _fallback_pitch_rate,
 		(ParamFloat<px4::params::VT_REACT_FILT>) _reaction_cutoff,
 		(ParamFloat<px4::params::VT_MOT_TAU>) _motor_tau,
 		(ParamFloat<px4::params::VT_SRV_TAU>) _servo_tau,

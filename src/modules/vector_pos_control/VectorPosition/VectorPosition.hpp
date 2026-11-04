@@ -176,6 +176,7 @@ public:
 	 */
 	bool update(const float dt);
 	void setVectorAirframe(int airframe) { _vector_airframe = airframe; }
+	void setMulticopterFallback(bool fallback) { _multicopter_fallback = fallback; }
 	void setAllocationShortfall(const matrix::Vector3f &shortfall) { _allocation_shortfall = shortfall; }
 	void setAllocationAntiWindupGain(float gain) { _allocation_aw_gain = math::max(gain, 0.f); }
 
@@ -215,6 +216,7 @@ public:
 
 private:
 	int _vector_airframe{0}; // 0 is the unchanged MC baseline used by regression tests.
+	bool _multicopter_fallback{false}; // Use MC force/attitude mapping and its intrinsic thrust anti-windup.
 	matrix::Vector3f _allocation_shortfall{};
 	float _allocation_aw_gain{0.f}; // legacy behavior when zero
 	// The range limits of the hover thrust configuration/estimate

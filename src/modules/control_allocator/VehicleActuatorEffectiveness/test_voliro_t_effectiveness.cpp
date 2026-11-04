@@ -2,12 +2,26 @@
 #include <cstdio>
 #include <cstdlib>
 static bool dynamics_mode = false;
+static bool monitor_mode = false;
+static bool tilt_status_available = false;
+static uint64_t test_time = 100000;
+static voliro_tilt_status_s input_tilt_status{};
 static vector_actuator_status_s published_status{};
 ORB_DEFINE(vector_actuator_status, struct vector_actuator_status_s, sizeof(vector_actuator_status_s), 0,
 	   static_cast<orb_id_size_t>(ORB_ID::vector_actuator_status), 1);
+ORB_DEFINE(voliro_tilt_status, struct voliro_tilt_status_s, sizeof(voliro_tilt_status_s), 0,
+	   static_cast<orb_id_size_t>(ORB_ID::voliro_tilt_status), 1);
 // Transport-only stubs: exercise the real effectiveness implementation and
 // capture its optional diagnostic publication without starting a uORB service.
 const orb_metadata *get_orb_meta(ORB_ID) { return nullptr; }
+bool uORB::Subscription::subscribe() { _node = &input_tilt_status; return true; }
+void uORB::Subscription::unsubscribe() { _node = nullptr; }
+bool uORB::Manager::orb_data_copy(void *, void *dst, unsigned &, bool)
+{
+	if (!tilt_status_available) { return false; }
+	*static_cast<voliro_tilt_status_s *>(dst) = input_tilt_status;
+	return true;
+}
 extern "C" orb_advert_t orb_advertise(const orb_metadata *, const void *) { return &published_status; }
 int uORB::Manager::orb_unadvertise(orb_advert_t) { return 0; }
 uint8_t uORB::Manager::orb_get_queue_size(const void *) { return 1; }
@@ -24,6 +38,10 @@ extern "C" int param_get(param_t p, void *value)
 		*static_cast<int32_t *>(value) = dynamics_mode ? 1 : 0;
 		return 0;
 	}
+	if (static_cast<px4::params>(p) == px4::params::VT_TILT_EN) {
+		*static_cast<int32_t *>(value) = monitor_mode ? 1 : 0;
+		return 0;
+	}
 
 	float v = 0.f;
 
@@ -31,6 +49,8 @@ extern "C" int param_get(param_t p, void *value)
 	case px4::params::VT_REACT_FILT: v = 2.f; break;
 
 	case px4::params::VT_MOT_TAU: v = .1f; break;
+
+	case px4::params::VT_PITCH_RATE: v = 20.f; break;
 
 	case px4::params::CA_CT_X: v = .14f; break;
 
@@ -65,7 +85,7 @@ extern "C" int param_get(param_t p, void *value)
 
 	*static_cast<float *>(value) = v; return 0;
 }
-extern "C" uint64_t hrt_absolute_time() { static uint64_t t = 100000; return t += 10000; }
+extern "C" uint64_t hrt_absolute_time() { return test_time += 10000; }
 int ActuatorEffectiveness::Configuration::addActuator(ActuatorType, const matrix::Vector3f &, const matrix::Vector3f &) {return 0;}
 // Registration and stoppable-motor policy are not exercised by this host test.
 void ActuatorEffectiveness::stopMaskedMotorsWithZeroThrust(uint32_t, ActuatorVector &) {}
@@ -116,6 +136,68 @@ static void test_zero_force_servo()
 	check(fabsf(output(5)) < 1e-6f, "zero demand finishes centering Servo1");
 	std::puts("PASS: armed zero-force pitch feedback, forward tilt and rate-limited servo centering");
 }
+static void test_tilt_fallback()
+{
+	dynamics_mode = false; monitor_mode = true;
+	ActuatorEffectivenessVoliroT effectiveness(nullptr);
+	using Vec = ActuatorEffectiveness::ActuatorVector;
+	Vec minimum, maximum, output;
+	for (int i = 0; i < 16; ++i) { minimum(i) = 0.f; maximum(i) = 1.f; }
+	minimum(4) = minimum(5) = -1.f;
+	matrix::Vector<float, 6> demand;
+	demand(3) = .1f; demand(5) = -.25f;
+	for (int i = 0; i < 200; ++i) {
+		effectiveness.updateSetpoint(demand, 0, output, minimum, maximum);
+		effectiveness.updateSetpointAfterSlew(.01f, 0, output, true);
+	}
+	check(published_status.armed, "monitor receives final servo command in legacy mode");
+	input_tilt_status = {};
+	input_tilt_status.timestamp = test_time + 1;
+	input_tilt_status.timestamp_sample = input_tilt_status.timestamp;
+	input_tilt_status.armed = input_tilt_status.fallback = input_tilt_status.observation_valid = true;
+	input_tilt_status.tilt_observed = math::radians(-15.f);
+	tilt_status_available = true;
+	const float previous = output(5);
+	effectiveness.updateSetpoint(demand, 0, output, minimum, maximum);
+	effectiveness.updateSetpointAfterSlew(.01f, 0, output, true);
+	check(output(5) < previous && output(5) > 0.f, "fallback slews servo toward neutral without a step");
+	check(previous - output(5) <= 10.f / 120.f * .02f + 1e-6f, "fallback centering reserves attitude tracking rate");
+	voliro_t::Geometry g{.14f, .45f, 0.f, .64f, 39.5f, 10.f, .02f};
+	voliro_t::Result actual;
+	actual.tilt = input_tilt_status.tilt_observed;
+	for (int i = 0; i < 5; ++i) { actual.thrust[i] = output(i) * fabsf(output(i)) * (i == 4 ? 10.f : 39.5f); }
+	voliro_t::forward(g, actual);
+	control_allocator_status_s status{};
+	effectiveness.getUnallocatedControl(0, status);
+	for (int i = 0; i < 3; ++i) {
+		check(fabsf(status.unallocated_thrust[i] - (demand(i + 3) * 168.f - actual.force(i)) / 168.f) < 1e-6f,
+		      "fallback residual uses held observed tilt rather than centering command");
+	}
+	tilt_status_available = false;
+	const float held_command = output(5);
+	for (int i = 0; i < 300; ++i) {
+		effectiveness.updateSetpoint(demand, 0, output, minimum, maximum);
+		effectiveness.updateSetpointAfterSlew(.01f, 0, output, true);
+	}
+	check(fabsf(output(5) - held_command) < 1e-6f, "status loss retains fallback and holds unobserved servo motion");
+	tilt_status_available = true;
+	for (int i = 0; i < 300; ++i) {
+		input_tilt_status.timestamp = input_tilt_status.timestamp_sample = test_time + 1;
+		effectiveness.updateSetpoint(demand, 0, output, minimum, maximum);
+		effectiveness.updateSetpointAfterSlew(.01f, 0, output, true);
+	}
+	check(fabsf(output(5)) < 1e-6f, "fresh observations allow commanded centering to finish");
+	effectiveness.updateSetpointAfterSlew(.01f, 0, output, false);
+	// A stale previous-flight latch must not be accepted after rearming.
+	tilt_status_available = true;
+	effectiveness.updateSetpoint(demand, 0, output, minimum, maximum);
+	effectiveness.updateSetpointAfterSlew(.01f, 0, output, true);
+	effectiveness.updateSetpoint(demand, 0, output, minimum, maximum);
+	check(output(5) > .001f, "disarm clears allocator latch and rejects previous-flight messages");
+	tilt_status_available = false;
+	std::puts("PASS: monitor command publication, fallback centering, observed-angle residual, dropout latch and disarm epoch");
+}
+
 int main()
 {
 	test_zero_force_servo();
@@ -193,4 +275,5 @@ int main()
 	dynamic_effectiveness.updateSetpointAfterSlew(.01f, 0, output, false);
 	check(!published_status.armed && !published_status.prediction_enabled, "disarm invalidates dynamic prediction");
 	std::puts("PASS: vertical reaction/bank filtering, residuals, prediction labeling and disarm reset");
+	test_tilt_fallback();
 }

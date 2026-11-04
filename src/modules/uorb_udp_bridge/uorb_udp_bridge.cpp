@@ -29,7 +29,7 @@ using namespace time_literals;
 class UorbUdpBridge final : public ModuleBase<UorbUdpBridge>
 {
 public:
-	static constexpr unsigned GENERIC_TOPIC_COUNT{20};
+	static constexpr unsigned GENERIC_TOPIC_COUNT{21};
 	UorbUdpBridge() = default;
 	~UorbUdpBridge() override
 	{
@@ -512,7 +512,9 @@ private:
 			"estimator_status_flags",
 			"estimator_sensor_bias",
 			"estimator_innovations",
-			"estimator_innovation_test_ratios"
+			"estimator_innovation_test_ratios",
+			// Motion-based common-tilt observation and latched MC fallback.
+			"voliro_tilt_status"
 		};
 		static_assert(sizeof(names) / sizeof(names[0]) == GENERIC_TOPIC_COUNT,
 			      "generic topic count does not match topic registry");
@@ -595,7 +597,8 @@ private:
 		20_ms, 20_ms, 20_ms, 20_ms, 100_ms, 500_ms,
 		20_ms, 20_ms, 20_ms, 20_ms, 20_ms,
 		20_ms, 20_ms,
-		100_ms, 100_ms, 100_ms, 100_ms, 100_ms, 100_ms, 100_ms
+		100_ms, 100_ms, 100_ms, 100_ms, 100_ms, 100_ms, 100_ms,
+		20_ms
 	};
 	hrt_abstime _last_topic_send[GENERIC_TOPIC_COUNT]{};
 };

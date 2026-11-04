@@ -42,6 +42,7 @@ set(msg_files
 	VectorRateReference.msg
 	VectorRateControlStatus.msg
 	VectorActuatorStatus.msg
+	VoliroTiltStatus.msg
 	ActionRequest.msg
 	ActuatorArmed.msg
 	ActuatorControlsStatus.msg

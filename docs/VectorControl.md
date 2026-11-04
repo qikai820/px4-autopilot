@@ -5,6 +5,7 @@ Current Voliro T designs (2026-11-03):
 - [Control law and algorithm design](VoliroT_algorithm_design.md)
 - [Software design and interface contracts](VoliroT_software_design.md)
 - [Implementation and validation history](VoliroT_large_angle_control.md)
+- [Voliro T tilt monitoring and multicopter fallback](VoliroT_tilt_monitor.md)
 
 The Voliro new mode now supports an independent pitch target of +/-160 degrees,
 task-frame attitude feedback, angular-acceleration rate control, and constrained
@@ -59,8 +60,8 @@ body axes are FRD.
   optional independent roll/pitch on AUX1/AUX2 in manual position/altitude modes.
   Its default is zero and it has no effect in autonomous/Offboard modes.
 * Voliro T converts requested lateral force to roll; forward force is
-  normally assigned to the common-tilt mechanism or can drive body pitch using
-  the RC vector switch. Its allocator handles four front motors,
+  assigned to the common-tilt mechanism while AUX1 can independently command
+  body pitch. Its allocator handles four front motors,
   one reversible tail motor and one common tilt servo. It cannot independently
   produce body-Y force; that residual participates in position anti-windup.
   Its target rotation is `Rz(yaw) * Rx(bank) * Ry(independent_pitch)`.
@@ -74,16 +75,16 @@ body axes are FRD.
   reaction torque. Near 90-degree servo tilt, body-roll authority is limited
   by reaction torque, so simultaneous large moments may remain infeasible.
 * `RC_MAP_VECTOR_SW` and `RC_MAP_LEVEL_SW` assign calibrated RC channels (1–18;
-  0 leaves each switch unassigned). For Voliro T, when the vector switch is
-  assigned and on, Position, Position Slow and Hold derive pitch from the force
-  requested by the position controller, allowing forward/backward translation
-  with body pitch. The target is limited by the active position tilt limit and
-  follows `VT_PITCH_RATE`; the allocator can still use common tilt for force
-  tracking during transitions or when constrained. The independent AUX1 pitch
-  command is replaced in this mode. Switch off, leveling, invalid or stale RC
-  commands zero pitch while common tilt continues to supply forward force.
-  If the vector switch is unassigned, `VEC_AUX_ATT` and AUX1 retain independent
-  pitch control. For MorphQuad the switch enables its existing independent
+  0 leaves each switch unassigned). With `VEC_AUX_ATT=1`, Voliro T uses the vector
+  switch solely to enable AUX1 independent pitch in Position, Position Slow and
+  Hold. A normalized switch value above zero enables AUX1; zero or below commands
+  level pitch. The target is `AUX1 * VT_PITCH_MAX` and follows `VT_PITCH_RATE`
+  (plus reference acceleration limits in dynamics mode). The level switch has
+  higher priority: while on, it commands zero pitch even if AUX1 is nonzero and
+  the enable switch is on. Releasing level resumes the current AUX1 target when
+  enabled. Invalid/stale RC also commands zero pitch. If the enable switch is
+  unassigned, AUX1 remains available without it. The allocator continues to use
+  common tilt for force tracking. For MorphQuad the switch enables its existing independent
   attitude inputs; leveling returns both roll and pitch to zero. Leveling has
   priority; Voliro T roll still follows lateral force demand and heading is not
   leveled.
