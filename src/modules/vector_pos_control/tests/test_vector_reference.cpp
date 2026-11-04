@@ -14,7 +14,7 @@ int main()
 {
 	// Logical heading does not flip when independent pitch crosses vertical.
 	for (float heading : {-3.13f, -.3f, .8f, 3.13f}) {
-		for (int degrees = -120; degrees <= 120; ++degrees) {
+		for (int degrees = -160; degrees <= 160; ++degrees) {
 			const Quatf q = attitudeForForce(Vector3f(0.f, .03f, -.3f), heading, vector_control::voliro_t, .35f, math::radians(float(degrees)));
 			assert(fabsf(wrap_pi(forcePlaneHeading(q) - heading)) < 1e-5f);
 			assert(fabsf(wrap_pi(forcePlaneHeading(-q) - heading)) < 1e-5f);
@@ -75,7 +75,7 @@ int main()
 	float previous_pitch_rate = 0.f;
 
 	for (int k = 0; k < 12000; ++k) {
-		const float sign = (k / 1000) % 2 == 0 ? 1.f : -1.f;
+		const float sign = (k / 2000) % 2 == 0 ? 1.f : -1.f;
 		const Vector3f saturated_force(.03f, sign * .3f, -.3f);
 		assert(bounded.update(saturated_force, 0.f, 0.f, sign * 3.f, 1.f, .01f, settings, output));
 		const float observed_acceleration = (output.omega_ned - bounded_previous_omega).norm() / .01f;
@@ -90,6 +90,9 @@ int main()
 		const float pitch_rate = pitch_axis.dot(output.omega_ned);
 		assert(fabsf(pitch_rate - previous_pitch_rate) <= settings.pitch_acceleration * .01f + 1e-5f);
 		assert(fabsf(output.omega_ned(0) - bounded_previous_omega(0)) <= settings.bank_acceleration * .01f + 1e-5f);
+
+		if (k % 2000 == 1999) { assert(fabsf(output.pitch - sign * settings.pitch_limit) < 1e-4f); }
+
 		previous_pitch_rate = pitch_rate;
 		bounded_previous_omega = output.omega_ned;
 	}
@@ -139,17 +142,17 @@ int main()
 
 	for (float pitch_torque : {.2f, 20.f}) {
 		const auto solution = ::voliro_t::refitForTail(geometry, horizontal_force, Vector3f(0.f, pitch_torque, 0.f),
-				      0.f, 0.f, math::radians(120.f), M_PI_F);
+				      0.f, 0.f, math::radians(160.f), M_PI_F);
 		const auto achieved = ::voliro_t::allocateRollYaw(geometry, solution, {}, 0.f);
 		assert((achieved.force - horizontal_force).norm() <= .15f * horizontal_force.norm() + 1e-4f);
 		assert(achieved.torque(1) > 0.f && achieved.torque(1) <= pitch_torque);
 		const auto constrained = ::voliro_t::refitForTail(geometry, horizontal_force, Vector3f(0.f, pitch_torque, 0.f),
-					 0.f, 0.f, math::radians(120.f), .01f);
+					 0.f, 0.f, math::radians(160.f), .01f);
 		assert(fabsf(constrained.tilt) <= .01f && constrained.front_sum >= 0.f);
 	}
 	const auto upright = ::voliro_t::refitForTail(geometry, Vector3f(0.f, 0.f, -1.f), {}, 5.f, 0.f,
-			     math::radians(120.f), M_PI_F);
+			     math::radians(160.f), M_PI_F);
 	assert(fabsf(upright.tilt) < 1e-6f && upright.front_sum < 1e-6f);
-	printf("PASS: heading through +/-120, task axes, reference derivatives (max %.6f rad/s), force-plane consistency, reset, anti-windup and message epochs\n",
+	printf("PASS: heading through +/-160, task axes, reference derivatives (max %.6f rad/s), force-plane consistency, reset, anti-windup and message epochs\n",
 	       (double)max_kinematic_error);
 }

@@ -10,7 +10,7 @@ class AttitudeReference
 public:
 	struct Settings {
 		float bank_limit{math::radians(20.f)};
-		float pitch_limit{math::radians(120.f)};
+		float pitch_limit{math::radians(160.f)};
 		float pitch_rate{math::radians(20.f)};
 		float pitch_acceleration{math::radians(60.f)};
 		float bank_rate{math::radians(80.f)};
@@ -91,7 +91,12 @@ public:
 		// NAN means rate-only heading control. Integrate the filtered rate without
 		// continually relatching the measured Euler yaw.
 		const float heading_error = PX4_ISFINITE(heading_target) ? matrix::wrap_pi(heading_target - _heading.position) : 0.f;
-		advance(_heading, heading_error, yaw_ff, s.heading_rate, s.heading_acceleration, s.tracking_frequency, dt);
+		// Heading maneuvers need pitch/force recovery margin at the ends of the
+		// common-tilt envelope. Slow the heading reference near those endpoints;
+		// retain the full bank stabilization response.
+		const float heading_authority = math::constrain((s.pitch_limit - fabsf(_pitch.position)) / math::radians(20.f), .2f, 1.f);
+		advance(_heading, heading_error, yaw_ff, s.heading_rate * heading_authority,
+			s.heading_acceleration * heading_authority, s.tracking_frequency, dt);
 		_heading.position = matrix::wrap_pi(_heading.position);
 
 		const float cs = cosf(_heading.position), sn = sinf(_heading.position);

@@ -876,17 +876,24 @@ void VectorPositionControl::Run()
 			const bool user_hold = _vehicle_status.nav_state == vehicle_status_s::NAVIGATION_STATE_AUTO_LOITER;
 			const bool manual_position = _vehicle_status.nav_state == vehicle_status_s::NAVIGATION_STATE_POSCTL
 						     || _vehicle_status.nav_state == vehicle_status_s::NAVIGATION_STATE_POSITION_SLOW;
-			const bool voliro_pitch_allowed = voliro_airframe && _param_vector_aux_att.get() && control_update_success
-							  && (manual_position || user_hold) && !_vehicle_status.failsafe
-							  && _vehicle_control_mode.flag_armed && !_vehicle_land_detected.landed
-							  && !_vehicle_land_detected.ground_contact;
-			const bool voliro_input_valid = voliro_pitch_allowed && manual_fresh
-							&& manual.data_source == manual_control_setpoint_s::SOURCE_RC
+			const bool voliro_position_allowed = voliro_airframe && control_update_success
+							     && (manual_position || user_hold) && !_vehicle_status.failsafe
+							     && _vehicle_control_mode.flag_armed && !_vehicle_land_detected.landed
+							     && !_vehicle_land_detected.ground_contact;
+			const bool force_pitch_configured = _param_rc_map_vector_sw.get() > 0;
+			const bool rc_input_valid = manual_fresh && manual.data_source == manual_control_setpoint_s::SOURCE_RC;
+			const bool force_pitch_active = voliro_position_allowed && force_pitch_configured && switches_valid
+						&& vector_enabled && !level_requested && rc_input_valid;
+			const bool voliro_pitch_allowed = voliro_position_allowed && (_param_vector_aux_att.get() || force_pitch_configured);
+			const bool voliro_input_valid = voliro_pitch_allowed && _param_vector_aux_att.get() && rc_input_valid
 							&& _param_rc_map_aux1.get() > 0 && PX4_ISFINITE(manual.aux1);
-			const float pitch_demand = voliro_input_valid ? math::constrain(manual.aux1, -1.f, 1.f)
-						   * math::radians(_param_vt_pitch_max.get()) : 0.f;
-			const float pitch_target = vector_control::independentAttitudeTarget(voliro_input_valid && switches_valid,
-						   vector_enabled, level_requested, pitch_demand);
+			const float aux_pitch_demand = voliro_input_valid ? math::constrain(manual.aux1, -1.f, 1.f)
+						       * math::radians(math::constrain(_param_vt_pitch_max.get(), 0.f, 160.f)) : 0.f;
+			const float pitch_target = force_pitch_configured
+					   ? (force_pitch_active ? vector_control::pitchForForce(Vector3f(local_pos_sp.thrust),
+								local_pos_sp.yaw, _tilt_limit_slew_rate.getState()) : 0.f)
+					   : vector_control::independentAttitudeTarget(voliro_input_valid && switches_valid,
+							vector_enabled, level_requested, aux_pitch_demand);
 
 			if (!voliro_airframe || !_vehicle_control_mode.flag_armed || _vehicle_land_detected.landed) {
 				_voliro_pitch_setpoint = 0.f;
@@ -902,7 +909,11 @@ void VectorPositionControl::Run()
 			if (_dynamics_enabled && voliro_pitch_allowed) {
 				vector_control::AttitudeReference::Settings settings;
 				settings.bank_limit = math::constrain(_tilt_limit_slew_rate.getState(), 0.f, math::radians(80.f));
-				settings.pitch_limit = math::radians(math::constrain(_param_vt_pitch_max.get(), 0.f, 120.f));
+				settings.pitch_limit = math::radians(math::constrain(_param_vt_pitch_max.get(), 0.f, 160.f));
+
+				if (force_pitch_configured) {
+					settings.pitch_limit = math::max(settings.pitch_limit, settings.bank_limit);
+				}
 				settings.pitch_rate = math::radians(_param_vt_pitch_rate.get());
 				settings.pitch_acceleration = math::radians(_param_pitch_acc.get());
 				settings.bank_rate = math::radians(_param_bank_rate.get());

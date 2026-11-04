@@ -11,6 +11,7 @@
 #include <uORB/topics/vehicle_rates_setpoint.h>
 
 #include <matrix/matrix/math.hpp>
+#include "AttitudeDisplay.hpp"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -85,12 +86,16 @@ public:
 			 (unsigned long)_sent,
 			 (unsigned long)_bytes_sent, (unsigned long)_packet_splits, (unsigned long)_oversize_drops,
 			 (unsigned long)_send_errors, _last_errno);
+		PX4_INFO("attitude angles: %s (rad)", _airframe == vector_control::voliro_t
+			 ? "bank/independent pitch/force-plane heading" : "Euler roll/pitch/yaw");
 		return 0;
 	}
 
 	bool init()
 	{
 		_max_rate_param = param_find("UORB_UDP_MAX_HZ");
+		_airframe_param = param_find("CA_AIRFRAME");
+		update_attitude_convention();
 		update_rate_limit(false);
 
 		if (!configure(_address, _port, _requested_rate_hz)) { return false; }
@@ -118,6 +123,7 @@ public:
 
 			if (_parameter_update_sub.update(&parameter_update)) {
 				update_rate_limit(true);
+				update_attitude_convention();
 			}
 
 			publish_generic_topics();
@@ -365,12 +371,12 @@ private:
 		if (!strcmp(meta.o_name, "vehicle_attitude")) {
 			vehicle_attitude_s attitude{};
 			memcpy(&attitude, data, sizeof(attitude));
-			append_euler_angles(attitude.q);
+			append_attitude_angles(attitude.q);
 
 		} else if (!strcmp(meta.o_name, "vehicle_attitude_setpoint")) {
 			vehicle_attitude_setpoint_s attitude_setpoint{};
 			memcpy(&attitude_setpoint, data, sizeof(attitude_setpoint));
-			append_euler_angles(attitude_setpoint.q_d);
+			append_attitude_angles(attitude_setpoint.q_d);
 
 		} else if (!strcmp(meta.o_name, "vehicle_rates_setpoint")) {
 			vehicle_rates_setpoint_s rates_setpoint{};
@@ -381,12 +387,18 @@ private:
 		}
 	}
 
-	void append_euler_angles(const float q[4])
+	void update_attitude_convention()
 	{
-		const matrix::Eulerf euler{matrix::Quatf{q}};
-		field_numeric("roll", 0, 1, euler.phi());
-		field_numeric("pitch", 0, 1, euler.theta());
-		field_numeric("yaw", 0, 1, euler.psi());
+		int32_t airframe = 0;
+		_airframe = _airframe_param != PARAM_INVALID && param_get(_airframe_param, &airframe) == PX4_OK ? airframe : 0;
+	}
+
+	void append_attitude_angles(const float q[4])
+	{
+		const matrix::Vector3f angles = uorb_udp_bridge::attitudeDisplayAngles(matrix::Quatf(q), _airframe);
+		field_numeric("roll", 0, 1, angles(0));
+		field_numeric("pitch", 0, 1, angles(1));
+		field_numeric("yaw", 0, 1, angles(2));
 	}
 
 	static size_t primitive_size(const char *c_type)
@@ -565,6 +577,8 @@ private:
 	int _socket{-1}; sockaddr_in _dest{}; char _address[INET_ADDRSTRLEN] {"192.168.3.100"};
 	uint16_t _port{9870}; float _rate_hz{20.f}; float _requested_rate_hz{20.f}; float _max_rate_hz{20.f};
 	param_t _max_rate_param{PARAM_INVALID};
+	param_t _airframe_param{PARAM_INVALID};
+	int32_t _airframe{0};
 	uORB::Subscription _parameter_update_sub{ORB_ID(parameter_update)};
 	uint32_t _sent{0}; uint32_t _bytes_sent{0};
 	uint32_t _send_errors{0}; uint32_t _packet_splits{0}; uint32_t _oversize_drops{0};

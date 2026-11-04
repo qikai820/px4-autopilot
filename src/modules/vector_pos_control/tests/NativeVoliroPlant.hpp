@@ -44,6 +44,11 @@ public:
 		setCommands(commands, tilt);
 		assert(_fdm.Run());
 		q = orientation();
+		const matrix::Dcmf rotation(q);
+		const float independent_pitch = atan2f(-rotation(2, 0), rotation(2, 2));
+		const float displayed_pitch = _fdm.GetPropertyValue("fcs/voliro_t/independent-pitch-rad");
+		assert(fabsf(matrix::wrap_pi(displayed_pitch - independent_pitch)) < .01f);
+
 		const auto propagation = _fdm.GetPropagate();
 		const matrix::Vector3f next_omega(propagation->GetPQR(1), propagation->GetPQR(2), propagation->GetPQR(3));
 		const matrix::Vector3f next_velocity = matrix::Vector3f(propagation->GetVel(1), propagation->GetVel(2), propagation->GetVel(3)) * .3048f;
@@ -67,7 +72,7 @@ private:
 			_fdm.SetPropertyValue(property, commands[i]);
 		}
 
-		_fdm.SetPropertyValue("fcs/voliro_t/pitch-cmd-norm", tilt / math::radians(120.f));
+		_fdm.SetPropertyValue("fcs/voliro_t/pitch-cmd-norm", tilt / math::radians(160.f));
 	}
 	JSBSim::FGFDMExec _fdm;
 	float _dt;

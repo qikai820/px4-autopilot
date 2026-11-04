@@ -134,11 +134,12 @@ int main()
 {
 	test_tail_protection();
 	const voliro_t::Geometry g{.14f, .45f, 0.f, .64f, 39.5f, 10.f, .02f};
+
 	// A centered manual throttle requests zero force, but attitude/rate
 	// feedback can still request either sign of pitch torque before takeoff.
 	for (int pitch_sign = -1; pitch_sign <= 1; pitch_sign += 2) {
 		const auto idle = voliro_t::allocate(g, Vector3f{}, Vector3f(.01f, pitch_sign * .2f, -.01f),
-						   0.f, math::radians(120.f), math::radians(.9f));
+						     0.f, math::radians(120.f), math::radians(.9f));
 		check(fabsf(idle.tilt) < 1e-6f, "zero force with pitch correction keeps servo neutral");
 	}
 
@@ -157,6 +158,24 @@ int main()
 	}
 
 	const float weight = 5.04f * 9.80665f;
+	// A hard tilt stop must preserve feasible pitch damping even when force
+	// tracking has to give way. This protects recovery near independent +/-160.
+	const voliro_t::Geometry extreme{.09f, .45f, 0.f, .69f, 39.5f, 10.f, .02f, 6.f};
+	const float stop = math::radians(160.f);
+	const Vector3f extreme_force(weight * sinf(math::radians(165.f)), 0.f, -weight * cosf(math::radians(165.f)));
+	const auto priority = voliro_t::allocateForcePitch(extreme, extreme_force, Vector3f(0.f, -.3f, 0.f), stop, stop, .01f, true);
+	const auto priority_result = voliro_t::allocateRollYaw(extreme, priority, {}, 0.f);
+	check(fabsf(priority_result.torque(1) + .3f) < 1e-5f, "tilt-stop allocation preserves feasible pitch torque");
+	const auto wrapped = voliro_t::allocateForcePitch(extreme, Vector3f(-.1f, 0.f, 50.f), {}, stop, stop, .01f, true);
+	check(fabsf(wrapped.tilt - stop) < 1e-5f, "atan2 boundary stays at the nearby servo stop");
+
+	for (int j = 0; j < 1000; ++j) {
+		const voliro_t::ForcePitchSolution solution{stop, .05f * j, -2.f};
+		const auto saturated = voliro_t::allocateRollYaw(extreme, solution, Vector3f(.001f * j, 0.f, 0.f), 100.f);
+
+		for (int i = 0; i < 4; ++i) { check(PX4_ISFINITE(sqrtf(saturated.thrust[i])), "saturated rotor thrust remains physically nonnegative"); }
+	}
+
 	auto hover = voliro_t::allocate(g, Vector3f(0.f, 0.f, -weight), Vector3f{}, 0.f, math::radians(120.f), .1f);
 	check(fabsf(hover.thrust[4] - weight * .14f / .78f) < 1e-4f, "14 cm CG hover tail trim");
 	check(hover.torque.norm() < 1e-4f && fabsf(hover.force(2) + weight) < 1e-4f, "14 cm CG equilibrium wrench");

@@ -1,5 +1,9 @@
 # Voliro T 大角度姿态控制实现与验证
 
+设计入口：[控制律与算法设计](VoliroT_algorithm_design.md)、
+[软件设计与接口契约](VoliroT_software_design.md)。两份方案以当前源码为准，覆盖 ±160° 和 UDP 原字段显示约定。
+本文保留分阶段实现与验证记录；第 4 节表格为早期版本工况，±160° 扩展见第 5 节及软件方案第 9 节。
+
 本次修改给现有 `vector_pos_control → vector_att_control → vector_rate_control →
 ActuatorEffectivenessVoliroT` 增加 `VT_CTRL_MODE=1`。默认值为 0；新模式需要重启，
 三个控制模块的 `status` 会显示实际启动模式。当前交付完成了源码修改、本机闭环测试和
@@ -120,19 +124,21 @@ CA_AIRFRAME=17
 VEC_IXX=0.22  VEC_IYY=0.25  VEC_IZZ=0.43
 CA_CT_X=0.03  CA_CT_Y=0.45  CA_CT_Z=0  CA_CT_TAIL=0.75
 CA_CT_TMAX=39.5  CA_CT_T5MAX=10  CA_CT_T5RMAX=6  CA_CT_KM=0.02
-CA_CT_ANGLE=120  CA_CT_RATE=90  CA_R_REV=16
+CA_CT_ANGLE=160  CA_CT_RATE=90  CA_R_REV=16
 VEC_TQ_R=10  VEC_TQ_P=10  VEC_TQ_Y=10
 MPC_THR_HOVER=0.2942
 ```
 
 确认模型和归一化一致后设置 `VT_CTRL_MODE=1` 并重启。分别运行三个 vector 控制模块的
 `status`，均应显示 `Voliro dynamics: enabled (startup setting)`。
-`VT_PITCH_MAX` 仍默认 10°，不会因新模式自动放宽大角度范围；参考速率仍由 `VT_PITCH_RATE` 控制。
+`VT_PITCH_MAX` 的参数上限和控制硬限幅为 160°。19003 机架的新默认值为 160°，
+公共倾角 `CA_CT_ANGLE` 新默认值也为 160°；通用参数默认值仍为 10°。已有保存参数不会被
+set-default 覆盖，需要显式设置 `VT_PITCH_MAX=160` 和 `CA_CT_ANGLE=160`；参考速率由 `VT_PITCH_RATE` 控制。
 RC AUX1、向量开关、回平开关及允许模式沿用原实现。更改模式或几何不应在飞行中热切换。
 
 新模式初始增益：任务 bank/pitch/heading 为 2/2/1；角速度 P 为 8/12/8，
 I 为 1/0.3/1，D 为 0.3/0.3/0.3。它们是本次模型测试的起点，需在匹配模型的板上 HIL 中复测。
-保留公共机架示例原有几何、惯量和小角度默认范围，避免静默改变其他机型配置。
+保持机架示例原有几何和惯量；扩大角度范围不代表这些示例标定值适用于实际加载的模型。
 
 ## 4. 可复现验证
 
@@ -146,7 +152,7 @@ python3 src/modules/vector_pos_control/tests/runtime_smoke.py build/px4_sitl_vec
 CCACHE_DISABLE=1 make cuav_7-nano_volirot
 ```
 
-`run_tests.py` 覆盖旧 MC 行为等价、四元数正负号、俯仰 ±120° 的航向定义、±90° 任务轴映射、
+`run_tests.py` 覆盖旧 MC 行为等价、四元数正负号、俯仰 ±160° 的航向定义、±90° 任务轴映射、
 参考旋转求导、角度边界减速、力/姿态一致性、复位、时序配对、积分回算和尾桨重配。
 多速率闭环使用位置 100 Hz、姿态 200 Hz、角速度/分配 400 Hz，执行器包含斜率、反转保护、
 50–150 ms 电机滞后，惯量整体偏差 ±20%。覆盖 0、±60、±85、±90、±100° 保持，
@@ -186,3 +192,39 @@ python3 src/modules/vector_pos_control/tests/run_tests.py build/px4_sitl_vector 
 最终姿态 RMS ≤0.173°，位置 RMS ≤0.004 m，最终横向摆动未增长。
 所有参考/控制/分配测试、四种独立未解锁模块启动检查、SITL 和 CUAV 构建均通过。
 这些结果证明上述软件工况通过；传感器噪声、估计器、任务输入、板上时延、实测推力和实际飞行仍需验证。
+
+
+## 5. ±160° 扩展
+
+本轮在提交 `c2b96701f7` 的基础上扩展独立俯仰至 ±160°。RC 目标在旧/新模式均硬限幅到
+±160°，新参考模型与公共倾转的默认范围同步扩展。`VT_CTRL_MODE` 仍需显式启用并重启。
+在参考达到俯仰端点前 20° 内，航向速度及加速度限制逐步降到原值的 20%，保留横向稳定响应，
+为极限位置的俯仰恢复留出执行器余量。
+
+新模式分配到达机械角度限位时，优先满足可实现的俯仰力矩，再拟合合力；尾桨保护预演的
+重配也遵守该优先级。该限位分支可以产生超过请求力 15% 的力误差，完整残差继续反馈抗饱和。
+普通未到限位的尾桨重配仍保留原来的 15% 修正预算。`atan2` 的 ±180° 分支使用与当前舵机
+最近的角度表示，避免限位附近指令突然转向另一端。饱和反扭矩分配后逐电机推力作数值边界
+保护，避免浮点舍入产生微小负推力。
+
+JSBSim 的 data 与 ROMFS 两份 `VoliroTActuators.xml` 同步为：
+
+```text
+normalized input -1..+1 -> shared tilt -2.792526803190927..+2.792526803190927 rad
+                       -> -160..+160 deg
+```
+
+模型增加 `fcs/voliro_t/independent-pitch-rad` 和 `independent-pitch-deg` 供属性监视和 MCAP
+查看超过 ±90° 的独立俯仰。标准欧拉 theta 的定义保持不变；这里未修改 Flight Review/QGC 的标准欧拉角图。
+
+执行器映射、越界输入钳位和独立俯仰显示测试：
+
+```sh
+python3 Tools/tests/voliro_t_model/test_pitch_range.py \
+  /home/qikai820/src/jsbsim_realtime/data/aviation/aircraft/voliro_t \
+  /home/qikai820/src/px4_jsbsim/build/jsbsim_install \
+  /home/qikai820/src/jsbsim_realtime/data/aviation/systems
+```
+
+闭环回归增加 ±140°、±160° 保持、0 → ±160 → 0，以及 0 → +160 → −160 → 0 的连续过渡，
+包含大俯仰保持时的 20° 航向变化。沿用同样的误差和位置收敛判据。本机 JSBSim 测试仍然不等同于板上 HIL。

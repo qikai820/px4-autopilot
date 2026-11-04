@@ -78,7 +78,7 @@ private:
 };
 
 inline ForcePitchSolution allocateForcePitch(const Geometry &g, const matrix::Vector3f &force, const matrix::Vector3f &torque,
-		float previous_tilt, float angle_limit, float angle_step)
+		float previous_tilt, float angle_limit, float angle_step, bool pitch_priority = false)
 {
 	ForcePitchSolution r;
 	// The exact unconstrained force/pitch solution, before angular constraints:
@@ -95,11 +95,40 @@ inline ForcePitchSolution allocateForcePitch(const Geometry &g, const matrix::Ve
 	// torque. It must not turn atan2(0, negative v) into a 180-degree tilt
 	// request on arming. Center the servo at the normal slew rate instead.
 	const bool no_force = force.norm_squared() <= 1e-12f;
-	const float target = no_force || upright_lift_with_negative_front ? 0.f
-			     : ((fabsf(force(0)) + fabsf(v) > 1e-6f) ? atan2f(force(0), v) : previous_tilt);
+	float target = no_force || upright_lift_with_negative_front ? 0.f
+		       : ((fabsf(force(0)) + fabsf(v) > 1e-6f) ? atan2f(force(0), v) : previous_tilt);
+
+	if (pitch_priority && !no_force && !upright_lift_with_negative_front) {
+		// Crossing atan2's +/-180 boundary must not send the servo through zero.
+		target = previous_tilt + matrix::wrap_pi(target - previous_tilt);
+	}
+
 	r.tilt = math::constrain(math::constrain(target, -angle_limit, angle_limit),
 				 previous_tilt - angle_step, previous_tilt + angle_step);
 	const float sn = sinf(r.tilt), cs = cosf(r.tilt);
+
+	if (pitch_priority && fabsf(target) > angle_limit) {
+		// At a mechanical stop, enforce feasible pitch torque first, then fit
+		// force. A force-first compromise can leave a pitch bias that drives
+		// unbounded horizontal drift while the position integrator fights it.
+		const float moment_arm = g.z * sn + g.x * cs;
+
+		if (fabsf(moment_arm) > 1e-5f) {
+			const float s1 = (torque(1) - g.tail * tailMax(g, -1.f)) / moment_arm;
+			const float s2 = (torque(1) + g.tail * g.tail_max) / moment_arm;
+			const float lower = math::max(0.f, math::min(s1, s2));
+			const float upper = math::min(4.f * g.front_max, math::max(s1, s2));
+
+			if (lower <= upper) {
+				const matrix::Vector2f axis(sn, -cs - moment_arm / g.tail);
+				const matrix::Vector2f demand(force(0), force(2) - torque(1) / g.tail);
+				r.front_sum = math::constrain(axis.dot(demand) / axis.norm_squared(), lower, upper);
+				r.tail = math::constrain((moment_arm * r.front_sum - torque(1)) / g.tail, -tailMax(g, -1.f), g.tail_max);
+				return r;
+			}
+		}
+	}
+
 	// At the reachable angle, least-squares fit Fx,Fz,My. Scale moment by
 	// a characteristic arm length to avoid mixing N and N*m weights.
 	const float arm = g.x + g.tail;
@@ -137,6 +166,12 @@ inline Result allocateRollYaw(const Geometry &g, const ForcePitchSolution &solut
 	const float dl = reaction + dr;
 	r.thrust[0] = .5f * (right + dr); r.thrust[1] = .5f * (right - dr);
 	r.thrust[2] = .5f * (left + dl); r.thrust[3] = .5f * (left - dl);
+
+	// At a saturated reaction moment, float roundoff can put one rotor a few
+	// ulps below zero. Keep the public force solution inside physical bounds,
+	// including callers that convert thrust to command with sqrt(thrust).
+	for (int i = 0; i < 4; ++i) { r.thrust[i] = math::constrain(r.thrust[i], 0.f, g.front_max); }
+
 	r.thrust[4] = solution.tail;
 	forward(g, r);
 	return r;
@@ -163,10 +198,22 @@ inline ForcePitchSolution refitForTail(const Geometry &g, const matrix::Vector3f
 	front += correction;
 	const bool upright_lift_with_negative_front = force(2) < 0.f && front(1) < 0.f
 			&& fabsf(force(0)) < .25f * fabsf(force(2));
-	const float target = !upright_lift_with_negative_front && front.norm_squared() > 1e-10f ? atan2f(front(0), front(1)) : 0.f;
+	float target = !upright_lift_with_negative_front && front.norm_squared() > 1e-10f ? atan2f(front(0), front(1)) : 0.f;
+
+	if (!upright_lift_with_negative_front && front.norm_squared() > 1e-10f) { target = previous_tilt + matrix::wrap_pi(target - previous_tilt); }
+
 	result.tilt = math::constrain(math::constrain(target, -angle_limit, angle_limit),
 				      previous_tilt - angle_step, previous_tilt + angle_step);
 	result.front_sum = math::constrain(front.dot(matrix::Vector2f(sinf(result.tilt), cosf(result.tilt))), 0.f, 4.f * g.front_max);
+
+	if (fabsf(target) > angle_limit) {
+		const float moment_arm = g.z * sinf(result.tilt) + g.x * cosf(result.tilt);
+
+		if (fabsf(moment_arm) > 1e-5f) {
+			result.front_sum = math::constrain((torque(1) + g.tail * result.tail) / moment_arm, 0.f, 4.f * g.front_max);
+		}
+	}
+
 	return result;
 }
 

@@ -755,7 +755,7 @@ parameters:
             unit: deg
             min: 1.0
             max: 179.0
-            default: 120.0
+            default: 160.0
         CA_CT_RATE:
             description:
                 short: Common tilt slew rate

@@ -35,7 +35,7 @@ struct Metrics {
 // Position 100 Hz, attitude 200 Hz, gyro/allocation 400 Hz. The actuator model
 // has motor command lag, a physical servo rate and the real M5 reversal guard.
 static Metrics simulate(bool dynamics, float degrees, float motor_tau, float inertia_scale, bool transition, FILE *csv = nullptr,
-			float predicted_motor_tau = 0.f, bool asymmetric_tail = false, bool feedforward_loss = false)
+			float predicted_motor_tau = 0.f, bool asymmetric_tail = false, bool feedforward_loss = false, bool reverse_pitch = false)
 {
 	constexpr float dt = .0025f, mass = 5.04f, total_thrust = 168.f;
 	constexpr float gravity = CONSTANTS_ONE_G;
@@ -85,7 +85,7 @@ static Metrics simulate(bool dynamics, float degrees, float motor_tau, float ine
 	assert(reference.initialize(q, reference_settings.bank_limit));
 	float servo = pitch_sp;
 	const auto trim = voliro_t::allocate(geometry, Dcmf(qd).transpose() * force * total_thrust, {}, servo,
-					     math::radians(120.f), 10.f);
+					     math::radians(160.f), 10.f);
 	voliro_t::ActuatorDynamics plant;
 	voliro_t::ActuatorDynamics prediction;
 	plant.initialize(trim, geometry);
@@ -113,7 +113,8 @@ static Metrics simulate(bool dynamics, float degrees, float motor_tau, float ine
 
 	for (int k = 0; k < 30000; ++k) {
 		const float time = k * dt;
-		const float demanded_pitch = transition ? (time < 5.f || time > 50.f ? 0.f : target_pitch) : target_pitch;
+		const float demanded_pitch = transition ? (time < 5.f || time > 50.f ? 0.f : reverse_pitch
+					     && time >= 25.f ? -target_pitch : target_pitch) : target_pitch;
 		const float heading = transition && time >= 25.f && time <= 45.f ? math::radians(20.f) : 0.f;
 		const bool feedforward_available = !(feedforward_loss && time >= 20.f && time < 45.f);
 
@@ -171,7 +172,7 @@ static Metrics simulate(bool dynamics, float degrees, float motor_tau, float ine
 		}
 
 		const Vector3f body_force = Dcmf(q).transpose() * force * total_thrust;
-		auto solution = voliro_t::allocateForcePitch(geometry, body_force, torque, servo, math::radians(120.f), math::radians(90.f) * dt);
+		auto solution = voliro_t::allocateForcePitch(geometry, body_force, torque, servo, math::radians(160.f), math::radians(90.f) * dt, dynamics);
 		const float tail_request = voliro_t::tailCommand(geometry, solution.tail);
 
 		if (dynamics) {
@@ -181,7 +182,7 @@ static Metrics simulate(bool dynamics, float degrees, float motor_tau, float ine
 
 			if (fabsf(available_tail - solution.tail) > 1e-4f) {
 				solution = voliro_t::refitForTail(geometry, body_force, torque, available_tail, servo,
-								  math::radians(120.f), math::radians(90.f) * dt);
+								  math::radians(160.f), math::radians(90.f) * dt);
 			}
 		}
 
@@ -248,8 +249,9 @@ static Metrics simulate(bool dynamics, float degrees, float motor_tau, float ine
 
 	metrics.final_position = final_samples ? sqrtf(position_energy / final_samples) : INFINITY;
 	metrics.final_error = final_samples ? sqrtf(attitude_energy / final_samples) : INFINITY;
-	printf("%s pitch=%+.0f tau=%.3f J=%.2f transition=%d ff_loss=%d finite=%d peak=%.2fdeg final=%.3fdeg pos=%.3fm bank_early/late=%.2f/%.2fdeg\n",
-	       dynamics ? "dynamic" : "legacy", (double)degrees, (double)motor_tau, (double)inertia_scale, transition, feedforward_loss, metrics.finite,
+	printf("%s pitch=%+.0f tau=%.3f J=%.2f transition=%d ff_loss=%d reverse=%d finite=%d peak=%.2fdeg final=%.3fdeg pos=%.3fm bank_early/late=%.2f/%.2fdeg\n",
+	       dynamics ? "dynamic" : "legacy", (double)degrees, (double)motor_tau, (double)inertia_scale, transition, feedforward_loss, reverse_pitch,
+	       metrics.finite,
 	       (double)math::degrees(metrics.peak_error), (double)math::degrees(metrics.final_error), (double)metrics.final_position,
 	       (double)math::degrees(metrics.early_bank), (double)math::degrees(metrics.late_bank));
 	return metrics;
@@ -281,14 +283,17 @@ int main(int argc, char *argv[])
 		puts("Native JSBSim plant; current XML inertia/geometry, 6 N reverse tail; no network I/O");
 		simulate(false, 90.f, 0.f, 1.f, false);
 
-		for (float angle : {0.f, -100.f, -90.f, -85.f, 85.f, 90.f, 100.f}) {
+		for (float angle : {0.f, -160.f, -140.f, -100.f, -90.f, -85.f, 85.f, 90.f, 100.f, 140.f, 160.f}) {
 			requireStable(simulate(true, angle, 0.f, 1.f, false), false);
 		}
 		requireStable(simulate(true, 100.f, 0.f, 1.f, true), true);
 		requireStable(simulate(true, -100.f, 0.f, 1.f, true), true);
 		requireStable(simulate(true, 100.f, 0.f, 1.f, true, nullptr, 0.f, true, true), true, true);
 		requireStable(simulate(true, -100.f, 0.f, 1.f, true, nullptr, 0.f, true, true), true, true);
-		puts("PASS: native JSBSim holding and bidirectional transitions");
+		requireStable(simulate(true, 160.f, 0.f, 1.f, true), true);
+		requireStable(simulate(true, -160.f, 0.f, 1.f, true), true);
+		requireStable(simulate(true, 160.f, 0.f, 1.f, true, nullptr, 0.f, true, false, true), true);
+		puts("PASS: native JSBSim holding and bidirectional transitions through +/-160");
 		return 0;
 	}
 
@@ -305,7 +310,7 @@ int main(int argc, char *argv[])
 	simulate(false, 90.f, .1f, 1.f, false);
 	simulate(false, 90.f, .15f, 1.f, false);
 
-	for (float angle : {0.f, -100.f, -90.f, -85.f, -60.f, 60.f, 85.f, 90.f, 100.f}) {
+	for (float angle : {0.f, -160.f, -140.f, -100.f, -90.f, -85.f, -60.f, 60.f, 85.f, 90.f, 100.f, 140.f, 160.f}) {
 		requireStable(simulate(true, angle, .1f, 1.f, false), false);
 	}
 	requireStable(simulate(true, 100.f, .1f, 1.f, true), true);
@@ -330,5 +335,8 @@ int main(int argc, char *argv[])
 	requireStable(simulate(true, -100.f, .1f, 1.f, true, nullptr, .1f, true), true);
 	requireStable(simulate(true, 100.f, .1f, 1.f, true, nullptr, 0.f, true, true), true, true);
 	requireStable(simulate(true, -100.f, .1f, 1.f, true, nullptr, 0.f, true, true), true, true);
-	puts("PASS: multirate dynamics, motor lag, inertia mismatch, tail guard and asymmetric reverse thrust");
+	requireStable(simulate(true, 160.f, .1f, 1.f, true, nullptr, 0.f, true), true);
+	requireStable(simulate(true, -160.f, .1f, 1.f, true, nullptr, 0.f, true), true);
+	requireStable(simulate(true, 160.f, .1f, 1.f, true, nullptr, 0.f, true, false, true), true);
+	puts("PASS: multirate dynamics, motor lag, inertia mismatch, tail guard and asymmetric reverse thrust through +/-160");
 }

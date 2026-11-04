@@ -76,6 +76,21 @@ int main()
 
 	auto mq = vector_control::attitudeForForce(force, .3f, 16, .6f); assert(fabsf(Eulerf(mq).phi()) < 1e-5f);
 	assert(fabsf(Eulerf(mq).theta()) < 1e-5f);
+	// Force-derived pitch points body -Z along the requested force at any heading.
+	for (float heading : {-.8f, 0.f, .8f}) {
+		for (float forward : {-.12f, 0.f, .12f}) {
+			const Vector3f request(cosf(heading) * forward - sinf(heading) * .08f,
+					       sinf(heading) * forward + cosf(heading) * .08f, -.35f);
+			const float pitch = vector_control::pitchForForce(request, heading, .6f);
+			const Quatf attitude = vector_control::attitudeForForce(request, heading, 17, .6f, pitch);
+			const Vector3f body_force = vector_control::toBody(request, attitude);
+			assert(fabsf(body_force(0)) < 1e-5f && fabsf(body_force(1)) < 1e-5f);
+			if (forward > 0.f) { assert(pitch < 0.f); }
+			if (forward < 0.f) { assert(pitch > 0.f); }
+		}
+	}
+	assert(fabsf(vector_control::pitchForForce(Vector3f(1.f, 0.f, -.1f), 0.f, .2f) + .2f) < 1e-5f);
+	assert(vector_control::pitchForForce(Vector3f(1.f, 0.f, 0.f), 0.f, .2f) == 0.f);
 	auto vt = vector_control::attitudeForForce(force, .3f, 17, .6f); assert(fabsf(vector_control::toBody(force, vt)(1)) < 1e-5f);
 	for (float yaw : {-.8f, 0.f, .8f}) {
 		for (float pitch : {math::radians(-10.f), 0.f, math::radians(10.f)}) {
@@ -87,11 +102,11 @@ int main()
 // Compare rotations, not Euler angles (Euler yaw/roll are undefined at 90 deg).
 	for (float yaw : {-.8f, 0.f, .8f}) {
 		Quatf previous;
-		for (int degrees = -120; degrees <= 120; ++degrees) {
+		for (int degrees = -160; degrees <= 160; ++degrees) {
 			const Quatf q = vector_control::attitudeForForce(force, yaw, 17, .6f, math::radians(float(degrees)));
 			assert(q.isAllFinite());
 			assert(fabsf(vector_control::toBody(force, q)(1)) < 1e-5f);
-			if (degrees > -120) { assert((previous.inversed() * q).canonical().imag().norm() < .01f); }
+			if (degrees > -160) { assert((previous.inversed() * q).canonical().imag().norm() < .01f); }
 			previous = q;
 		}
 	}

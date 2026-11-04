@@ -37,7 +37,7 @@ void ActuatorEffectivenessVoliroT::updateSetpoint(const Vector<float, NUM_AXES> 
 
 	if (force.isAllFinite() && torque.isAllFinite()) {
 		auto solution = voliro_t::allocateForcePitch(g, force, torque, math::constrain(_tilt, -angle, angle), angle,
-				math::radians(math::max(_rate.get(), 1.f)) * dt);
+				math::radians(math::max(_rate.get(), 1.f)) * dt, _dynamics_enabled);
 		tail_request = math::constrain(voliro_t::tailCommand(g, solution.tail), minimum(4), maximum(4));
 
 		if (_dynamics_enabled && force.norm_squared() > 1e-8f) {

@@ -17,6 +17,22 @@ inline float forcePlaneHeading(const matrix::Quatf &q)
 	return y.xy().norm_squared() > .01f ? atan2f(-y(0), y(1)) : NAN;
 }
 
+// Align body Z with the requested force in the banked force plane.
+// The vector allocator can still use rotor tilt to track force during transients.
+inline float pitchForForce(const matrix::Vector3f &force, float heading, float tilt_limit)
+{
+	if (!force.isAllFinite() || !PX4_ISFINITE(heading) || !PX4_ISFINITE(tilt_limit) || force(2) >= -1e-5f) {
+		return 0.f;
+	}
+
+	const float longitudinal = cosf(heading) * force(0) + sinf(heading) * force(1);
+	const float lateral = -sinf(heading) * force(0) + cosf(heading) * force(1);
+	const float limit = math::constrain(tilt_limit, 0.f, math::radians(80.f));
+	const float bank = math::constrain(atan2f(lateral, -force(2)), -limit, limit);
+	const float banked_vertical = -lateral * sinf(bank) + force(2) * cosf(bank);
+	return math::constrain(atan2f(-longitudinal, -banked_vertical), -limit, limit);
+}
+
 // Force is normalized by total installed thrust, in world NED. Body axes are FRD.
 inline matrix::Quatf attitudeForForce(const matrix::Vector3f &force, float yaw, int airframe, float tilt_limit,
 				      float pitch_setpoint = 0.f)

@@ -1,5 +1,19 @@
 # MC-derived vector flight control
 
+Current Voliro T designs (2026-11-03):
+
+- [Control law and algorithm design](VoliroT_algorithm_design.md)
+- [Software design and interface contracts](VoliroT_software_design.md)
+- [Implementation and validation history](VoliroT_large_angle_control.md)
+
+The Voliro new mode now supports an independent pitch target of +/-160 degrees,
+task-frame attitude feedback, angular-acceleration rate control, and constrained
+allocation with pitch recovery priority at a tilt stop. `VT_CTRL_MODE=0` remains
+the default legacy branch; use the design documents for current mode-specific
+behavior, parameter matching, and evidence limits. UDP derived attitude fields
+for airframe 17 now use bank/independent-pitch/force-plane-heading in radians;
+standard uORB quaternions and MAVLink attitude semantics remain unchanged.
+
 The complete position, attitude and rate modules were copied from this project's
 MC implementation at `ca010df2d9396582e641aefa7f034649e4b1f759`.
 The original MC module source and controller libraries are unchanged.
@@ -44,35 +58,46 @@ body axes are FRD.
   independent level/yaw attitude in task-controlled modes. `VEC_AUX_ATT=1` enables
   optional independent roll/pitch on AUX1/AUX2 in manual position/altitude modes.
   Its default is zero and it has no effect in autonomous/Offboard modes.
-* Voliro T converts requested lateral force to roll, while forward force is
-  assigned to the common-tilt mechanism. Its allocator handles four front motors,
+* Voliro T converts requested lateral force to roll; forward force is
+  normally assigned to the common-tilt mechanism or can drive body pitch using
+  the RC vector switch. Its allocator handles four front motors,
   one reversible tail motor and one common tilt servo. It cannot independently
   produce body-Y force; that residual participates in position anti-windup.
   Its target rotation is `Rz(yaw) * Rx(bank) * Ry(independent_pitch)`.
   Bank comes from lateral/world-vertical force, before independent pitch, so
   a forward-force correction cannot cause a near-90-degree bank jump when
   projected body-Z force crosses zero. `MPC_TILTMAX_AIR` limits bank separately
-  from `VT_PITCH_MAX` (up to 120 degrees). At vertical pitch the reference yaw
+  from `VT_PITCH_MAX` (up to 160 degrees). At vertical pitch the reference yaw
   describes the force-plane orientation; Euler heading/roll are singular and
   must not be used to judge quaternion continuity. The common-tilt allocator
   already transforms roll/yaw moments into arm-force difference and rotor
   reaction torque. Near 90-degree servo tilt, body-roll authority is limited
   by reaction torque, so simultaneous large moments may remain infeasible.
 * `RC_MAP_VECTOR_SW` and `RC_MAP_LEVEL_SW` assign calibrated RC channels (1–18;
-  0 leaves each switch unassigned). A positive channel value enables attitude
-  changes or requests leveling respectively. When vector control is switched off, or leveling is requested, the independent
-  attitude target slews to zero at `VT_PITCH_RATE`. Leveling overrides the enable
-  switch. For Voliro T this affects pitch,
-  while roll still follows lateral force demand; MorphQuad uses both roll and
-  pitch. The switches only operate where `VEC_AUX_ATT` is active. Invalid or
-  stale RC input removes the independent command. Heading is not leveled.
+  0 leaves each switch unassigned). For Voliro T, when the vector switch is
+  assigned and on, Position, Position Slow and Hold derive pitch from the force
+  requested by the position controller, allowing forward/backward translation
+  with body pitch. The target is limited by the active position tilt limit and
+  follows `VT_PITCH_RATE`; the allocator can still use common tilt for force
+  tracking during transitions or when constrained. The independent AUX1 pitch
+  command is replaced in this mode. Switch off, leveling, invalid or stale RC
+  commands zero pitch while common tilt continues to supply forward force.
+  If the vector switch is unassigned, `VEC_AUX_ATT` and AUX1 retain independent
+  pitch control. For MorphQuad the switch enables its existing independent
+  attitude inputs; leveling returns both roll and pitch to zero. Leveling has
+  priority; Voliro T roll still follows lateral force demand and heading is not
+  leveled.
 * The attitude copy uses full shortest-path quaternion feedback and publishes the
   actual body-rate target in `vehicle_rates_setpoint`. Yaw feedforward retains the
   original world-Z convention. Acro/body-rate inputs bypass the attitude loop.
-* The rate copy retains PID, measured-acceleration D, yaw filtering, integral
+* In legacy mode, the rate copy retains PID, measured-acceleration D, yaw filtering, integral
   handling and allocation saturation feedback. `VEC_GYRO_FF` optionally adds
   `omega cross (J omega)` in consistent units; it defaults to zero until inertia
   and torque scales are calibrated.
+  In Voliro dynamics mode (`VT_CTRL_MODE=1`), feedback and integral are angular
+  acceleration, `J` and `omega cross (J omega)` produce physical torque, and the
+  low-pass filter acts on the rotor-reaction mode in allocation. See the designs
+  above for reference feedforward, freshness, and anti-windup details.
 
 `vector_force_setpoint.xyz` is normalized world force. The rate controller rotates
 it using the latest attitude at IMU update rate. It only uses this force while
@@ -82,13 +107,19 @@ Attitude and rate Offboard inputs continue to use their body-frame thrust.
 Both standard wrench topics retain normalized semantics. Each vector allocator
 converts force using its total installed maximum thrust and torque using
 `VEC_TQ_R/P/Y` (N m per normalized unit). Allocation residuals are converted back
-to the same normalized units. Rate gains and torque scales must be tuned as a
-pair. Old physical `GAC_*` gains cannot be copied numerically into `VC_*` gains.
+to the same normalized units. Legacy rate gains and torque scales must be tuned
+as a pair. New-mode `VT_RATE_*` gains have angular-acceleration semantics and use
+calibrated inertia before torque normalization. Old physical `GAC_*` gains cannot
+be copied numerically into `VC_*` or `VT_RATE_*` gains.
 
 Control parameter groups:
 
 * `VPC_*`: independent copied position and velocity feedback gains.
 * `VC_*`: independent copied attitude/rate gains, rate limits and Acro settings.
+  New mode replaces attitude/rate feedback gains with `VT_*`, while continuing
+  to use applicable `VC_*` rate limits and manual/Acro settings.
+* `VT_*`: Voliro dynamics mode, task gains, acceleration control, reference limits
+  and actuator prediction settings. Mode changes require reboot.
 * `MPC_*`: shared task constraints, throttle calibration, takeoff/land limits.
 * `VEC_*`: vector geometry options, inertia, normalized torque reference scales.
 * `CA_MQ_*`: MorphQuad geometry/actuators.
