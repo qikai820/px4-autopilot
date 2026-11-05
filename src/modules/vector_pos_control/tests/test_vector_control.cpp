@@ -23,42 +23,42 @@ template<class C> void setup(C &c)
 
 static void test_voliro_aux_enable_and_level()
 {
-	// Actual user mapping: CH6 supplies AUX1, CH9 enables it, CH8 levels.
+	// Independent AUX helper and reference regression; fixed mode disables this path at the caller.
 	float channels[18] {};
 	channels[7] = -1.f;
 	channels[8] = 1.f;
 	const float limit = math::radians(120.f);
 	auto switches = vector_control::attitudeSwitches(9, 8, true, channels, 18, 18);
 	for (float aux : {-.812f, -.5f, 0.f, .5f, .868f}) {
-		assert(fabsf(vector_control::voliroIndependentPitchTarget(true, switches, aux, limit) - aux * limit) < 1e-6f);
+		assert(fabsf(vector_control::voliroIndependentPitchTarget(true, switches, 9, aux, limit) - aux * limit) < 1e-6f);
 	}
-	assert(vector_control::voliroIndependentPitchTarget(true, switches, 2.f, limit) == limit);
-	assert(vector_control::voliroIndependentPitchTarget(true, switches, -2.f, limit) == -limit);
-	assert(vector_control::voliroIndependentPitchTarget(false, switches, .5f, limit) == 0.f);
-	assert(vector_control::voliroIndependentPitchTarget(true, switches, NAN, limit) == 0.f);
-	assert(vector_control::voliroIndependentPitchTarget(true, switches, .5f, NAN) == 0.f);
+	assert(vector_control::voliroIndependentPitchTarget(true, switches, 9, 2.f, limit) == limit);
+	assert(vector_control::voliroIndependentPitchTarget(true, switches, 9, -2.f, limit) == -limit);
+	assert(vector_control::voliroIndependentPitchTarget(false, switches, 9, .5f, limit) == 0.f);
+	assert(vector_control::voliroIndependentPitchTarget(true, switches, 9, NAN, limit) == 0.f);
+	assert(vector_control::voliroIndependentPitchTarget(true, switches, 9, .5f, NAN) == 0.f);
 
 	for (float enable : {-1.f, 0.f, 1.f}) {
 		for (float level : {-1.f, 0.f, 1.f}) {
 			channels[8] = enable; channels[7] = level;
 			switches = vector_control::attitudeSwitches(9, 8, true, channels, 18, 18);
 			const float expected = enable > 0.f && level <= 0.f ? .5f * limit : 0.f;
-			assert(vector_control::voliroIndependentPitchTarget(true, switches, .5f, limit) == expected);
+			assert(vector_control::voliroIndependentPitchTarget(true, switches, 9, .5f, limit) == expected);
 		}
 	}
 	channels[8] = 1.f; channels[7] = -1.f;
 	for (auto invalid : {vector_control::attitudeSwitches(9, 8, false, channels, 18, 18),
 			     vector_control::attitudeSwitches(9, 8, true, channels, 8, 18)}) {
-		assert(vector_control::voliroIndependentPitchTarget(true, invalid, .5f, limit) == 0.f);
+		assert(vector_control::voliroIndependentPitchTarget(true, invalid, 9, .5f, limit) == 0.f);
 	}
 	channels[7] = NAN;
 	switches = vector_control::attitudeSwitches(9, 8, true, channels, 18, 18);
-	assert(vector_control::voliroIndependentPitchTarget(true, switches, .5f, limit) == 0.f);
+	assert(vector_control::voliroIndependentPitchTarget(true, switches, 9, .5f, limit) == 0.f);
 	channels[7] = -1.f;
 	switches = vector_control::attitudeSwitches(0, 8, true, channels, 18, 18);
-	assert(vector_control::voliroIndependentPitchTarget(true, switches, .5f, limit) == .5f * limit);
+	assert(vector_control::voliroIndependentPitchTarget(true, switches, 0, .5f, limit) == .5f * limit);
 
-	// Both reference paths must slew through enable -> disable -> re-enable ->
+	// Both reference paths must slew through AUX -> fixed -> AUX ->
 	// level override -> release -> RC loss, with AUX1 still away from center.
 	for (bool dynamics : {false, true}) {
 		vector_control::AttitudeReference reference;
@@ -72,7 +72,7 @@ static void test_voliro_aux_enable_and_level()
 			channels[8] = stage == 1 ? -1.f : 1.f;
 			channels[7] = stage == 3 ? 1.f : -1.f;
 			switches = vector_control::attitudeSwitches(9, 8, stage != 5, channels, 18, 18);
-			const float target = vector_control::voliroIndependentPitchTarget(true, switches, aux, limit);
+			const float target = vector_control::voliroIndependentPitchTarget(true, switches, 9, aux, limit);
 			const float previous = pitch;
 			if (dynamics) {
 				vector_control::AttitudeReference::Output out;
@@ -85,11 +85,34 @@ static void test_voliro_aux_enable_and_level()
 			if (k % 400 == 399) { assert(fabsf(pitch - target) < math::radians(1.f)); }
 		}
 	}
-	puts("PASS: Voliro CH9 AUX1 enable, CH8 level priority/release, unassigned switch, RC loss and both reference paths");
+	puts("PASS: switch-on vector AUX / switch-off fixed selection, AUX limits, level priority/release, unassigned switch, RC loss and both reference paths");
+}
+
+static void test_fixed_tilt_selection()
+{
+	float channels[2] = {-1.f, -1.f};
+	auto switches = vector_control::attitudeSwitches(1, 2, true, channels, 2, 2);
+	assert(vector_control::voliroFixedTiltRequested(1, switches, true, true, false, false));
+	assert(!vector_control::voliroFixedTiltRequested(0, switches, true, true, false, false));
+	assert(!vector_control::voliroFixedTiltRequested(1, switches, false, true, false, false));
+	assert(!vector_control::voliroFixedTiltRequested(1, switches, true, false, false, false));
+	assert(!vector_control::voliroFixedTiltRequested(1, switches, true, true, true, false));
+	assert(!vector_control::voliroFixedTiltRequested(1, switches, true, true, false, true));
+	channels[1] = 1.f;
+	switches = vector_control::attitudeSwitches(1, 2, true, channels, 2, 2);
+	assert(vector_control::voliroFixedTiltRequested(1, switches, true, true, false, false)); // LEVEL cannot re-enable the servo
+	channels[1] = -1.f; channels[0] = 1.f;
+	switches = vector_control::attitudeSwitches(1, 2, true, channels, 2, 2);
+	assert(!vector_control::voliroFixedTiltRequested(1, switches, true, true, false, false));
+	channels[0] = 1.f;
+	switches = vector_control::attitudeSwitches(1, 2, false, channels, 2, 2);
+	assert(!vector_control::voliroFixedTiltRequested(1, switches, true, true, false, false));
+	puts("PASS: manual fixed-servo selection, unmapped/RC loss/level/armed/control/failsafe/fault gating");
 }
 
 int main()
 {
+	test_fixed_tilt_selection();
 	test_voliro_aux_enable_and_level();
 // Verify mapping, channel bounds, leveling priority and loss behavior.
 	float channels[] = {1.f, -1.f};

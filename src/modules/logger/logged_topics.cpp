@@ -162,12 +162,12 @@ void LoggedTopics::add_default_topics()
 	add_topic("vehicle_magnetometer", 200);
 	add_topic("vehicle_rates_setpoint", 20);
 	add_topic("vector_force_setpoint", 20);
-	add_optional_topic("vector_attitude_reference", 20);
-	add_optional_topic("vector_rate_reference", 20);
-	add_optional_topic("vector_rate_control_status", 20);
-	add_optional_topic("vector_actuator_status", 20);
 	// Keep a pending subscription even if the controller has not advertised yet.
 	// Optional topics are permanently skipped when absent at logger startup.
+	add_topic("vector_attitude_reference", 20);
+	add_topic("vector_rate_reference", 20);
+	add_topic("vector_rate_control_status", 20);
+	add_topic("vector_actuator_status", 20);
 	add_topic("voliro_tilt_status", 20);
 	add_topic("vehicle_roi", 1000);
 	add_topic("vehicle_status");

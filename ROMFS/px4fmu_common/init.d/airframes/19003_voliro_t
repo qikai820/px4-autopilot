@@ -33,7 +33,7 @@ param set-default CA_CT_TMAX 39.5
 param set-default CA_CT_T5MAX 10.0
 param set-default CA_CT_KM 0.02
 param set-default CA_CT_ANGLE 160.0
-param set-default CA_CT_RATE 90.0
+param set-default CA_CT_RATE 200.0
 # M5 command protection: full -1..+1 sweep in >=0.4 s, Schmitt thresholds,
 # 40 ms sustained reverse request and 80 ms of exact zero before reversal.
 # Initial bench settings, not calibrated motor stopping times.

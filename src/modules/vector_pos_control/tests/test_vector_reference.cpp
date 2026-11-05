@@ -10,8 +10,47 @@
 using namespace matrix;
 using namespace vector_control;
 
+static void test_servo_limited_pitch()
+{
+	// A fast pitch setting must respect a slow installed tilt mechanism;
+	// a faster servo must still preserve the pilot's lower pitch setting.
+	for (float servo_rate : {5.f, 30.f, 90.f}) {
+		const float expected_rate = math::radians(servo_rate < 60.f ? servo_rate : 60.f);
+		AttitudeReference reference;
+		AttitudeReference::Settings settings;
+		settings.pitch_rate = voliroPitchRateLimit(60.f, servo_rate);
+		assert(fabsf(settings.pitch_rate - expected_rate) < 1e-6f);
+		assert(reference.initialize(Quatf{}, settings.bank_limit));
+		AttitudeReference::Output output;
+		constexpr float dt = .01f;
+		float previous_pitch = 0.f, previous_rate = 0.f;
+
+		// Positive/negative large-angle demands and leveling all use the same
+		// reference, including acceleration-consistent angular feedforward.
+		for (float target : {math::radians(100.f), math::radians(-100.f), 0.f}) {
+			float peak_rate = 0.f;
+
+			for (int k = 0; k < 6000; ++k) {
+				assert(reference.update(Vector3f(0.f, 0.f, -.3f), 0.f, 0.f, target, 1.f, dt, settings, output));
+				assert(fabsf(output.pitch - previous_pitch) <= expected_rate * dt + 1e-6f);
+				assert(fabsf(output.omega_ned(1)) <= expected_rate + 1e-6f);
+				assert(fabsf(output.omega_ned(1) - previous_rate) <= settings.pitch_acceleration * dt + 1e-5f);
+				peak_rate = math::max(peak_rate, fabsf(output.omega_ned(1)));
+				previous_pitch = output.pitch; previous_rate = output.omega_ned(1);
+			}
+
+			assert(fabsf(output.pitch - target) < 1e-4f);
+			assert(peak_rate > .95f * expected_rate);
+		}
+	}
+
+	assert(fabsf(voliroPitchRateLimit(20.f, 90.f) - math::radians(20.f)) < 1e-6f);
+	puts("PASS: servo-limited pitch reference, reversals, leveling, acceleration and feedforward at 5/30/90 deg/s");
+}
+
 int main()
 {
+	test_servo_limited_pitch();
 	// Logical heading does not flip when independent pitch crosses vertical.
 	for (float heading : {-3.13f, -.3f, .8f, 3.13f}) {
 		for (int degrees = -160; degrees <= 160; ++degrees) {

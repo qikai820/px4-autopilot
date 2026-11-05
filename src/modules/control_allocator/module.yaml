@@ -749,8 +749,15 @@ parameters:
             default: 0.02
         CA_CT_ANGLE:
             description:
-                short: Common tilt angle limit
-                long: Voliro T geometry. CA_CT parameter keys are retained for compatibility with existing saved configurations.
+                short: Common tilt mechanism maximum angle
+                long: |
+                  Maximum rotation from zero of the installed Voliro T tilt mechanism, after any gearing.
+                  This is the one-sided angle: normalized Servo1 commands -1 and +1 represent
+                  -CA_CT_ANGLE and +CA_CT_ANGLE. It is also the allocator's mechanical angle limit.
+                  Calibrate PWM endpoints, zero position and direction with the assigned output channel's
+                  existing MIN, CENT, MAX and REV parameters. The output channel maps the normalized
+                  command linearly on each side of zero. No separate gear ratio is needed when this
+                  angle is measured at the mechanism. This is not the total end-to-end travel.
             type: float
             unit: deg
             min: 1.0
@@ -758,13 +765,21 @@ parameters:
             default: 160.0
         CA_CT_RATE:
             description:
-                short: Common tilt slew rate
-                long: Voliro T geometry. CA_CT parameter keys are retained for compatibility with existing saved configurations.
+                short: Common tilt servo speed limit
+                long: |
+                  Maximum common-tilt command speed for Voliro T, in mechanical tilt degrees per second.
+                  Set to the measured installed mechanism speed under load (angle moved divided by time).
+                  Rate limiting uses the physical angle before conversion to normalized Servo1 command
+                  by CA_CT_ANGLE and the output channel's calibrated PWM mapping.
+                  Independent body pitch and return to level are also limited to min(VT_PITCH_RATE, CA_CT_RATE)
+                  in both control modes. This value is also used by tilt prediction and monitoring.
+                  A command speed limit does not measure actual servo motion or remove actuator lag.
             type: float
             unit: deg/s
             min: 1.0
             max: 1000.0
-            default: 90.0
+            decimal: 1
+            default: 200.0
     - group: MorphQuad
       definitions:
         CA_MQ_L:

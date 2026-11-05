@@ -33,6 +33,7 @@ private:
 	uORB::Subscription _tilt_status_sub{ORB_ID(voliro_tilt_status)};
 	bool _dynamics_enabled{false};
 	bool _armed{false}, _fallback_latched{false};
+	bool _fixed_tilt_active{false};
 	bool _fallback_observation_fresh{false};
 	float _fallback_tilt{0.f};
 	uint64_t _last_disarmed{0};

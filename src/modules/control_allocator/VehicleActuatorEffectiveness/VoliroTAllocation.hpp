@@ -146,33 +146,34 @@ inline ForcePitchSolution allocateForcePitch(const Geometry &g, const matrix::Ve
 	return r;
 }
 
-/** Fixed observed tilt: prioritize feasible pitch torque, then fit force.
- * Used only by the latched multicopter fallback, never by normal allocation. */
+/** Fixed tilt: prioritize the closest feasible pitch torque, then fit force.
+ * Used by multicopter fallback and fixed-servo allocation. */
 inline ForcePitchSolution allocateAtTilt(const Geometry &g, const matrix::Vector3f &force,
 				       const matrix::Vector3f &torque, float tilt)
 {
 	const float sn = sinf(tilt), cs = cosf(tilt), h = g.z * sn + g.x * cs;
-	float lower = 0.f, upper = 4.f * g.front_max;
+	const float max_front = 4.f * g.front_max;
+	const float min_pitch = math::min(0.f, h * max_front) - g.tail * g.tail_max;
+	const float max_pitch = math::max(0.f, h * max_front) + g.tail * tailMax(g, -1.f);
+	// Keep pitch recovery priority even beyond the attainable moment envelope.
+	// Reverting to force-weighted least squares here can reverse the tail and
+	// produce the opposite pitch moment precisely when damping is saturated.
+	const float pitch = math::constrain(torque(1), min_pitch, max_pitch);
+	float lower = 0.f, upper = max_front;
 
-	if (fabsf(h) > 1e-5f) {
-		const float s1 = (torque(1) - g.tail * tailMax(g, -1.f)) / h;
-		const float s2 = (torque(1) + g.tail * g.tail_max) / h;
-		lower = math::max(lower, math::min(s1, s2));
-		upper = math::min(upper, math::max(s1, s2));
-
-	} else if (-torque(1) / g.tail < -tailMax(g, -1.f) || -torque(1) / g.tail > g.tail_max) {
-		lower = upper + 1.f;
+	if (fabsf(h) > 1e-8f) {
+		const float s1 = (pitch - g.tail * tailMax(g, -1.f)) / h;
+		const float s2 = (pitch + g.tail * g.tail_max) / h;
+		// Clamped pitch guarantees a feasible interval; also absorb roundoff
+		// at the actuator corners so it cannot reopen the force-first branch.
+		lower = math::constrain(math::min(s1, s2), 0.f, max_front);
+		upper = math::constrain(math::max(s1, s2), lower, max_front);
 	}
 
-	if (lower <= upper) {
-		const matrix::Vector2f axis(sn, -cs - h / g.tail);
-		const matrix::Vector2f demand(force(0), force(2) - torque(1) / g.tail);
-		const float sum = math::constrain(axis.dot(demand) / math::max(axis.norm_squared(), 1e-6f), lower, upper);
-		return {tilt, sum, math::constrain((h * sum - torque(1)) / g.tail, -tailMax(g, -1.f), g.tail_max)};
-	}
-
-	// An infeasible moment is reported as shortfall rather than expanding limits.
-	return allocateForcePitch(g, force, torque, tilt, M_PI_F, 0.f);
+	const matrix::Vector2f axis(sn, -cs - h / g.tail);
+	const matrix::Vector2f demand(force(0), force(2) - pitch / g.tail);
+	const float sum = math::constrain(axis.dot(demand) / math::max(axis.norm_squared(), 1e-6f), lower, upper);
+	return {tilt, sum, math::constrain((h * sum - pitch) / g.tail, -tailMax(g, -1.f), g.tail_max)};
 }
 
 inline ForcePitchSolution refitAtTiltForTail(const Geometry &g, const matrix::Vector3f &force,

@@ -3,7 +3,8 @@
  *
  * MorphQuad uses AUX1/AUX2 for roll/pitch in manual position/altitude modes.
  * Voliro T uses RC AUX1 for body pitch in Position, Position Slow and Hold.
- * RC_MAP_VECTOR_SW optionally gates AUX1; switch off commands level pitch.
+ * When RC_MAP_VECTOR_SW is assigned and off, fixed-servo multicopter mode
+ * overrides independent AUX1 pitch; switch on permits AUX1 pitch.
  * RC_MAP_AUX1 must select a calibrated RC channel for Voliro T.
  * Standard roll/pitch stick trajectory generation remains in FlightModeManager.
  * @boolean
@@ -28,6 +29,10 @@ PARAM_DEFINE_FLOAT(VT_PITCH_MAX, 10.0f);
 
 /**
  * Voliro T body pitch setpoint slew rate
+ *
+ * Independent pitch and return to level use the smaller of this value and
+ * CA_CT_RATE, the calibrated common-tilt servo speed. Dynamics mode also
+ * applies VT_PITCH_ACC and tracking-authority limits.
  *
  * @unit deg/s
  * @min 1.0
@@ -78,13 +83,17 @@ PARAM_DEFINE_FLOAT(VT_TILT_ERR, 10.0f);
 PARAM_DEFINE_FLOAT(VT_TILT_T, 0.5f);
 
 /**
- * RC channel for independent vector attitude enable
+ * RC channel for vector / fixed-servo multicopter mode
  *
- * For Voliro T with VEC_AUX_ATT enabled, above center permits AUX1 independent
- * body pitch in Position, Position Slow and Hold; at or below center commands
- * level pitch. RC_MAP_LEVEL_SW has priority and can always command level pitch.
- * 0 leaves AUX1 enabled without this switch. Invalid/stale RC commands level
- * pitch. MorphQuad retains its independent attitude enable switch behavior.
+ * For Voliro T, above center selects vector allocation and AUX1 independent
+ * pitch when VEC_AUX_ATT is enabled. At or below center selects ordinary
+ * multicopter position/altitude control. It first returns to level using vector
+ * allocation, then centers/holds the common-tilt servo after body/rotor recovery.
+ * RC_MAP_LEVEL_SW levels independent pitch in vector mode; it does not change
+ * the mode or re-enable the servo in ordinary multicopter mode.
+ * This mode does not require VEC_AUX_ATT. 0 retains independent AUX1 behavior.
+ * RC loss/failsafe releases manual fixed mode; a tilt-fault fallback stays latched.
+ * MorphQuad retains its independent attitude enable switch behavior.
  *
  * @min 0
  * @max 18
@@ -96,8 +105,9 @@ PARAM_DEFINE_INT32(RC_MAP_VECTOR_SW, 0);
  * RC channel for independent vector attitude leveling
  *
  * A calibrated channel above its center commands zero independent roll and
- * pitch, overriding RC_MAP_VECTOR_SW. Voliro T roll remains controlled by
- * lateral position demand. 0 disables the switch.
+ * pitch, overriding AUX input in vector mode. Voliro T mode selection is
+ * unchanged; ordinary multicopter mode keeps the servo fixed. Voliro T roll
+ * remains controlled by lateral position demand. 0 disables the switch.
  *
  * @min 0
  * @max 18

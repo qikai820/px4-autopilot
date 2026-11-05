@@ -75,19 +75,24 @@ body axes are FRD.
   reaction torque. Near 90-degree servo tilt, body-roll authority is limited
   by reaction torque, so simultaneous large moments may remain infeasible.
 * `RC_MAP_VECTOR_SW` and `RC_MAP_LEVEL_SW` assign calibrated RC channels (1–18;
-  0 leaves each switch unassigned). With `VEC_AUX_ATT=1`, Voliro T uses the vector
-  switch solely to enable AUX1 independent pitch in Position, Position Slow and
-  Hold. A normalized switch value above zero enables AUX1; zero or below commands
-  level pitch. The target is `AUX1 * VT_PITCH_MAX` and follows `VT_PITCH_RATE`
-  (plus reference acceleration limits in dynamics mode). The level switch has
-  higher priority: while on, it commands zero pitch even if AUX1 is nonzero and
-  the enable switch is on. Releasing level resumes the current AUX1 target when
-  enabled. Invalid/stale RC also commands zero pitch. If the enable switch is
-  unassigned, AUX1 remains available without it. The allocator continues to use
-  common tilt for force tracking. For MorphQuad the switch enables its existing independent
-  attitude inputs; leveling returns both roll and pitch to zero. Leveling has
-  priority; Voliro T roll still follows lateral force demand and heading is not
-  leveled.
+  0 leaves each switch unassigned). On Voliro T, a mapped vector switch above
+  center selects vector allocation and AUX1 independent pitch when
+  `VEC_AUX_ATT=1` and `RC_MAP_AUX1` is mapped. At or below center it selects
+  ordinary multicopter position/altitude control: vector allocation first returns
+  independent pitch to level at the smaller of `VT_PITCH_RATE` and `CA_CT_RATE`.
+  Only after measured/commanded pitch and rotor tilt are within 5 degrees and
+  body rates below 10 deg/s for 0.2 s does fixed-tilt allocation center/hold the
+  servo. Body attitude then produces horizontal motion.
+  Position/velocity feedback and trajectory generation remain active;
+  `MPC_TILTMAX_AIR` and the normal position thrust limits apply. This ordinary
+  multicopter mode does not require `VEC_AUX_ATT`. The level switch commands
+  zero independent pitch in vector mode, without changing the selected mode or
+  re-enabling the servo in ordinary multicopter mode. With the vector switch
+  unassigned, `VEC_AUX_ATT` and AUX1 retain independent pitch. Invalid/stale RC,
+  failsafe or leaving position control releases the manual mode. A detected
+  tilt fault still takes precedence and remains latched until disarm. For
+  MorphQuad the original independent attitude-switch behavior remains.
+  See [fixed-servo operation and validation](VoliroT_fixed_tilt.md).
 * The attitude copy uses full shortest-path quaternion feedback and publishes the
   actual body-rate target in `vehicle_rates_setpoint`. Yaw feedforward retains the
   original world-Z convention. Acro/body-rate inputs bypass the attitude loop.
@@ -140,6 +145,24 @@ pitch correction turning `atan2(0, negative)` into a tilt-limit command immediat
 after arming at minimum throttle. A nonzero force request still uses normal
 allocation. Neutral is `actuator_servos.control[0] = 0`, which is a servo-center
 PWM command, not an absence of PWM pulses.
+
+`CA_CT_ANGLE` is the installed mechanism's one-sided maximum angle after
+gearing, not the servo shaft angle or total end-to-end travel. The allocator
+limits the physical angle and converts it to `Servo1 = angle / CA_CT_ANGLE`.
+Use the assigned output channel's existing MIN/CENT/MAX/REV parameters for PWM
+calibration; the channel interpolates linearly on each side of zero. The 19003
+default uses MAIN7 (`PWM_MAIN_MIN7`, `PWM_MAIN_CENT7`, `PWM_MAIN_MAX7`, with
+direction in the `PWM_MAIN_REV` bitmask). No additional gear-ratio parameter is
+needed when the mechanism angle is measured directly. See
+[angle/PWM calibration](VoliroT_large_angle_control.md#机构角度与-pwm-标定).
+
+Set `CA_CT_RATE` (deg/s, initial default 200) to the measured speed of the installed
+tilt mechanism under load. It limits the common-tilt command in both control
+modes. Independent body pitch and return to level use
+`min(VT_PITCH_RATE, CA_CT_RATE)`; dynamics mode additionally applies reference
+acceleration and tracking-authority limits. `vector_pos_control status` reports
+the servo speed limit and effective independent pitch rate. Bank stabilization
+keeps its existing limits. See [tilt speed calibration](VoliroT_large_angle_control.md#倾转舵机速度标定).
 
 Existing saved `GC_*`, `GPC_*`, `GAC_*` parameters do not tune the new controllers.
 Airframe defaults use the new namespace. Selecting a different airframe does not

@@ -3,6 +3,7 @@
 #include <drivers/dshot/DShot3D.hpp>
 #include <cstdio>
 #include <cstdlib>
+#include <initializer_list>
 #include <limits>
 using namespace matrix;
 
@@ -130,9 +131,63 @@ static void test_tail_protection()
 	puts("PASS: M5 slew, hysteresis, reversal confirmation, zero dwell, reset, variable-dt and DShot neutral stop");
 }
 
+static void test_fixed_tilt_pitch_saturation()
+{
+	const voliro_t::Geometry log_geometry{.09f, .45f, 0.f, .69f, 39.5f, 10.f, .02f};
+	// HITL log at 49.24 s: the nose is rotating up while the controller asks
+	// for more nose-down torque than the tail can supply. Force tracking must
+	// not turn that request into a nose-up tail reversal.
+	const Vector3f force(38.7072f, 0.f, 70.3584f), torque(0.f, -7.234f, 0.f);
+	const auto recovery = voliro_t::allocateAtTilt(log_geometry, force, torque, math::radians(45.242f));
+	const auto achieved = voliro_t::allocateRollYaw(log_geometry, recovery, {}, 0.f);
+	check(fabsf(achieved.torque(1) + 6.9f) < 1e-4f, "infeasible fallback torque retains maximum nose-down authority");
+	check(fabsf(recovery.tail - 10.f) < 1e-4f, "nose-down saturation must not request tail reversal");
+
+	// Use independently reconstructed actuator corners as the attainable
+	// torque envelope, including inverted rotors and asymmetric tail thrust.
+	for (float degrees : {-160.f, -90.f, 0.f, 48.f, 90.f, 160.f}) {
+		for (float z : {-.05f, 0.f, .05f}) {
+			for (float reverse_max : {0.f, 6.f}) {
+				const voliro_t::Geometry g{.09f, .45f, z, .69f, 39.5f, 10.f, .02f, reverse_max};
+				const float tilt = math::radians(degrees);
+				float min_pitch = INFINITY, max_pitch = -INFINITY;
+
+				for (float front : {0.f, g.front_max}) {
+					for (float tail : {-voliro_t::tailMax(g, -1.f), g.tail_max}) {
+						voliro_t::Result corner;
+						corner.tilt = tilt;
+						for (int i = 0; i < 4; ++i) { corner.thrust[i] = front; }
+						corner.thrust[4] = tail;
+						voliro_t::forward(g, corner);
+						min_pitch = math::min(min_pitch, corner.torque(1));
+						max_pitch = math::max(max_pitch, corner.torque(1));
+					}
+				}
+
+				for (const Vector3f &demand : {Vector3f(40.f, 0.f, 120.f), Vector3f(-80.f, 0.f, -50.f), Vector3f{}}) {
+					for (float pitch : {min_pitch - 1.f, min_pitch - .001f, min_pitch + .001f,
+							    max_pitch - .001f, max_pitch + .001f, max_pitch + 1.f}) {
+						const auto solution = voliro_t::allocateAtTilt(g, demand, Vector3f(0.f, pitch, 0.f), tilt);
+						const auto result = voliro_t::allocateRollYaw(g, solution, {}, 0.f);
+						const float expected = math::constrain(pitch, min_pitch, max_pitch);
+						check(PX4_ISFINITE(result.torque(1)) && fabsf(result.torque(1) - expected) < 1e-4f,
+						      "fixed-tilt allocation stays at closest feasible pitch torque across saturation");
+						check(solution.front_sum >= 0.f && solution.front_sum <= 4.f * g.front_max
+						      && solution.tail >= -voliro_t::tailMax(g, -1.f) && solution.tail <= g.tail_max,
+						      "pitch saturation respects asymmetric actuator bounds");
+					}
+				}
+			}
+		}
+	}
+
+	puts("PASS: fixed-tilt fallback pitch authority across infeasible demands, inverted rotors and asymmetric tail limits");
+}
+
 int main()
 {
 	test_tail_protection();
+	test_fixed_tilt_pitch_saturation();
 	const voliro_t::Geometry g{.14f, .45f, 0.f, .64f, 39.5f, 10.f, .02f};
 
 	// A centered manual throttle requests zero force, but attitude/rate

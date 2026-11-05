@@ -71,6 +71,7 @@
 #include <uORB/topics/vector_actuator_status.h>
 #include <lib/vector_control/VectorAttitudeReference.hpp>
 #include <lib/vector_control/VoliroTiltMonitor.hpp>
+#include <lib/vector_control/VoliroFixedTiltTransition.hpp>
 #include <uORB/topics/voliro_tilt_status.h>
 #include <uORB/topics/vehicle_acceleration.h>
 #include <uORB/topics/vector_force_setpoint.h>
@@ -164,6 +165,9 @@ private:
 	vector_control::VoliroTiltMonitor _tilt_monitor;
 	matrix::Quatf _last_attitude_target{};
 	bool _last_attitude_target_valid{false};
+	bool _fixed_tilt_mode{false}, _fixed_tilt_transition{false};
+	vector_control::VoliroFixedTiltTransition _fixed_tilt_handover;
+	float _fixed_tilt_angle{0.f};
 	uint8_t _fallback_reset_counter{0};
 	float _morph_roll_setpoint{0.f};
 	float _morph_pitch_setpoint{0.f};

@@ -201,8 +201,9 @@ Mission/RTL/Offboard 等任务入口被复用，不等于这些模式都已开�
 | VT_CTRL_MODE | 0 默认旧模式；1 新模式，重启生效 |
 | VEC_AUX_ATT / RC_MAP_AUX1 | 独立姿态开关与 RC 通道 |
 | VT_PITCH_MAX | 上限/硬限幅 160°；通用默认 10°，19003 新默认 160° |
-| CA_CT_ANGLE | 公共舵机归一化对应角度；当前新默认 160°，必须匹配模型 |
-| VT_PITCH_RATE / VT_PITCH_ACC | 独立 pitch 速率/加速度，默认 20°/s、60°/s² |
+| CA_CT_ANGLE | 传动后机构相对零位的单侧最大旋转角；当前新默认 160°，同时用于限位和归一化。PWM 使用输出通道的 MIN/CENT/MAX/REV 标定 |
+| CA_CT_RATE | 倾转机构指令速度上限，初始默认 200°/s；按实际带载机构角速度标定，同时约束独立 pitch 参考 |
+| VT_PITCH_RATE / VT_PITCH_ACC | 独立 pitch 速率/加速度，默认 20°/s、60°/s²；速率取 min(VT_PITCH_RATE, CA_CT_RATE) |
 | VT_BANK_RATE / VT_BANK_ACC | bank 参考上限 80°/s、360°/s² |
 | VT_HEAD_RATE / VT_HEAD_ACC | heading 参考上限 45°/s、90°/s²；端点调度后可进一步减小 |
 | VT_REF_FREQ | 参考模型频率 8 rad/s，非实测闭环带宽 |

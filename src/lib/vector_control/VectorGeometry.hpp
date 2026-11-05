@@ -7,6 +7,13 @@ namespace vector_control
 constexpr int morphquad = 16;
 constexpr int voliro_t = 17;
 
+/** Independent pitch reference rate in rad/s, with parameter inputs in deg/s.
+ * Reserve the common tilt's ability to follow the body pitch maneuver. */
+inline float voliroPitchRateLimit(float pitch_rate_deg_s, float servo_rate_deg_s)
+{
+	return math::radians(math::min(math::max(pitch_rate_deg_s, 1.f), math::max(servo_rate_deg_s, 1.f)));
+}
+
 /** Heading of Rz(heading)*Rx(bank)*Ry(pitch), defined through pitch +/-90
  * provided force-plane bank stays away from +/-90. */
 inline float forcePlaneHeading(const matrix::Quatf &q)

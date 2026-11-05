@@ -10,3 +10,5 @@ bool enabled
 bool armed
 bool observation_valid
 bool fallback # latched until disarm, including when monitoring is disabled
+bool fixed_tilt # RC-selected MC position control; center and hold servo, reversible (fault fallback has priority)
+bool fixed_tilt_pending # RC requested MC; vector allocation retained while returning body/rotors to level

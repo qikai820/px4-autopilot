@@ -64,6 +64,15 @@ VectorPositionControl::~VectorPositionControl()
 int VectorPositionControl::print_status()
 {
 	PX4_INFO("Voliro dynamics: %s (startup setting)", _dynamics_enabled ? "enabled" : "disabled");
+	PX4_INFO("RC fixed tilt: %s", _fixed_tilt_mode ? "enabled" : "disabled");
+	PX4_INFO("RC return to level: %s", _fixed_tilt_handover.pending() ? "pending" : "inactive");
+
+	if (_param_vector_airframe.get() == vector_control::voliro_t) {
+		PX4_INFO("Tilt servo limit: %.1f deg/s, independent pitch limit: %.1f deg/s",
+			 (double)_param_servo_rate.get(),
+			 (double)math::degrees(vector_control::voliroPitchRateLimit(_param_vt_pitch_rate.get(), _param_servo_rate.get())));
+	}
+
 	PX4_INFO("Tilt monitor: %s, observation: %s, fallback: %s, tilt: %.1f deg, error: %.1f deg",
 		 _param_tilt_monitor_enable.get() ? "enabled" : "disabled", _tilt_monitor.valid() ? "valid" : "unknown",
 		 _tilt_monitor.fault() ? "latched" : "inactive", (double)math::degrees(_tilt_monitor.observed()),
@@ -126,7 +135,45 @@ void VectorPositionControl::updateVoliroTiltMonitor(hrt_abstime now)
 				    "Tilt fault: MC pos/vel fallback (err {1:.1} deg)", tilt_error_degrees);
 	}
 
-	_control.setMulticopterFallback(_tilt_monitor.fault());
+	rc_channels_s rc{};
+	const bool rc_fresh = _vector_rc_sub.copy(&rc) && !rc.signal_lost && rc.timestamp != 0
+			     && rc.timestamp <= now && now - rc.timestamp < 500_ms;
+	const auto switches = vector_control::attitudeSwitches(_param_rc_map_vector_sw.get(),
+			     _param_rc_map_level_sw.get(), rc_fresh, rc.channels, rc.channel_count,
+			     sizeof(rc.channels) / sizeof(rc.channels[0]));
+	const bool fixed_requested = vector_control::voliroFixedTiltRequested(_param_rc_map_vector_sw.get(), switches,
+			       _vehicle_control_mode.flag_armed, _vehicle_control_mode.flag_multicopter_position_control_enabled,
+			       _vehicle_status.failsafe, _tilt_monitor.fault());
+	const bool actuator_fresh = actuator.armed && actuator.timestamp != 0 && actuator.timestamp <= now
+				    && now - actuator.timestamp < 100_ms && PX4_ISFINITE(actuator.tilt_command);
+	// Keep vector allocation while returning to level. Only the completed
+	// handover may publish fixed_tilt and ask the allocator to center the servo.
+	if (_tilt_monitor.valid()) {
+		_fixed_tilt_angle = _tilt_monitor.observed();
+
+	} else if (actuator_fresh) {
+		_fixed_tilt_angle = actuator.prediction_enabled ? actuator.tilt_estimate : actuator.tilt_command;
+	}
+
+	const bool handover_ready = _vehicle_land_detected.landed
+				    || (actuator_fresh && _last_attitude_target_valid
+					&& vector_control::VoliroTiltMonitor::fresh(now, _vehicle_attitude.timestamp_sample)
+					&& vector_control::VoliroTiltMonitor::fresh(now, _vehicle_angular_velocity.timestamp_sample)
+					&& vector_control::VoliroFixedTiltTransition::ready(Quatf(_vehicle_attitude.q),
+							_last_attitude_target, Vector3f(_vehicle_angular_velocity.xyz),
+							_fixed_tilt_angle, actuator.tilt_command));
+	const bool fixed_tilt = _fixed_tilt_handover.update(fixed_requested, handover_ready, now);
+
+	if (fixed_tilt != _fixed_tilt_mode) {
+		_control.resetIntegralXY();
+		_attitude_reference.reset();
+		_reference_shortfall.zero();
+		_voliro_pitch_setpoint = 0.f;
+		_fixed_tilt_transition = true;
+	}
+
+	_fixed_tilt_mode = fixed_tilt;
+	_control.setMulticopterFallback(_tilt_monitor.fault() || _fixed_tilt_mode);
 	voliro_tilt_status_s status{};
 	status.timestamp = now;
 	status.timestamp_sample = sample.acceleration_timestamp;
@@ -139,6 +186,8 @@ void VectorPositionControl::updateVoliroTiltMonitor(hrt_abstime now)
 	status.armed = _vehicle_control_mode.flag_armed;
 	status.observation_valid = _tilt_monitor.valid();
 	status.fallback = _tilt_monitor.fault();
+	status.fixed_tilt = _fixed_tilt_mode;
+	status.fixed_tilt_pending = _fixed_tilt_handover.pending();
 	_tilt_status_pub.publish(status);
 }
 
@@ -964,7 +1013,7 @@ void VectorPositionControl::Run()
 			const bool user_hold = _vehicle_status.nav_state == vehicle_status_s::NAVIGATION_STATE_AUTO_LOITER;
 			const bool manual_position = _vehicle_status.nav_state == vehicle_status_s::NAVIGATION_STATE_POSCTL
 						     || _vehicle_status.nav_state == vehicle_status_s::NAVIGATION_STATE_POSITION_SLOW;
-			const bool voliro_position_allowed = voliro_airframe && !_tilt_monitor.fault() && control_update_success
+			const bool voliro_position_allowed = voliro_airframe && !_tilt_monitor.fault() && !_fixed_tilt_mode && control_update_success
 							     && (manual_position || user_hold) && !_vehicle_status.failsafe
 							     && _vehicle_control_mode.flag_armed && !_vehicle_land_detected.landed
 							     && !_vehicle_land_detected.ground_contact;
@@ -973,13 +1022,16 @@ void VectorPositionControl::Run()
 			const bool voliro_input_valid = voliro_pitch_allowed && rc_input_valid
 							&& _param_rc_map_aux1.get() > 0 && PX4_ISFINITE(manual.aux1);
 			const float pitch_target = vector_control::voliroIndependentPitchTarget(voliro_input_valid, switches,
-						   manual.aux1, math::radians(math::constrain(_param_vt_pitch_max.get(), 0.f, 160.f)));
+						   _param_rc_map_vector_sw.get(), manual.aux1, math::radians(math::constrain(_param_vt_pitch_max.get(), 0.f, 160.f)));
+			// Keep both legacy and dynamic independent pitch references within
+			// the calibrated common-tilt servo speed, including return to level.
+			const float pitch_rate = vector_control::voliroPitchRateLimit(_param_vt_pitch_rate.get(), _param_servo_rate.get());
 
-			if (!voliro_airframe || _tilt_monitor.fault() || !_vehicle_control_mode.flag_armed || _vehicle_land_detected.landed) {
+			if (!voliro_airframe || _tilt_monitor.fault() || _fixed_tilt_mode || !_vehicle_control_mode.flag_armed || _vehicle_land_detected.landed) {
 				_voliro_pitch_setpoint = 0.f;
 
 			} else {
-				const float max_step = math::radians(_param_vt_pitch_rate.get()) * dt;
+				const float max_step = pitch_rate * dt;
 				_voliro_pitch_setpoint += math::constrain(pitch_target - _voliro_pitch_setpoint, -max_step, max_step);
 			}
 
@@ -990,7 +1042,7 @@ void VectorPositionControl::Run()
 				vector_control::AttitudeReference::Settings settings;
 				settings.bank_limit = math::constrain(_tilt_limit_slew_rate.getState(), 0.f, math::radians(80.f));
 				settings.pitch_limit = math::radians(math::constrain(_param_vt_pitch_max.get(), 0.f, 160.f));
-				settings.pitch_rate = math::radians(_param_vt_pitch_rate.get());
+				settings.pitch_rate = pitch_rate;
 				settings.pitch_acceleration = math::radians(_param_pitch_acc.get());
 				settings.bank_rate = math::radians(_param_bank_rate.get());
 				settings.bank_acceleration = math::radians(_param_bank_acc.get());
@@ -1048,13 +1100,17 @@ void VectorPositionControl::Run()
 				_reference_shortfall.zero();
 			}
 
-			if (voliro_airframe && _tilt_monitor.fault()) {
-				const float thrust_angle = vector_control::voliroFallbackThrustAngle(_tilt_monitor.observed(),
+			if (voliro_airframe && (_tilt_monitor.fault() || _fixed_tilt_mode || _fixed_tilt_transition)) {
+				const float tilt = _tilt_monitor.fault() ? _tilt_monitor.observed() : _fixed_tilt_mode ? _fixed_tilt_angle : 0.f;
+				const float thrust_angle = vector_control::voliroFallbackThrustAngle(tilt,
 							   _param_front_x.get(), _param_front_z.get(), _param_tail_arm.get());
 				const Quatf target = Quatf(attitude_setpoint.q_d) * Quatf(Eulerf(0.f, thrust_angle, 0.f));
 				const Quatf previous = _last_attitude_target_valid ? _last_attitude_target : Quatf(_vehicle_attitude.q);
 				vector_control::slewFallbackAttitude(previous, target,
 						math::radians(_param_bank_rate.get()) * dt).copyTo(attitude_setpoint.q_d);
+				_fixed_tilt_transition = AxisAnglef((Quatf(attitude_setpoint.q_d).inversed() * target).canonical()).angle() > 1e-4f;
+				// A slewed transition no longer matches the paired dynamic reference.
+				reference_message.valid = false;
 			}
 
 			// Optional MorphQuad independent attitude inputs; standard flight-task stick mapping remains active.

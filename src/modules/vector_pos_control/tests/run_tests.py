@@ -58,6 +58,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("build", type=Path)
     parser.add_argument("--csv", type=Path)
+    parser.add_argument("--fixed-only", action="store_true", help="Run fixed-servo closed loops and large-angle handover regressions")
     parser.add_argument("--sweep", action="store_true")
     parser.add_argument("--jsbsim-model", type=Path)
     parser.add_argument("--jsbsim-prefix", type=Path)
@@ -87,11 +88,13 @@ def main():
     tests = Path(__file__).resolve().parent
     with tempfile.TemporaryDirectory(prefix="vector-control-test-") as temp:
         executable = str(Path(temp) / "test")
-        for name in ("test_vector_control", "test_vector_reference", "test_voliro_tilt_monitor", "test_voliro_dynamics"):
+        names = ("test_voliro_fixed_tilt", "test_voliro_fixed_tilt_transition") if args.fixed_only else ("test_vector_control", "test_vector_reference", "test_voliro_tilt_monitor", "test_voliro_dynamics", "test_voliro_fixed_tilt", "test_voliro_fixed_tilt_transition")
+        for name in names:
             subprocess.run(common + [str(tests / (name + ".cpp")), "-o", executable], check=True, cwd=root)
             arguments = [str(args.csv.resolve())] if name == "test_voliro_dynamics" and args.csv else []
             subprocess.run([executable] + arguments, check=True)
         if args.sweep:
+            subprocess.run(common + [str(tests / "test_voliro_dynamics.cpp"), "-o", executable], check=True, cwd=root)
             rows = []
             for gains in itertools.product([6, 8, 12], [0, .3, 1], [.3, .6], [1, 2]):
                 output = subprocess.check_output([executable, "--tune", *map(str, gains)], text=True)
@@ -104,7 +107,7 @@ def main():
             model = Path(temp) / "model"
             parameters = native_fixture(args.jsbsim_model.resolve(), model)
             prefix = args.jsbsim_prefix.resolve()
-            native_cmd = common + [str(tests / "test_voliro_dynamics.cpp"), "-DVECTOR_TEST_JSBSIM",
+            native_cmd = common + [str(tests / ("test_voliro_fixed_tilt.cpp" if args.fixed_only else "test_voliro_dynamics.cpp")), "-DVECTOR_TEST_JSBSIM",
                                    "-I" + str(prefix / "include/JSBSim"), str(prefix / "lib/libJSBSim.a"),
                                    "-lexpat", "-lpthread", "-o", executable]
             subprocess.run(native_cmd, check=True, cwd=root)

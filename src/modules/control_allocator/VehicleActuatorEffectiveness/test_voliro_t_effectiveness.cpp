@@ -1,9 +1,11 @@
 #include "ActuatorEffectivenessVoliroT.hpp"
 #include <cstdio>
 #include <cstdlib>
+#include <initializer_list>
 static bool dynamics_mode = false;
 static bool monitor_mode = false;
 static bool tilt_status_available = false;
+static float servo_rate = 90.f;
 static uint64_t test_time = 100000;
 static voliro_tilt_status_s input_tilt_status{};
 static vector_actuator_status_s published_status{};
@@ -66,7 +68,7 @@ extern "C" int param_get(param_t p, void *value)
 
 	case px4::params::CA_CT_ANGLE: v = 120.f; break;
 
-	case px4::params::CA_CT_RATE: v = 90.f; break;
+	case px4::params::CA_CT_RATE: v = servo_rate; break;
 
 	case px4::params::CA_R5_SLEW: v = .4f; break;
 
@@ -198,8 +200,113 @@ static void test_tilt_fallback()
 	std::puts("PASS: monitor command publication, fallback centering, observed-angle residual, dropout latch and disarm epoch");
 }
 
+static void test_fixed_tilt_switch()
+{
+	for (bool dynamic : {false, true}) {
+		dynamics_mode = dynamic; monitor_mode = false; tilt_status_available = false;
+		ActuatorEffectivenessVoliroT effectiveness(nullptr);
+		using Vec = ActuatorEffectiveness::ActuatorVector;
+		Vec minimum, maximum, output;
+		for (int i = 0; i < 16; ++i) { minimum(i) = 0.f; maximum(i) = 1.f; }
+		minimum(4) = minimum(5) = -1.f;
+		matrix::Vector<float, 6> demand;
+		demand(3) = .1f; demand(5) = -.25f;
+		for (int i = 0; i < 200; ++i) {
+			effectiveness.updateSetpoint(demand, 0, output, minimum, maximum);
+			effectiveness.updateSetpointAfterSlew(.01f, 0, output, true);
+		}
+		check(output(5) > .1f, "vector mode establishes nonzero servo tilt");
+		tilt_status_available = true; input_tilt_status = {};
+		input_tilt_status.armed = input_tilt_status.fixed_tilt = true;
+		float previous = output(5);
+		for (int i = 0; i < 300; ++i) {
+			input_tilt_status.timestamp = test_time + 1;
+			demand(3) = i % 2 ? -.1f : .1f;
+			demand(1) = i % 3 ? -.02f : .02f;
+			effectiveness.updateSetpoint(demand, 0, output, minimum, maximum);
+			effectiveness.updateSetpointAfterSlew(.01f, 0, output, true);
+			check(fabsf(output(5) - previous) <= 90.f / 120.f * .02f + 1e-6f, "fixed mode centers at configured rate (clock stub advances on status publication)");
+			check(fabsf(output(5)) <= fabsf(previous) + 1e-6f, "fixed mode centers monotonically despite wrench demand");
+			previous = output(5);
+		}
+		check(fabsf(output(5)) < 1e-6f, "fixed mode keeps servo at zero under forward/reverse and pitch demands");
+		input_tilt_status.fixed_tilt = false;
+		demand.zero(); demand(3) = .1f; demand(5) = -.25f;
+		for (int i = 0; i < 100; ++i) {
+			input_tilt_status.timestamp = test_time + 1;
+			effectiveness.updateSetpoint(demand, 0, output, minimum, maximum);
+			effectiveness.updateSetpointAfterSlew(.01f, 0, output, true);
+		}
+		check(output(5) > .1f, "switch off restores vector allocation");
+		input_tilt_status.fixed_tilt = true;
+		input_tilt_status.timestamp = test_time - 200000;
+		effectiveness.updateSetpoint(demand, 0, output, minimum, maximum);
+		check(output(5) > .1f, "stale fixed-mode request cannot freeze vector allocation");
+		input_tilt_status.timestamp = test_time + 1000000;
+		effectiveness.updateSetpoint(demand, 0, output, minimum, maximum);
+		check(output(5) > .1f, "future fixed-mode request is rejected");
+		input_tilt_status.timestamp = test_time + 1;
+		input_tilt_status.fallback = input_tilt_status.observation_valid = true;
+		input_tilt_status.timestamp_sample = input_tilt_status.timestamp;
+		input_tilt_status.tilt_observed = math::radians(15.f);
+		effectiveness.updateSetpoint(demand, 0, output, minimum, maximum);
+		effectiveness.updateSetpointAfterSlew(.01f, 0, output, true);
+		const float latched_servo = output(5);
+		input_tilt_status.fixed_tilt = input_tilt_status.fallback = false;
+		for (int i = 0; i < 600; ++i) {
+			input_tilt_status.timestamp = test_time + 1;
+			effectiveness.updateSetpoint(demand, 0, output, minimum, maximum);
+			effectiveness.updateSetpointAfterSlew(.01f, 0, output, true);
+		}
+		check(fabsf(output(5) - latched_servo) < 1e-6f, "fault latch survives switch off and pauses centering without fresh fault observation");
+	}
+	tilt_status_available = false;
+	std::puts("PASS: real allocator fixed-servo mode, centering, switch off, stale/future commands and fault priority (legacy/dynamic)");
+}
+
+static void test_configured_servo_speed()
+{
+	for (bool dynamic : {false, true}) {
+		for (float rate : {5.f, 30.f, 90.f}) {
+			dynamics_mode = dynamic; monitor_mode = false; tilt_status_available = false; servo_rate = rate;
+			ActuatorEffectivenessVoliroT effectiveness(nullptr);
+			using Vec = ActuatorEffectiveness::ActuatorVector;
+			Vec minimum, maximum, output;
+			for (int i = 0; i < 16; ++i) { minimum(i) = 0.f; maximum(i) = 1.f; }
+			minimum(4) = minimum(5) = -1.f;
+			matrix::Vector<float, 6> demand;
+			float previous = 0.f;
+
+			for (float direction : {1.f, -1.f, 0.f}) {
+				float peak_step = 0.f;
+				demand(3) = direction * .25f; demand(5) = direction == 0.f ? 0.f : -.1f;
+
+				for (int i = 0; i < 3000; ++i) {
+					effectiveness.updateSetpoint(demand, 0, output, minimum, maximum);
+					effectiveness.updateSetpointAfterSlew(.01f, 0, output, true);
+					// The clock stub advances 10 ms per read; dynamic status
+					// publication adds a read, giving a 20 ms allocation interval.
+					const float step = fabsf(output(5) - previous) * 120.f;
+					check(step <= rate * (dynamic ? .02f : .01f) + 1e-4f,
+					      "configured speed bounds Servo1 in both directions and while centering");
+					peak_step = math::max(peak_step, step);
+					previous = output(5);
+				}
+
+				check(peak_step > rate * .009f, "servo command can reach configured speed");
+				check(direction == 0.f ? fabsf(output(5)) < 1e-6f : output(5) * direction > .1f,
+				      "limited servo reaches forward/reverse tilt and center");
+			}
+		}
+	}
+
+	dynamics_mode = false; servo_rate = 90.f;
+	std::puts("PASS: real allocator CA_CT_RATE=5/30/90 deg/s in legacy/dynamic modes, reversal and centering");
+}
+
 int main()
 {
+	test_configured_servo_speed();
 	test_zero_force_servo();
 	ActuatorEffectivenessVoliroT effectiveness(nullptr);
 	using Vec = ActuatorEffectiveness::ActuatorVector;
@@ -276,4 +383,5 @@ int main()
 	check(!published_status.armed && !published_status.prediction_enabled, "disarm invalidates dynamic prediction");
 	std::puts("PASS: vertical reaction/bank filtering, residuals, prediction labeling and disarm reset");
 	test_tilt_fallback();
+	test_fixed_tilt_switch();
 }

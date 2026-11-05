@@ -58,6 +58,8 @@ public:
 		position += velocity * _dt;
 	}
 
+	float servoAngle() { return _fdm.GetPropertyValue("fcs/voliro_t/pitch-rad"); }
+
 private:
 	matrix::Quatf orientation() const
 	{

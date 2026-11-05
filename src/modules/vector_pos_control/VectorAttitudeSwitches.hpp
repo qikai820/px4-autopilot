@@ -28,15 +28,24 @@ inline float independentAttitudeTarget(bool valid, bool enabled, bool level, flo
 	return valid && enabled && !level ? demand : 0.f;
 }
 
-// The vector switch only gates AUX1; it never selects a force-derived target.
+// Switch off selects fixed-tilt MC control; LEVEL only overrides independent
+// pitch in vector mode and must not re-enable the servo in MC mode.
+inline bool voliroFixedTiltRequested(int channel, const AttitudeSwitches &switches,
+		bool armed, bool position_control, bool failsafe, bool tilt_fault)
+{
+	return channel > 0 && switches.valid && !switches.enabled
+	       && armed && position_control && !failsafe && !tilt_fault;
+}
+
+// Switch on (or unmapped) permits AUX1; switch off selects fixed-tilt MC mode.
 // pitch_limit is the caller's bounded independent pitch limit, in radians.
 inline float voliroIndependentPitchTarget(bool input_valid, const AttitudeSwitches &switches,
-		float aux1, float pitch_limit)
+		int vector_channel, float aux1, float pitch_limit)
 {
 	if (!input_valid || !std::isfinite(aux1) || !std::isfinite(pitch_limit) || pitch_limit < 0.f) { return 0.f; }
 
 	const float bounded_aux1 = aux1 < -1.f ? -1.f : (aux1 > 1.f ? 1.f : aux1);
 	const float demand = bounded_aux1 * pitch_limit;
-	return independentAttitudeTarget(switches.valid, switches.enabled, switches.level, demand);
+	return independentAttitudeTarget(switches.valid, vector_channel == 0 || switches.enabled, switches.level, demand);
 }
 }
