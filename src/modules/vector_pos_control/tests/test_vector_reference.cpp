@@ -10,6 +10,41 @@
 using namespace matrix;
 using namespace vector_control;
 
+static void test_task_yaw_feedforward()
+{
+	// A Stabilized-mode yaw stick unlocks the yaw attitude setpoint, leaving
+	// zero attitude error. Task-axis feedback must still pass its yaw rate on.
+	VectorAttitude attitude;
+	attitude.setFullAttitude(true);
+	attitude.setProportionalGain(Vector3f(5.f, 3.f, 1.f), 1.f);
+	attitude.setRateLimit(Vector3f(3.f, 3.f, 3.f));
+	const Vector3f gain(2.f, 2.f, 1.f);
+	const Vector3f omega_ned(.1f, -.2f, .3f);
+	const float yaw_rate = math::radians(44.7f);
+
+	for (float pitch_degrees : {0.f, 30.f, 90.f, -90.f, 160.f}) {
+		const Quatf q(Eulerf(.12f, math::radians(pitch_degrees), .7f));
+		const Vector3f expected_yaw = q.inversed().dcm_z() * yaw_rate;
+		attitude.setAttitudeSetpoint(q, yaw_rate);
+		assert((attitude.update(q) - expected_yaw).norm() < 1e-6f);
+		// Ignore even stale nonzero angular data when its paired reference is invalid.
+		attitude.setTaskReference(gain, .7f, omega_ned, false);
+		assert((attitude.update(q) - expected_yaw).norm() < 1e-6f);
+		// A valid full reference replaces, rather than doubles, the standard yaw rate.
+		attitude.setTaskReference(gain, .7f, omega_ned);
+		assert((attitude.update(q) - Dcmf(q).transpose() * omega_ned).norm() < 1e-6f);
+		attitude.setTaskReference(gain, .7f, omega_ned, false);
+		assert((attitude.update(q) - expected_yaw).norm() < 1e-6f);
+		attitude.clearTaskReference();
+		assert((attitude.update(q) - expected_yaw).norm() < 1e-6f);
+		attitude.setAttitudeSetpoint(q, NAN);
+		attitude.setTaskReference(gain, .7f, {}, false);
+		assert(attitude.update(q).norm() < 1e-6f);
+	}
+
+	puts("PASS: task-axis feedback retains standard yaw feedforward without a valid full reference");
+}
+
 static void test_servo_limited_pitch()
 {
 	// A fast pitch setting must respect a slow installed tilt mechanism;
@@ -50,7 +85,9 @@ static void test_servo_limited_pitch()
 
 int main()
 {
+	test_task_yaw_feedforward();
 	test_servo_limited_pitch();
+
 	// Logical heading does not flip when independent pitch crosses vertical.
 	for (float heading : {-3.13f, -.3f, .8f, 3.13f}) {
 		for (int degrees = -160; degrees <= 160; ++degrees) {

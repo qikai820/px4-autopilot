@@ -374,7 +374,7 @@ VectorAttitudeControl::Run()
 
 			if (_dynamics_enabled && PX4_ISFINITE(feedback_heading)) {
 				_attitude_control.setTaskReference(Vector3f(_param_bank_p.get(), _param_pitch_p.get(), _param_heading_p.get()),
-								   feedback_heading, reference_valid ? Vector3f(_vector_reference.omega_ned) : Vector3f{});
+								   feedback_heading, Vector3f(_vector_reference.omega_ned), reference_valid);
 
 			} else {
 				_attitude_control.clearTaskReference();

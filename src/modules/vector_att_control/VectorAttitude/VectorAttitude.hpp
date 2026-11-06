@@ -83,12 +83,15 @@ public:
 		_task_reference = false;
 	}
 
-	/** Task axes are heading-aligned horizontal X/Y and world down Z. */
-	void setTaskReference(const matrix::Vector3f &gain, float heading, const matrix::Vector3f &omega_ned)
+	/** Task axes are heading-aligned horizontal X/Y and world down Z.
+	 * Without a valid full angular feedforward, retain the standard yaw-rate feedforward. */
+	void setTaskReference(const matrix::Vector3f &gain, float heading, const matrix::Vector3f &omega_ned,
+			      bool angular_feedforward_valid = true)
 	{
 		_task_gain = gain;
 		_task_heading = heading;
-		_omega_ned = omega_ned;
+		_omega_ned = angular_feedforward_valid ? omega_ned : matrix::Vector3f{};
+		_task_feedforward_valid = angular_feedforward_valid;
 		_task_reference = true;
 	}
 	void clearTaskReference() { _task_reference = false; }
@@ -124,6 +127,7 @@ public:
 private:
 	bool _full_attitude{false};
 	bool _task_reference{false};
+	bool _task_feedforward_valid{false};
 	matrix::Vector3f _task_gain{}, _omega_ned{};
 	float _task_heading{0.f};
 	matrix::Vector3f _proportional_gain;

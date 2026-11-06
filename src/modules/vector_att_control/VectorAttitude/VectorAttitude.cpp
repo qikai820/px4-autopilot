@@ -110,7 +110,10 @@ matrix::Vector3f VectorAttitude::update(const Quatf &q) const
 	// and multiply it by the yaw setpoint rate (yawspeed_setpoint).
 	// This yields a vector representing the commanded rotatation around the world z-axis expressed in the body frame
 	// such that it can be added to the rates setpoint.
-	if (!_task_reference && std::isfinite(_yawspeed_setpoint)) {
+	// Task-axis feedback also runs in Stabilized mode and when the paired
+	// reference is unavailable. Only a valid full angular reference replaces
+	// the yaw-rate feedforward from the standard attitude setpoint.
+	if ((!_task_reference || !_task_feedforward_valid) && std::isfinite(_yawspeed_setpoint)) {
 		rate_setpoint += q.inversed().dcm_z() * _yawspeed_setpoint;
 	}
 
