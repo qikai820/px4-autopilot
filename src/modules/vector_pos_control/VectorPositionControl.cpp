@@ -164,7 +164,27 @@ void VectorPositionControl::updateVoliroTiltMonitor(hrt_abstime now)
 							_fixed_tilt_angle, actuator.tilt_command));
 	const bool fixed_tilt = _fixed_tilt_handover.update(fixed_requested, handover_ready, now);
 
+	// Report the RC selection even while disarmed. Activation of fixed-tilt
+	// control is reported separately, after the return-to-level handover.
+	if ((_param_rc_map_vector_sw.get() > 0 || _param_rc_map_level_sw.get() > 0)
+	    && switches.valid && !_vehicle_status.failsafe && !_tilt_monitor.fault()) {
+		const RcMode mode = !switches.enabled ? RcMode::Multicopter : switches.level ? RcMode::Level : RcMode::Vector;
+
+		// The first valid sample establishes a baseline; only changes print.
+		if (_last_rc_mode != RcMode::Uninitialized && mode != _last_rc_mode) {
+			const char *mode_name = mode == RcMode::Multicopter ? "Normal" : mode == RcMode::Level ? "Level" : "Vector";
+			// No trailing tab: QGC must display this without custom event metadata.
+			mavlink_log_info(&_mavlink_log_pub, "Voliro: %s mode selected", mode_name);
+		}
+
+		_last_rc_mode = mode;
+	}
+
 	if (fixed_tilt != _fixed_tilt_mode) {
+		if (fixed_tilt) {
+			mavlink_log_info(&_mavlink_log_pub, "Voliro: Normal mode active (servo fixed)");
+		}
+
 		_control.resetIntegralXY();
 		_attitude_reference.reset();
 		_reference_shortfall.zero();
@@ -1055,7 +1075,7 @@ void VectorPositionControl::Run()
 					_attitude_reference.initialize(Quatf(_vehicle_attitude.q), settings.bank_limit);
 				}
 
-				float pitch_authority = _attitude_reference.pitchAuthority(Quatf(_vehicle_attitude.q));
+				float pitch_authority = _attitude_reference.pitchAuthority(Quatf(_vehicle_attitude.q), _param_vertical_gain_scale.get());
 				vector_actuator_status_s prediction{};
 
 				if (_actuator_prediction_sub.copy(&prediction) && prediction.armed && prediction.prediction_enabled

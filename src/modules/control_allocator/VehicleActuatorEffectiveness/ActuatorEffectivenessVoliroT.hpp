@@ -2,12 +2,16 @@
 #include "control_allocation/actuator_effectiveness/ActuatorEffectiveness.hpp"
 #include <px4_platform_common/module_params.h>
 #include "VoliroTAllocation.hpp"
+#include "VoliroTAirmode.hpp"
+#include <lib/vector_control/VoliroManualAirmode.hpp>
 #include "VoliroTTailMotor.hpp"
 #include "VoliroTActuatorDynamics.hpp"
 #include <uORB/Publication.hpp>
 #include <uORB/Subscription.hpp>
 #include <uORB/topics/vector_actuator_status.h>
 #include <uORB/topics/voliro_tilt_status.h>
+#include <uORB/topics/vehicle_control_mode.h>
+#include <uORB/topics/vehicle_land_detected.h>
 
 class ActuatorEffectivenessVoliroT : public ModuleParams, public ActuatorEffectiveness
 {
@@ -31,6 +35,8 @@ private:
 	voliro_t::ActuatorDynamics _actuator_prediction;
 	uORB::Publication<vector_actuator_status_s> _status_pub{ORB_ID(vector_actuator_status)};
 	uORB::Subscription _tilt_status_sub{ORB_ID(voliro_tilt_status)};
+	uORB::Subscription _control_mode_sub{ORB_ID(vehicle_control_mode)};
+	uORB::Subscription _land_sub{ORB_ID(vehicle_land_detected)};
 	bool _dynamics_enabled{false};
 	bool _armed{false}, _fallback_latched{false};
 	bool _fixed_tilt_active{false};
@@ -41,9 +47,12 @@ private:
 	uint64_t _last_status{0};
 	float _tail_request{0.f}, _tail_minimum{-1.f}, _tail_maximum{1.f};
 	float _tilt{0.f};
+	bool _airmode_active{false};
+	float _airmode_force_limit{0.f};
 	uint64_t _last_update{0};
 	DEFINE_PARAMETERS(
 		(ParamInt<px4::params::VT_CTRL_MODE>) _control_mode,
+		(ParamInt<px4::params::VC_AIRMODE>) _airmode,
 		(ParamBool<px4::params::VT_TILT_EN>) _tilt_monitor_enable,
 		(ParamFloat<px4::params::VT_PITCH_RATE>) _fallback_pitch_rate,
 		(ParamFloat<px4::params::VT_REACT_FILT>) _reaction_cutoff,

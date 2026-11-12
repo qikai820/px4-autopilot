@@ -92,18 +92,29 @@ body axes are FRD.
   failsafe or leaving position control releases the manual mode. A detected
   tilt fault still takes precedence and remains latched until disarm. For
   MorphQuad the original independent attitude-switch behavior remains.
+  Voliro T reports RC selection changes to QGC as informational STATUSTEXT:
+  `Voliro: Vector mode selected`, `Voliro: Normal mode selected`, or
+  `Voliro: Level mode selected`. These also work while disarmed; the first
+  valid switch sample only establishes the initial state. Invalid RC, failsafe
+  and a latched tilt fault suppress selection notifications. The normal-mode
+  selection takes precedence over LEVEL, so LEVEL changes in normal mode do
+  not print. After the return-to-level handover completes, QGC additionally
+  receives `Voliro: Normal mode active (servo fixed)`. Messages print once per
+  change, without a trailing tab or a dependency on custom event metadata.
   See [fixed-servo operation and validation](VoliroT_fixed_tilt.md).
 * The attitude copy uses full shortest-path quaternion feedback and publishes the
   actual body-rate target in `vehicle_rates_setpoint`. Yaw feedforward retains the
   original world-Z convention. Acro/body-rate inputs bypass the attitude loop.
-* In legacy mode, the rate copy retains PID, measured-acceleration D, yaw filtering, integral
-  handling and allocation saturation feedback. `VEC_GYRO_FF` optionally adds
-  `omega cross (J omega)` in consistent units; it defaults to zero until inertia
-  and torque scales are calibrated.
-  In Voliro dynamics mode (`VT_CTRL_MODE=1`), feedback and integral are angular
-  acceleration, `J` and `omega cross (J omega)` produce physical torque, and the
-  low-pass filter acts on the rotor-reaction mode in allocation. See the designs
-  above for reference feedforward, freshness, and anti-windup details.
+* Both modes retain the same `VC_*` normalized-torque PID, per-axis integral
+  limits and saturation-direction gating. `VEC_GYRO_FF` optionally adds
+  `omega cross (J omega)` and defaults to zero. Mode 1 rotates the existing
+  attitude gains into task directions and adds paired angular references.
+  Inertia scales acceleration feedforward, never feedback or integral limits.
+  Through +/-45 deg pitch, feedback strength is the mode-0 baseline. Near
+  vertical, `VT_ATT_SCALE` smoothly reduces attitude-loop bandwidth and pitch
+  integral accumulation rate; the stored integral and its full limits remain.
+  The rotor-reaction filter remains in allocation for mode 1.
+  See [PID baseline migration](VoliroT_pid_baseline.md).
 
 `vector_force_setpoint.xyz` is normalized world force. The rate controller rotates
 it using the latest attitude at IMU update rate. It only uses this force while
@@ -113,19 +124,18 @@ Attitude and rate Offboard inputs continue to use their body-frame thrust.
 Both standard wrench topics retain normalized semantics. Each vector allocator
 converts force using its total installed maximum thrust and torque using
 `VEC_TQ_R/P/Y` (N m per normalized unit). Allocation residuals are converted back
-to the same normalized units. Legacy rate gains and torque scales must be tuned
-as a pair. New-mode `VT_RATE_*` gains have angular-acceleration semantics and use
-calibrated inertia before torque normalization. Old physical `GAC_*` gains cannot
-be copied numerically into `VC_*` or `VT_RATE_*` gains.
+to the same normalized units. Both modes use rate gains and torque scales tuned
+as a pair. Legacy `VT_RATE_*` settings are unused compatibility parameters.
+Old physical `GAC_*` gains cannot be copied numerically into normalized `VC_*` gains.
 
 Control parameter groups:
 
 * `VPC_*`: independent copied position and velocity feedback gains.
 * `VC_*`: independent copied attitude/rate gains, rate limits and Acro settings.
-  New mode replaces attitude/rate feedback gains with `VT_*`, while continuing
-  to use applicable `VC_*` rate limits and manual/Acro settings.
-* `VT_*`: Voliro dynamics mode, task gains, acceleration control, reference limits
-  and actuator prediction settings. Mode changes require reboot.
+  Both modes use these feedback gains and per-axis integral limits.
+* `VT_*`: Voliro reference mode, near-vertical bandwidth schedule, reference limits
+  and actuator prediction. Old task/acceleration feedback settings are unused.
+  Mode changes require reboot.
 * `MPC_*`: shared task constraints, throttle calibration, takeoff/land limits.
 * `VEC_*`: vector geometry options, inertia, normalized torque reference scales.
 * `CA_MQ_*`: MorphQuad geometry/actuators.

@@ -4,7 +4,8 @@
 #include "../../control_allocator/VehicleActuatorEffectiveness/VoliroTAllocation.hpp"
 #include "../../control_allocator/VehicleActuatorEffectiveness/VoliroTActuatorDynamics.hpp"
 #include "../../control_allocator/VehicleActuatorEffectiveness/VoliroTTailMotor.hpp"
-#include <lib/vector_control/VectorAngularAccelerationControl.hpp>
+#include "VoliroRateTest.hpp"
+#include <lib/vector_control/VectorAttitudeReference.hpp>
 #include <lib/vector_control/VoliroTiltMonitor.hpp>
 #include <lib/vector_control/VoliroFixedTiltTransition.hpp>
 #include <geo/geo.h>
@@ -23,9 +24,9 @@ using namespace matrix;
 // multirate rigid body (or network-free native JSBSim) plant. No hardware I/O.
 static void simulate(const char *model = nullptr, const char *systems = nullptr,
 		     Vector3f inertia = Vector3f(.18f, .12f, .43f),
-		     voliro_t::Geometry g = {.09f, .45f, 0.f, .69f, 39.5f, 10.f, .02f})
+		     voliro_t::Geometry g = {.09f, .45f, 0.f, .69f, 39.5f, 10.f, .02f}, float mass = 5.04f)
 {
-	constexpr float dt = .0025f, mass = 5.04f;
+	constexpr float dt = .0025f;
 	const float total = 4.f * g.front_max + g.tail_max;
 	VectorPosition position;
 	position.setVectorAirframe(17); position.setHoverThrust(mass * CONSTANTS_ONE_G / total);
@@ -36,8 +37,14 @@ static void simulate(const char *model = nullptr, const char *systems = nullptr,
 	position.setAllocationAntiWindupGain(1.f);
 	VectorAttitude attitude; attitude.setFullAttitude(true);
 	attitude.setProportionalGain(Vector3f(4.f, 4.f, 2.f), 1.f); attitude.setRateLimit(Vector3f(2.f, 2.f, 2.f));
-	vector_control::AngularAccelerationControl rate;
-	rate.configure(Vector3f(8.f, 12.f, 8.f), Vector3f(1.f, .3f, 1.f), Vector3f(.3f, .3f, .3f), 2.f, 2.f);
+	VectorRateCore rate;
+	configureBaselineRate(rate);
+	vector_control::AttitudeReference reference;
+	vector_control::AttitudeReference::Settings reference_settings;
+	reference_settings.bank_limit = math::radians(25.f);
+	reference_settings.pitch_rate = math::radians(20.f);
+	vector_control::AttitudeReference::Output ref;
+	bool reference_valid = false;
 	voliro_t::TailMotor tail;
 	const voliro_t::TailMotor::Settings tail_settings{.4f, .03f, .1f, .04f, .08f};
 	voliro_t::ActuatorDynamics plant;
@@ -91,6 +98,16 @@ static void simulate(const char *model = nullptr, const char *systems = nullptr,
 			aux_pitch += math::constrain(pitch_target - aux_pitch, -math::radians(20.f) * 4.f * dt, math::radians(20.f) * 4.f * dt);
 			vehicle_attitude_setpoint_s asp{}; position.getAttitudeSetpoint(asp, aux_pitch);
 			Quatf next(asp.q_d);
+			reference_valid = !fixed && !transitioning;
+
+			if (reference_valid) {
+				if (!reference.initialized()) { assert(reference.initialize(q, reference_settings.bank_limit)); }
+				assert(reference.update(Vector3f(out.thrust), 0.f, 0.f, pitch_target,
+						       reference.pitchAuthority(q, 1.f / 3.f), 4.f * dt, reference_settings, ref));
+				next = ref.attitude; force = ref.force * total;
+			} else {
+				reference.reset();
+			}
 			if (fixed || transitioning) {
 				const float beta = fixed ? vector_control::voliroFallbackThrustAngle(servo_actual, g.x, g.z, g.tail) : 0.f;
 				next = next * Quatf(Eulerf(0.f, beta, 0.f));
@@ -108,8 +125,11 @@ static void simulate(const char *model = nullptr, const char *systems = nullptr,
 			if (fabsf(time - 39.8f) < .001f) { aux_after = Eulerf(q).theta(); }
 		}
 		attitude.setAttitudeSetpoint(target, 0.f);
-		const Vector3f torque = inertia.emult(rate.update(attitude.update(q) - omega, alpha, {}, torque_shortfall.edivide(inertia), dt, false))
-				       + omega.cross(inertia.emult(omega));
+		attitude.setTaskReference(Vector3f(4.f, 4.f, 2.f), 0.f,
+					  reference_valid ? ref.omega_ned : Vector3f{}, reference_valid, 1.f / 3.f);
+		const Vector3f omega_ff = reference_valid ? Vector3f(Dcmf(q).transpose() * ref.omega_ned) : Vector3f{};
+		const Vector3f alpha_ff = reference_valid ? Vector3f(Dcmf(q).transpose() * ref.alpha_ned - omega.cross(omega_ff)) : Vector3f{};
+		const Vector3f torque = baselineRateTorque(rate, omega, attitude.update(q), alpha, alpha_ff, torque_shortfall, inertia, dt, q);
 		const Vector3f body_force = Dcmf(q).transpose() * force;
 		const float centered = servo + math::constrain(-servo, -math::radians(90.f) * dt, math::radians(90.f) * dt);
 		auto allocation = fixed ? voliro_t::allocateAtTilt(g, body_force, torque, centered)
@@ -170,9 +190,9 @@ static void simulate(const char *model = nullptr, const char *systems = nullptr,
 }
 int main(int argc, char **argv)
 {
-	if (argc == 11 && !std::strcmp(argv[1], "--jsbsim")) {
-		const Vector3f inertia(atof(argv[4]), atof(argv[5]), atof(argv[6]));
-		const voliro_t::Geometry g{float(atof(argv[7])), float(atof(argv[8])), float(atof(argv[9])), float(atof(argv[10])), 39.5f, 10.f, .02f};
-		simulate(argv[2], argv[3], inertia, g);
+	if (argc == 12 && !std::strcmp(argv[1], "--jsbsim")) {
+		const Vector3f inertia(atof(argv[5]), atof(argv[6]), atof(argv[7]));
+		const voliro_t::Geometry g{float(atof(argv[8])), float(atof(argv[9])), float(atof(argv[10])), float(atof(argv[11])), 39.5f, 10.f, .02f, 6.f};
+		simulate(argv[2], argv[3], inertia, g, atof(argv[4]));
 	} else { simulate(); }
 }

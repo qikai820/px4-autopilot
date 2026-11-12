@@ -37,7 +37,6 @@
 #include "../vector_pos_control/DockThrustControl.hpp"
 #include "../vector_pos_control/DockFaultTransfer.hpp"
 #include "RateControl/rate_control.hpp"
-#include <lib/vector_control/VectorAngularAccelerationControl.hpp>
 #include <uORB/topics/vector_rate_reference.h>
 #include <uORB/topics/vector_rate_control_status.h>
 #include <lib/mathlib/math/filter/AlphaFilter.hpp>
@@ -103,7 +102,6 @@ private:
 	void updateActuatorControlsStatus(const vehicle_torque_setpoint_s &vehicle_torque_setpoint, float dt);
 
 	VectorRateCore _rate_control; ///< class for rate control calculations
-	vector_control::AngularAccelerationControl _acceleration_control;
 	bool _dynamics_enabled{false};
 	uORB::Subscription _vector_reference_sub{ORB_ID(vector_rate_reference)};
 	uORB::Publication<vector_rate_control_status_s> _vector_status_pub{ORB_ID(vector_rate_control_status)};
@@ -171,17 +169,9 @@ private:
 	DEFINE_PARAMETERS(
 		(ParamInt<px4::params::VT_CTRL_MODE>) _param_control_mode,
 		(ParamInt<px4::params::CA_AIRFRAME>) _param_vector_airframe,
-		(ParamFloat<px4::params::VT_RATE_PX>) _param_rate_px,
-		(ParamFloat<px4::params::VT_RATE_PY>) _param_rate_py,
-		(ParamFloat<px4::params::VT_RATE_PZ>) _param_rate_pz,
-		(ParamFloat<px4::params::VT_RATE_IX>) _param_rate_ix,
-		(ParamFloat<px4::params::VT_RATE_IY>) _param_rate_iy,
-		(ParamFloat<px4::params::VT_RATE_IZ>) _param_rate_iz,
-		(ParamFloat<px4::params::VT_RATE_DX>) _param_rate_dx,
-		(ParamFloat<px4::params::VT_RATE_DY>) _param_rate_dy,
-		(ParamFloat<px4::params::VT_RATE_DZ>) _param_rate_dz,
-		(ParamFloat<px4::params::VT_RATE_ILIM>) _param_rate_ilim,
-		(ParamFloat<px4::params::VT_RATE_AW>) _param_rate_aw,
+		(ParamInt<px4::params::VC_AIRMODE>) _param_vector_airmode,
+		(ParamFloat<px4::params::MPC_THR_HOVER>) _param_airmode_hover,
+		(ParamFloat<px4::params::VT_ATT_SCALE>) _param_vertical_gain_scale,
 		(ParamBool<px4::params::VEC_GYRO_FF>) _param_vector_gyro_ff,
 		(ParamFloat<px4::params::VEC_IXX>) _param_vector_ixx,
 		(ParamFloat<px4::params::VEC_IYY>) _param_vector_iyy,

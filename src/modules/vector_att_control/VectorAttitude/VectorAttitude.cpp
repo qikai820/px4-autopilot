@@ -36,6 +36,7 @@
  */
 
 #include <VectorAttitude.hpp>
+#include <lib/vector_control/VectorReferenceGains.hpp>
 
 #include <mathlib/math/Functions.hpp>
 
@@ -98,8 +99,13 @@ matrix::Vector3f VectorAttitude::update(const Quatf &q) const
 	Vector3f rate_setpoint = eq.emult(_proportional_gain);
 
 	if (_task_reference) {
-		const Dcmf task_to_body = Dcmf(q).transpose() * Dcmf(Eulerf(0.f, 0.f, _task_heading));
-		rate_setpoint = task_to_body * _task_gain.emult(task_to_body.transpose() * eq)
+		const Dcmf rotation(q);
+		const Dcmf task_to_body = rotation.transpose() * Dcmf(Eulerf(0.f, 0.f, _task_heading));
+		// Keep mode-0 strength through +/-45 deg. Near vertical, the tail
+		// reverses around zero trim and the reaction channel changes body axis;
+		// lower only the OUTER attitude bandwidth, never rate PID or I authority.
+		const float gain_scale = vector_control::referenceFeedbackScale(q, _vertical_gain_scale);
+		rate_setpoint = task_to_body * (_task_gain * gain_scale).emult(task_to_body.transpose() * eq)
 				+ Dcmf(q).transpose() * _omega_ned;
 	}
 

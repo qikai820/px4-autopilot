@@ -1,5 +1,7 @@
 #include "VoliroTAllocation.hpp"
 #include "VoliroTTailMotor.hpp"
+#include "VoliroTAirmode.hpp"
+#include <lib/vector_control/VoliroManualAirmode.hpp>
 #include <drivers/dshot/DShot3D.hpp>
 #include <cstdio>
 #include <cstdlib>
@@ -128,6 +130,17 @@ static void test_tail_protection()
 	check(dshot3d::convertOutput(1010, .055f, 980, 1020) == 0, "DShot configured upper deadband");
 	check(dshot3d::convertOutput(0, .055f, 1000, 1000) == 999, "DShot full lower direction");
 	check(dshot3d::convertOutput(1999, .055f, 1000, 1000) == 1999, "DShot full upper direction");
+	Motor limited;
+
+	for (int i = 0; i < 30; ++i) { limited.update(.6f, dt, settings); }
+
+	check(limited.limitMagnitude(.1f, 1.f) <= .10001f, "throttle reduction caps stored positive tail output");
+	check(limited.limitMagnitude(0.f, 0.f) == 0.f, "zero pilot force stops the stored tail command");
+
+	for (int i = 0; i < 7; ++i) {
+		check(limited.update(-.5f, dt, settings) == 0.f, "force limiting cannot bypass reverse zero dwell");
+	}
+
 	puts("PASS: M5 slew, hysteresis, reversal confirmation, zero dwell, reset, variable-dt and DShot neutral stop");
 }
 
@@ -156,7 +169,9 @@ static void test_fixed_tilt_pitch_saturation()
 					for (float tail : {-voliro_t::tailMax(g, -1.f), g.tail_max}) {
 						voliro_t::Result corner;
 						corner.tilt = tilt;
+
 						for (int i = 0; i < 4; ++i) { corner.thrust[i] = front; }
+
 						corner.thrust[4] = tail;
 						voliro_t::forward(g, corner);
 						min_pitch = math::min(min_pitch, corner.torque(1));
@@ -165,8 +180,10 @@ static void test_fixed_tilt_pitch_saturation()
 				}
 
 				for (const Vector3f &demand : {Vector3f(40.f, 0.f, 120.f), Vector3f(-80.f, 0.f, -50.f), Vector3f{}}) {
-					for (float pitch : {min_pitch - 1.f, min_pitch - .001f, min_pitch + .001f,
-							    max_pitch - .001f, max_pitch + .001f, max_pitch + 1.f}) {
+					for (float pitch : {
+						     min_pitch - 1.f, min_pitch - .001f, min_pitch + .001f,
+						     max_pitch - .001f, max_pitch + .001f, max_pitch + 1.f
+					     }) {
 						const auto solution = voliro_t::allocateAtTilt(g, demand, Vector3f(0.f, pitch, 0.f), tilt);
 						const auto result = voliro_t::allocateRollYaw(g, solution, {}, 0.f);
 						const float expected = math::constrain(pitch, min_pitch, max_pitch);
@@ -184,8 +201,102 @@ static void test_fixed_tilt_pitch_saturation()
 	puts("PASS: fixed-tilt fallback pitch authority across infeasible demands, inverted rotors and asymmetric tail limits");
 }
 
+
+static void test_airmode_allocation()
+{
+	const voliro_t::Geometry g{.02f, .45f, 0.f, .74f, 39.5f, 10.f, .02f, .6f};
+	check(fabsf(vector_control::voliroAirmodeIntegralScale(.04f, .2f) - .25f) < 1e-6f,
+	      "manual low-throttle AirMode slows integral accumulation");
+	check(vector_control::voliroAirmodeIntegralScale(.2f, .2f) == 1.f
+	      && vector_control::voliroAirmodeIntegralScale(.8f, .2f) == 1.f,
+	      "hover and higher thrust restore full configured integral rate");
+	check(vector_control::voliroAirmodeIntegralScale(NAN, .2f) == 1.f,
+	      "invalid scheduling input cannot produce a nonfinite integral scale");
+
+	for (int curve : {0, 1, 2}) {
+		for (int i = 0; i <= 200; ++i) {
+			const float stick = -1.f + .01f * i;
+			const float ground = vector_control::voliroManualThrust(stick, curve, .2f, 0.f, 1.f);
+			const float air = vector_control::voliroManualThrust(stick, curve, .2f, .04f, 1.f);
+
+			if (ground >= .04f) { check(fabsf(ground - air) < 1e-6f, "fixed-stick map cannot jump when landed status changes"); }
+
+			if (i) { check(ground >= vector_control::voliroManualThrust(stick - .01f, curve, .2f, 0.f, 1.f) - 1e-6f, "manual throttle curve monotonicity"); }
+		}
+	}
+	check(fabsf(vector_control::voliroManualThrust(-.748f, 0, .2f, .04f, 1.f) - .0504f) < 1e-6f,
+	      "recorded fixed stick remains about 5 percent after takeoff, not 8 percent");
+	const Vector3f low_force(0.f, 0.f, -6.72f);
+	const Vector3f pitch(0.f, .5f, 0.f);
+	const auto enabled = voliro_t::allocateAirmodeAtTilt(g, low_force, pitch, 0.f, false);
+	const auto achieved = voliro_t::allocateRollYaw(g, enabled, pitch, 0.f);
+	check(fabsf(achieved.torque(1) - .5f) < 1e-5f && enabled.tail >= 0.f,
+	      "low-throttle AirMode raises front thrust for pitch without unnecessary M5 reversal");
+	check(-achieved.force(2) > 6.72f, "AirMode may increase collective above manual throttle");
+	const auto old = voliro_t::allocateForcePitch(g, low_force, pitch, 0.f, 2.8f, .01f, true);
+	check(old.tail < 0.f, "recorded small-CG low-throttle case requires reversal in old allocation");
+
+	for (float sign : {-1.f, 1.f}) {
+		const Vector3f roll(sign * 2.f, 0.f, 0.f), yaw(0.f, 0.f, sign * .4f);
+		const auto rp = voliro_t::allocateAirmodeAtTilt(g, {}, roll, 0.f, false);
+		const auto rp_result = voliro_t::allocateRollYaw(g, rp, roll, 0.f);
+		check((rp_result.torque - roll).norm() < 1e-4f, "RP AirMode retains roll at zero collective");
+		const auto yaw_off = voliro_t::allocateAirmodeAtTilt(g, {}, yaw, 0.f, false);
+		const auto yaw_on = voliro_t::allocateAirmodeAtTilt(g, {}, yaw, 0.f, true);
+		const auto yaw_result = voliro_t::allocateRollYaw(g, yaw_on, yaw, voliro_t::reactionTorque(0.f, yaw));
+		check(yaw_off.front_sum == 0.f && yaw_on.front_sum > 0.f,
+		      "only full AirMode boosts collective for a pure yaw demand");
+		check((yaw_result.torque - yaw).norm() < 1e-4f, "RPY AirMode retains yaw at zero collective");
+	}
+
+	// Independently reconstruct torque from actuator positions across normal,
+	// tilted, inverted and zero-pitch-lever cases, including asymmetric M5.
+	for (float degrees : {-160.f, -90.f, -45.f, 0.f, 45.f, 90.f, 160.f}) {
+		const float tilt = math::radians(degrees);
+
+		for (float fz : {0.f, -6.72f, -49.f, -200.f}) {
+			for (float my : {-20.f, -1.f, 0.f, 1.f, 20.f}) {
+				for (bool full : {false, true}) {
+					const Vector3f torque(.5f, my, .1f);
+					const auto solution = voliro_t::allocateAirmodeAtTilt(g, Vector3f(0.f, 0.f, fz), torque, tilt, full);
+					const auto result = voliro_t::allocateRollYaw(g, solution, torque, voliro_t::reactionTorque(tilt, torque));
+					check(solution.tilt == tilt && result.force.isAllFinite() && result.torque.isAllFinite(),
+					      "AirMode keeps the supplied servo angle and finite outputs");
+					float min_pitch = INFINITY, max_pitch = -INFINITY;
+
+					for (float front : {0.f, g.front_max}) {
+						for (float tail : {-.6f, 10.f}) {
+							const float corner = 4.f * g.x * cosf(tilt) * front - g.tail * tail;
+							min_pitch = math::min(min_pitch, corner); max_pitch = math::max(max_pitch, corner);
+						}
+					}
+					check(fabsf(result.torque(1) - math::constrain(my, min_pitch, max_pitch)) < 2e-4f,
+					      "AirMode preserves closest physically attainable pitch across actuator corners");
+
+					for (int i = 0; i < 4; ++i) {
+						check(result.thrust[i] >= 0.f && result.thrust[i] <= g.front_max, "AirMode front actuator bounds");
+					}
+
+					check(result.thrust[4] >= -.60001f && result.thrust[4] <= 10.00001f, "AirMode asymmetric tail bounds");
+				}
+			}
+		}
+	}
+
+	for (float my : {-.4f, .4f}) {
+		const auto wanted = voliro_t::allocateAirmodeAtTilt(g, {}, Vector3f(0.f, my, 0.f), 0.f, false);
+		const auto held = voliro_t::boundAirmodeForce(g, {}, wanted, 0.f, 0.f);
+		const auto result = voliro_t::allocateRollYaw(g, held, {}, 0.f);
+		check(result.force.norm() < 1e-6f && result.torque.norm() < 1e-6f,
+		      "zero manual force cannot be converted into lift by pitch feedback");
+	}
+
+	puts("PASS: AirMode low/zero throttle RP/RPY, forward-tail preference, torque envelopes, saturation and guarded-tail compensation");
+}
+
 int main()
 {
+	test_airmode_allocation();
 	test_tail_protection();
 	test_fixed_tilt_pitch_saturation();
 	const voliro_t::Geometry g{.14f, .45f, 0.f, .64f, 39.5f, 10.f, .02f};

@@ -69,23 +69,29 @@ void VectorRateCore::setNegativeSaturationFlag(size_t axis, bool is_saturated)
 }
 
 Vector3f VectorRateCore::update(const Vector3f &rate, const Vector3f &rate_sp, const Vector3f &angular_accel,
-				const float dt, const bool landed)
+					const float dt, const bool landed, const Vector3f &angular_accel_ff,
+					const Vector3f &accel_to_torque, const Vector3f &integral_rate_scale)
 {
 	// angular rates error
 	Vector3f rate_error = rate_sp - rate;
 
 	// PID control with feed forward
-	const Vector3f torque = _gain_p.emult(rate_error) + _rate_int - _gain_d.emult(angular_accel) + _gain_ff.emult(rate_sp);
+	// Both modes use the same normalized-torque feedback, integral limits and
+	// saturation handling. Inertia scales only the optional reference feedforward.
+	// Subtract reference acceleration from D so it does not oppose that reference.
+	const Vector3f torque = _gain_p.emult(rate_error) + _rate_int
+			       - _gain_d.emult(angular_accel - angular_accel_ff) + _gain_ff.emult(rate_sp)
+			       + accel_to_torque.emult(angular_accel_ff);
 
 	// update integral only if we are not landed
 	if (!landed) {
-		updateIntegral(rate_error, dt);
+		updateIntegral(rate_error, dt, integral_rate_scale);
 	}
 
 	return torque;
 }
 
-void VectorRateCore::updateIntegral(Vector3f &rate_error, const float dt)
+void VectorRateCore::updateIntegral(Vector3f &rate_error, const float dt, const Vector3f &rate_scale)
 {
 	for (int i = 0; i < 3; i++) {
 		// prevent further positive control saturation
@@ -108,7 +114,7 @@ void VectorRateCore::updateIntegral(Vector3f &rate_error, const float dt)
 		i_factor = math::max(0.0f, 1.f - i_factor * i_factor);
 
 		// Perform the integration using a first order method
-		float rate_i = _rate_int(i) + i_factor * _gain_i(i) * rate_error(i) * dt;
+		float rate_i = _rate_int(i) + i_factor * _gain_i(i) * rate_error(i) * dt * math::constrain(rate_scale(i), 0.f, 1.f);
 
 		// do not propagate the result if out of range or invalid
 		if (PX4_ISFINITE(rate_i)) {

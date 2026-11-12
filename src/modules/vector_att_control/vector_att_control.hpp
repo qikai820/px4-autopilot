@@ -157,9 +157,7 @@ private:
 	DEFINE_PARAMETERS(
 		(ParamInt<px4::params::VT_CTRL_MODE>) _param_control_mode,
 		(ParamInt<px4::params::CA_AIRFRAME>) _param_vector_airframe,
-		(ParamFloat<px4::params::VT_BANK_P>) _param_bank_p,
-		(ParamFloat<px4::params::VT_PITCH_P>) _param_pitch_p,
-		(ParamFloat<px4::params::VT_HEAD_P>) _param_heading_p,
+		(ParamFloat<px4::params::VT_ATT_SCALE>) _param_vertical_gain_scale,
 		(ParamInt<px4::params::VC_AIRMODE>)         _param_mc_airmode,
 		(ParamFloat<px4::params::VC_MAN_TILT_TAU>)  _param_mc_man_tilt_tau,
 

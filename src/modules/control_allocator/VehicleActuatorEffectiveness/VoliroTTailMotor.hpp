@@ -100,6 +100,19 @@ public:
 		return _output;
 	}
 
+	// A reduced pilot thrust limit can brake faster than the nominal slew.
+	// It can only reduce a running magnitude; it never changes direction or
+	// grants reversal permission. A stop starts a fresh zero-dwell interval.
+	float limitMagnitude(float positive, float negative)
+	{
+		const float next = math::constrain(_output, -math::max(negative, 0.f), math::max(positive, 0.f));
+
+		if (fabsf(next) < 1e-7f && fabsf(_output) >= 1e-7f) { _zero_elapsed = 0.f; }
+
+		_output = next;
+		return _output;
+	}
+
 private:
 	float _output{0.f};
 	int _direction{0};

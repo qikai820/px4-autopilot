@@ -90,11 +90,18 @@ public:
 	 * Run one control loop cycle calculation
 	 * @param rate estimation of the current vehicle angular rate
 	 * @param rate_sp desired vehicle angular rate setpoint
-	 * @param dt desired vehicle angular rate setpoint
+	 * @param dt controller interval [s]
+	 * @param angular_accel_ff valid reference acceleration in the current body frame [rad/s^2]
+	 * @param accel_to_torque inertia / torque normalization for acceleration feedforward only
+	 * @param integral_rate_scale accumulation bandwidth only; does not scale the integral state or limits
 	 * @return [-1,1] normalized torque vector to apply to the vehicle
 	 */
 	matrix::Vector3f update(const matrix::Vector3f &rate, const matrix::Vector3f &rate_sp,
-				const matrix::Vector3f &angular_accel, const float dt, const bool landed);
+				const matrix::Vector3f &angular_accel, const float dt, const bool landed,
+				const matrix::Vector3f &angular_accel_ff = {}, const matrix::Vector3f &accel_to_torque = {},
+				const matrix::Vector3f &integral_rate_scale = matrix::Vector3f(1.f, 1.f, 1.f));
+
+	const matrix::Vector3f &integral() const { return _rate_int; }
 
 	/**
 	 * Set the integral term to 0 to prevent windup
@@ -121,7 +128,7 @@ public:
 	void getRateControlStatus(rate_ctrl_status_s &rate_ctrl_status);
 
 private:
-	void updateIntegral(matrix::Vector3f &rate_error, const float dt);
+	void updateIntegral(matrix::Vector3f &rate_error, const float dt, const matrix::Vector3f &rate_scale);
 
 	// Gains
 	matrix::Vector3f _gain_p; ///< rate control proportional gain for all axes x, y, z

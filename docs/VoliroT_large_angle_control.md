@@ -2,6 +2,7 @@
 
 设计入口：[控制律与算法设计](VoliroT_algorithm_design.md)、
 [软件设计与接口契约](VoliroT_software_design.md)。两份方案以当前源码为准，覆盖 ±160° 和 UDP 原字段显示约定。
+2026-11-10 更新：模式 1 保留模式 0 的 VC_* PID/积分能力，见[基线迁移说明](VoliroT_pid_baseline.md)。
 本文保留分阶段实现与验证记录；第 4 节表格为早期版本工况，±160° 扩展见第 5 节及软件方案第 9 节。
 
 本次修改给现有 `vector_pos_control → vector_att_control → vector_rate_control →
@@ -39,26 +40,25 @@ NED 角速度和角加速度由上述旋转乘积求导，包含轴旋转的交�
 令 `C=R(q)^T Rz(heading)`，新模式的机体角速度目标为：
 
 ```text
-omega_sp = C * diag(VT_BANK_P, VT_PITCH_P, VT_HEAD_P) * C^T * e_q
+omega_sp = C * diag(VC_ROLL_P, VC_PITCH_P, VC_YAW_P) * C^T * e_q
            + R(q)^T * omega_reference_ned
 ```
 
-现有 `VC_*RMAX` 继续约束机体角速度。任务轴增益随姿态映射，避免把固定机体 Z 轴
-始终当成航向稳定通道。角速度环以角加速度作为反馈和积分的单位：
+现有 `VC_*RATE_MAX` 继续约束机体角速度。姿态增益来自 `VC_ROLL/PITCH/YAW_P`，
+映射到任务轴，保留模式 0 的近水平反馈强度。角速度环直接复用模式 0 的归一化力矩 PID：
 
 ```text
 omega_ff_body = R^T * omega_reference_ned
 alpha_ff_body = R^T * alpha_reference_ned - omega_body × omega_ff_body
-alpha_fb = P * (omega_sp - omega_body) + integral
-           - D * (measured_angular_acceleration - alpha_ff_body)
-torque_body_Nm = J * (alpha_ff_body + alpha_fb) + omega_body × (J * omega_body)
-normalized_torque = torque_body_Nm / (VEC_TQ_R, VEC_TQ_P, VEC_TQ_Y)
+u_pid = P_VC*(omega_sp-omega) + integral_VC
+        - D_VC*(measured_angular_acceleration-alpha_ff_body) + FF_VC*omega_sp
+normalized_torque = u_pid + J*alpha_ff_body/(VEC_TQ_R,VEC_TQ_P,VEC_TQ_Y)
 ```
 
-`VT_RATE_P*` 单位为 1/s，`VT_RATE_I*` 为 1/s²，`VT_RATE_D*` 为无量纲，积分限幅为
-rad/s²。新模式始终包含刚体交叉项，旧 `VEC_GYRO_FF` 开关仅控制旧 PID 的可选补偿。
-积分同时使用分配残差的方向门控和幅值回算，残差先从归一化力矩还原为 Nm，再除以惯量。
-位置积分的回算将归一化 NED 力残差还原到加速度单位。
+积分沿用 `VC_RR/PR/YR_INT_LIM`，单位仍为归一化力矩；仅保留饱和方向门控，
+移除旧模式 1 的幅值回算。`VEC_GYRO_FF` 在两种模式中均控制可选刚体交叉项，默认关闭。
+参考无效时令加速度前馈为零，保留标准偏航速度前馈，不切换反馈增益。
+`VT_BANK_P/PITCH_P/HEAD_P` 与 `VT_RATE_*` 作为无控制作用的旧参数保留。
 
 ### 分配和执行器
 
@@ -91,7 +91,7 @@ reaction = sin(common_tilt) * torque_x - cos(common_tilt) * torque_z
   `quat_reset_counter` 不同均禁止前馈。缺失私有参考时继续跟踪标准目标，并保留新模式
   的任务轴反馈增益，避免因丢失前馈而突然切回另一组增益。
 - 估计器复位后位置模块旋转参考并清零导数；本地位置复位处理只调整输入轨迹，避免重复补偿。
-- 退出位置控制或参考无效时清除参考状态。解锁状态无效、落地、显式 reset_integral 时清除新积分。
+- 退出位置控制或参考无效时清除参考状态。未解锁或显式 reset_integral 时清积分；落地时冻结积分，与模式 0 一致。
 - `VT_CTRL_MODE=0` 使用旧增益和旧固定 Z 轴滤波；新模式不注入针对旧 VC 参数的自动调参信号。
 
 新增日志主题均以最高约 50 Hz 记录：
@@ -100,12 +100,13 @@ reaction = sin(common_tilt) * torque_x - cos(common_tilt) * torque_z
 | --- | --- |
 | `vector_attitude_reference` | 原始/受限力、四元数、逻辑航向、bank/pitch、角速度和角加速度参考 |
 | `vector_rate_reference` | 实际发布的角速度目标对应的前馈和估计器 epoch |
-| `vector_rate_control_status` | 角加速度前馈/反馈/积分，Nm 命令、交叉项、分配残差，前馈有效标志 |
+| `vector_rate_control_status` | 归一化 PID/积分、加速度前馈、Nm 命令、交叉项、分配残差；alpha_feedback/integral 仅为等效诊断量 |
 | `vector_actuator_status` | 最终命令与预测推力/力矩、公共倾角、反扭矩滤波、预测和 armed 标志 |
 
 ## 3. 参数匹配和启用
 
-新模式是对角惯量模型，必须先匹配实际加载的仿真模型或实机标定结果。
+新模式的参考前馈、可选耦合补偿和倾转监测使用对角惯量；这些模型项仍需匹配实际标定，
+但 VC_* PID 反馈不再按惯量缩放。
 目前本机 XML、旧测试日志和仓库示例机架的几何并不相同：
 
 | 来源 | Ixx/Iyy/Izz (kg m²) | 前桨 X 力臂 / 尾桨力臂 (m) |
@@ -153,8 +154,8 @@ CH9 开且 CH8 关时跟随 AUX1；CH9 关或 CH8 开时回平。
 回平沿用俯仰参考的速度和加速度约束，解除回平后恢复当前 AUX1 对应的目标。
 遥控无效、过时或倾转故障降级时不接受独立俯仰输入。
 
-新模式初始增益：任务 bank/pitch/heading 为 2/2/1；角速度 P 为 8/12/8，
-I 为 1/0.3/1，D 为 0.3/0.3/0.3。它们是本次模型测试的起点，需在匹配模型的板上 HIL 中复测。
+2026-11-10 起，模式 1 继承已保存的 `VC_*` 姿态和角速度增益、各轴积分限幅；
+不再启用早期模型测试的 2/2/1 姿态增益或 8/12/8 角加速度 PID。
 保持机架示例原有几何和惯量；扩大角度范围不代表这些示例标定值适用于实际加载的模型。
 
 ### 机构角度与 PWM 标定

@@ -1,5 +1,4 @@
 #include <lib/vector_control/VectorAttitudeReference.hpp>
-#include <lib/vector_control/VectorAngularAccelerationControl.hpp>
 #include <lib/vector_control/VectorReferenceValidity.hpp>
 #include "../../vector_att_control/VectorAttitude/VectorAttitude.hpp"
 #include "../../control_allocator/VehicleActuatorEffectiveness/VoliroTAllocation.hpp"
@@ -181,22 +180,6 @@ int main()
 	reference.reset();
 	assert(!reference.update(force, 0.f, 0.f, 0.f, 1.f, .01f, settings, output));
 
-	// Saturation must unwind rather than accumulate, and stale residuals can be
-	// replaced with zero by the wrapper without preserving a latched saturation.
-	AngularAccelerationControl rate;
-	rate.configure(Vector3f(8.f, 8.f, 8.f), Vector3f(1.f, 1.f, 1.f), Vector3f(.3f, .3f, .3f), 2.f, 2.f);
-
-	for (int k = 0; k < 1000; ++k) { rate.update(Vector3f(1.f, 0.f, 0.f), {}, {}, Vector3f(2.f, 0.f, 0.f), .0025f, false); }
-
-	assert(rate.integral()(0) < -1.9f);
-
-	for (int k = 0; k < 1000; ++k) { rate.update(Vector3f(1.f, 0.f, 0.f), {}, {}, {}, .0025f, false); }
-
-	assert(rate.integral()(0) > .4f);
-	rate.update({}, {}, {}, {}, .0025f, true);
-	assert(rate.integral().norm() < 1e-7f);
-	assert(rate.update(Vector3f(NAN, 0.f, 0.f), {}, {}, {}, .0025f, false).isAllFinite());
-
 	// Wrong pair, loss, time reversal and estimator epoch changes suppress FF.
 	assert(referenceMatches(1200000, 1190000, 1190000, 1180000, 3, 3));
 	assert(!referenceMatches(1200000, 1190001, 1190000, 1180000, 3, 3));
@@ -229,6 +212,6 @@ int main()
 	const auto upright = ::voliro_t::refitForTail(geometry, Vector3f(0.f, 0.f, -1.f), {}, 5.f, 0.f,
 			     math::radians(160.f), M_PI_F);
 	assert(fabsf(upright.tilt) < 1e-6f && upright.front_sum < 1e-6f);
-	printf("PASS: heading through +/-160, task axes, reference derivatives (max %.6f rad/s), force-plane consistency, reset, anti-windup and message epochs\n",
+	printf("PASS: heading through +/-160, task axes, reference derivatives (max %.6f rad/s), force-plane consistency, reset and message epochs\n",
 	       (double)max_kinematic_error);
 }

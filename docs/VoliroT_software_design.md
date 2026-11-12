@@ -1,7 +1,9 @@
 # Voliro T 飞控与仿真软件设计方案
 
-版本：2026-11-03；与[算法设计方案](VoliroT_algorithm_design.md)配套。
+版本：2026-11-10；与[算法设计方案](VoliroT_algorithm_design.md)配套。
 范围：当前 PX4 工作区、JSBSim Voliro 模型及 UDP 派生姿态字段。本文整理实现，不新增控制代码。
+
+2026-11-10 控制更新：[模式 0 PID 基线迁移](VoliroT_pid_baseline.md)。以下旧模型部署记录不代表本次固件已刷写。
 
 ## 1. 基线与交付状态
 
@@ -53,7 +55,7 @@ flowchart LR
 | 位置核心 | [VectorPosition.cpp](../src/modules/vector_pos_control/VectorPosition/VectorPosition.cpp) | 位置/速度反馈、NED 力、推力约束与积分抗饱和 |
 | 参考 | [VectorAttitudeReference.hpp](../src/lib/vector_control/VectorAttitudeReference.hpp) | 受限参考、导数、力一致性与可用度调度 |
 | 姿态 | [vector_att_control_main.cpp](../src/modules/vector_att_control/vector_att_control_main.cpp)、[VectorAttitude.cpp](../src/modules/vector_att_control/VectorAttitude/VectorAttitude.cpp) | 消息配对、四元数反馈、任务增益、机体角速度目标 |
-| 角速度 | [VectorRateControl.cpp](../src/modules/vector_rate_control/VectorRateControl.cpp)、[角加速度核心](../src/lib/vector_control/VectorAngularAccelerationControl.hpp) | 前馈运输、加速度反馈、J 与归一化换算、诊断 |
+| 角速度 | [VectorRateControl.cpp](../src/modules/vector_rate_control/VectorRateControl.cpp)、[模式 0 PID 核心](../src/modules/vector_rate_control/RateControl/rate_control.cpp) | 保留 VC_* PID/积分、参考前馈运输、归一化诊断 |
 | 分配包装 | [ActuatorEffectivenessVoliroT.cpp](../src/modules/control_allocator/VehicleActuatorEffectiveness/ActuatorEffectivenessVoliroT.cpp) | 参数、尾桨预演、最终输出重建与状态发布 |
 | 分配核心 | [VoliroTAllocation.hpp](../src/modules/control_allocator/VehicleActuatorEffectiveness/VoliroTAllocation.hpp) | 正/逆向力矩模型、倾角/电机约束、限位优先与反扭矩滤波 |
 | 尾桨 | [VoliroTTailMotor.hpp](../src/modules/control_allocator/VehicleActuatorEffectiveness/VoliroTTailMotor.hpp) | 命令域反转状态与计时 |
@@ -84,7 +86,7 @@ flowchart LR
 | --- | --- |
 | [VectorAttitudeReference](../msg/VectorAttitudeReference.msg) | q_d、omega_ned、alpha_ned、原始/受限 NED 力、heading/bank/pitch、pitch_authority、epoch、valid |
 | [VectorRateReference](../msg/VectorRateReference.msg) | 与标准 rates 目标配对的 NED 导数、来源 reference_timestamp、epoch、valid |
-| [VectorRateControlStatus](../msg/VectorRateControlStatus.msg) | 机体 rate error、α前馈/反馈/积分、Nm 命令/交叉项/未分配量、前馈有效性 |
+| [VectorRateControlStatus](../msg/VectorRateControlStatus.msg) | 机体 rate error、归一化 PID/积分、加速度前馈 Nm、等效 alpha 诊断与未分配量 |
 | [VectorActuatorStatus](../msg/VectorActuatorStatus.msg) | 最终命令模型与可选预测的推力/力矩、倾角、反扭矩滤波、armed/prediction_enabled |
 
 参考中的 `pitch` 是**目标独立俯仰**，单位 rad；不是测得的实际独立 pitch。
@@ -171,8 +173,8 @@ Mission/RTL/Offboard 等任务入口被复用，不等于这些模式都已开�
 
 - 参考由位置模块依据 attitude epoch 旋转，清除导数；本地位置复位处理调整输入轨迹，避免同一复位重复应用。
 - 姿态核心可旋转已有 q_d；epoch 不一致时不沿用旧前馈。
-- rates 目标的 reset_integral 同时复位旧积分和新角加速度积分。
-- 新角加速度核心拒绝非有限输入和 `dt<=0` 或 `dt>20 ms`；参考核心拒绝 `dt<=0` 或 `dt>40 ms`。
+- rates 目标的 reset_integral 复位两个模式共用的归一化 PID 积分。
+- 角速度包装限制控制间隔到 0.125..20 ms；沿用模式 0 的 PID 输入和积分保护。参考核心拒绝 `dt<=0` 或 `dt>40 ms`。
 - 原始测量坏数据、无效 frame 或参考被清除，不应被解释成“已经回平”。
 
 ### 5.3 尾桨保护生命周期
@@ -207,16 +209,16 @@ Mission/RTL/Offboard 等任务入口被复用，不等于这些模式都已开�
 | VT_BANK_RATE / VT_BANK_ACC | bank 参考上限 80°/s、360°/s² |
 | VT_HEAD_RATE / VT_HEAD_ACC | heading 参考上限 45°/s、90°/s²；端点调度后可进一步减小 |
 | VT_REF_FREQ | 参考模型频率 8 rad/s，非实测闭环带宽 |
-| VT_BANK_P / VT_PITCH_P / VT_HEAD_P | 任务姿态增益 2/2/1，单位 1/s |
-| VT_RATE_PX/PY/PZ | 8/12/8，单位 1/s |
-| VT_RATE_IX/IY/IZ | 1/0.3/1，单位 1/s² |
-| VT_RATE_DX/DY/DZ | 0.3/0.3/0.3，无量纲 |
-| VT_RATE_ILIM / VT_RATE_AW | 2 rad/s²、2 1/s |
+| VC_ROLL/PITCH/YAW_P | 两种模式共用；模式 1 映射到任务方向 |
+| VC_*RATE_P/I/D/K/FF | 两种模式共用的归一化力矩 PID |
+| VC_RR/PR/YR_INT_LIM | 两种模式共用每轴积分限幅，不按惯量缩放 |
+| VT_ATT_SCALE | 近竖直姿态的外环/俯仰积分累积速度比例，默认 1/3；积分范围不缩小 |
+| VT_BANK_P/PITCH_P/HEAD_P、VT_RATE_* | 无控制作用，保留旧参数兼容 |
 | VT_POS_AW / VT_REACT_FILT | 1 1/s、2 Hz；后者为反扭矩模态滤波 |
-| VEC_IXX/IYY/IZZ | 实际机体系惯量，必须标定；通用默认不是当前模型匹配证明 |
+| VEC_IXX/IYY/IZZ | 仅用于参考加速度前馈、可选旋转耦合补偿和倾转监测；不缩放 PID 反馈 |
 | VEC_TQ_R/P/Y | Nm/归一化单位；19003 示例均为 10 |
 | VPC_* | vector 位置/速度核心增益 |
-| VC_* | 旧模式增益；新模式仍复用速率限制、Acro/手动等相关设置 |
+| VC_* | 两种模式共用姿态/角速度反馈、积分限幅、速率限制、Acro/手动设置 |
 | MPC_* | 共享任务限制、悬停推力、起降等；不替代 VPC 速度增益 |
 | CA_CT_T5RMAX | 0 使用旧对称尾推力；正数为独立反推最大 N |
 | VT_MOT_TAU / VT_SRV_TAU | 默认 0，关闭相应滞后预测 |

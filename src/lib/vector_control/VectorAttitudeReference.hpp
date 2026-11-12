@@ -1,6 +1,7 @@
 #pragma once
 
 #include "VectorGeometry.hpp"
+#include "VectorReferenceGains.hpp"
 
 namespace vector_control
 {
@@ -37,7 +38,7 @@ public:
 		       * matrix::Quatf(matrix::Eulerf(_bank.position, 0.f, 0.f))
 		       * matrix::Quatf(matrix::Eulerf(0.f, _pitch.position, 0.f));
 	}
-	float pitchAuthority(const matrix::Quatf &actual) const
+	float pitchAuthority(const matrix::Quatf &actual, float vertical_scale = 1.f) const
 	{
 		if (!_initialized || !actual.isAllFinite()) { return .2f; }
 
@@ -45,7 +46,8 @@ public:
 		const float angle = 2.f * atan2f(error.imag().norm(), fabsf(error(0)));
 		// Reserve tracking authority for recovery before continuing an independent
 		// pitch maneuver. Rate changes themselves remain acceleration-limited.
-		return math::constrain((math::radians(15.f) - angle) / math::radians(10.f), .2f, 1.f);
+		return math::constrain((math::radians(15.f) - angle) / math::radians(10.f), .2f, 1.f)
+		       * referenceFeedbackScale(actual, vertical_scale);
 	}
 
 	bool initialize(const matrix::Quatf &q, float bank_limit)

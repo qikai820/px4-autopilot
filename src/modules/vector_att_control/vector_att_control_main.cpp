@@ -44,6 +44,7 @@
  */
 
 #include "vector_att_control.hpp"
+#include <lib/vector_control/VoliroManualAirmode.hpp>
 
 #include <drivers/drv_hrt.h>
 #include <mathlib/math/Limits.hpp>
@@ -118,6 +119,12 @@ VectorAttitudeControl::parameters_updated()
 float
 VectorAttitudeControl::throttle_curve(float throttle_stick_input)
 {
+	if (_param_vector_airframe.get() == 17 && (_param_mc_airmode.get() == 1 || _param_mc_airmode.get() == 2)) {
+		const float hover = _param_mpc_thr_curve.get() == 2 ? _param_mpc_thr_hover.get() : _hover_thrust_slew_rate.getState();
+		return math::min(vector_control::voliroManualThrust(throttle_stick_input, _param_mpc_thr_curve.get(), hover,
+				 _manual_throttle_minimum.getState(), _param_mpc_thr_max.get()), _manual_throttle_maximum.getState());
+	}
+
 	float thrust = 0.f;
 
 	// throttle_stick_input is in range [-1, 1]
@@ -373,8 +380,11 @@ VectorAttitudeControl::Run()
 			}
 
 			if (_dynamics_enabled && PX4_ISFINITE(feedback_heading)) {
-				_attitude_control.setTaskReference(Vector3f(_param_bank_p.get(), _param_pitch_p.get(), _param_heading_p.get()),
-								   feedback_heading, Vector3f(_vector_reference.omega_ned), reference_valid);
+				// Preserve the tuned mode-0 attitude strength, rotating its roll,
+				// pitch and yaw gains into bank/pitch/heading task directions.
+				_attitude_control.setTaskReference(Vector3f(_param_mc_roll_p.get(), _param_mc_pitch_p.get(), _param_mc_yaw_p.get()),
+								   feedback_heading, Vector3f(_vector_reference.omega_ned), reference_valid,
+								   _param_vertical_gain_scale.get());
 
 			} else {
 				_attitude_control.clearTaskReference();

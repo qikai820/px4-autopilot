@@ -167,6 +167,8 @@ private:
 	bool _last_attitude_target_valid{false};
 	bool _fixed_tilt_mode{false}, _fixed_tilt_transition{false};
 	vector_control::VoliroFixedTiltTransition _fixed_tilt_handover;
+	enum class RcMode : uint8_t { Uninitialized, Vector, Multicopter, Level };
+	RcMode _last_rc_mode{RcMode::Uninitialized};
 	float _fixed_tilt_angle{0.f};
 	uint8_t _fallback_reset_counter{0};
 	float _morph_roll_setpoint{0.f};
@@ -194,6 +196,7 @@ private:
 	uORB::Publication<vector_force_setpoint_s> _force_pub{ORB_ID(vector_force_setpoint)};
 	DEFINE_PARAMETERS(
 		(ParamInt<px4::params::VT_CTRL_MODE>) _param_control_mode,
+		(ParamFloat<px4::params::VT_ATT_SCALE>) _param_vertical_gain_scale,
 		(ParamFloat<px4::params::VT_REF_FREQ>) _param_reference_frequency,
 		(ParamFloat<px4::params::VT_BANK_RATE>) _param_bank_rate,
 		(ParamFloat<px4::params::VT_BANK_ACC>) _param_bank_acc,

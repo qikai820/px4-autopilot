@@ -24,6 +24,9 @@
 set VEHICLE_TYPE vector
 param set-default CA_AIRFRAME 17
 param set-default CA_METHOD 0
+# Manual direct-throttle Roll/Pitch authority in the Voliro custom allocator.
+# An existing saved VC_AIRMODE value is preserved; set 1 explicitly to enable.
+param set-default VC_AIRMODE 1
 param set-default CA_R_REV 16
 param set-default CA_CT_X 0.14
 param set-default CA_CT_Y 0.45

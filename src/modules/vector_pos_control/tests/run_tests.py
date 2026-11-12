@@ -23,7 +23,8 @@ def native_fixture(model_source, destination):
     tree = ET.parse(destination / "voliro_t.xml")
     xml = tree.getroot()
     mass = xml.find("mass_balance/emptywt")
-    assert mass.get("unit") == "KG" and abs(float(mass.text) - 5.04) < 1e-6
+    assert mass.get("unit") == "KG" and float(mass.text) > 0
+    mass_kg = float(mass.text)
     inertia = []
     for axis in ("ixx", "iyy", "izz"):
         node = xml.find("mass_balance/" + axis)
@@ -40,7 +41,17 @@ def native_fixture(model_source, destination):
 
     cg = location("mass_balance/location[@name='CG']")
     front = [location(f"external_reactions/force[@name='front_{i}_z']/location") for i in range(4)]
-    tail = location("external_reactions/force[@name='tail_z']/location")
+    if xml.find("external_reactions/force[@name='tail_z']/location") is not None:
+        tail = location("external_reactions/force[@name='tail_z']/location")
+    else:
+        propulsion = xml.find("propulsion")
+        propulsion_xml = ET.parse(destination / propulsion.get("file")).getroot()
+        shared_engines = model_source.parents[1] / "engine"
+        if shared_engines.is_dir():
+            shutil.copytree(shared_engines, destination / "engine", dirs_exist_ok=True)
+        tail_node = propulsion_xml.find("engine/thruster/location")
+        assert tail_node.get("unit") == "M"
+        tail = [float(tail_node.find(axis).text) for axis in ("x", "y", "z")]
     x = cg[0] - front[0][0]
     y = abs(front[0][1] - cg[1])
     z = sum(cg[2] - point[2] for point in front) / 4
@@ -50,8 +61,8 @@ def native_fixture(model_source, destination):
         for node in list(xml.findall(tag)):
             xml.remove(node)
     tree.write(destination / "voliro_t.xml", encoding="utf-8", xml_declaration=True)
-    print(f"JSBSim fixture: inertia={inertia}, geometry={[x, y, z, tail_arm]}", flush=True)
-    return inertia + [x, y, z, tail_arm]
+    print(f"JSBSim fixture: mass={mass_kg}, inertia={inertia}, geometry={[x, y, z, tail_arm]}", flush=True)
+    return [mass_kg] + inertia + [x, y, z, tail_arm]
 
 
 def main():
@@ -59,6 +70,7 @@ def main():
     parser.add_argument("build", type=Path)
     parser.add_argument("--csv", type=Path)
     parser.add_argument("--fixed-only", action="store_true", help="Run fixed-servo closed loops and large-angle handover regressions")
+    parser.add_argument("--native-only", action="store_true", help="Run only the native JSBSim cases after prior core regressions")
     parser.add_argument("--sweep", action="store_true")
     parser.add_argument("--jsbsim-model", type=Path)
     parser.add_argument("--jsbsim-prefix", type=Path)
@@ -66,6 +78,8 @@ def main():
     args = parser.parse_args()
     if args.jsbsim_model and (not args.jsbsim_prefix or not args.jsbsim_systems):
         parser.error("--jsbsim-model requires --jsbsim-prefix and --jsbsim-systems")
+    if args.native_only and not args.jsbsim_model:
+        parser.error("--native-only requires --jsbsim-model")
     root = Path(__file__).resolve().parents[4]
     sources = [
         "src/modules/vector_pos_control/VectorPosition/VectorPosition.cpp",
@@ -88,7 +102,9 @@ def main():
     tests = Path(__file__).resolve().parent
     with tempfile.TemporaryDirectory(prefix="vector-control-test-") as temp:
         executable = str(Path(temp) / "test")
-        names = ("test_voliro_fixed_tilt", "test_voliro_fixed_tilt_transition") if args.fixed_only else ("test_vector_control", "test_vector_reference", "test_voliro_tilt_monitor", "test_voliro_dynamics", "test_voliro_fixed_tilt", "test_voliro_fixed_tilt_transition")
+        names = ("test_voliro_fixed_tilt", "test_voliro_fixed_tilt_transition") if args.fixed_only else ("test_vector_pid_baseline", "test_vector_control", "test_vector_reference", "test_voliro_tilt_monitor", "test_voliro_dynamics", "test_voliro_fixed_tilt", "test_voliro_fixed_tilt_transition")
+        if args.native_only:
+            names = ()
         for name in names:
             subprocess.run(common + [str(tests / (name + ".cpp")), "-o", executable], check=True, cwd=root)
             arguments = [str(args.csv.resolve())] if name == "test_voliro_dynamics" and args.csv else []
@@ -96,7 +112,7 @@ def main():
         if args.sweep:
             subprocess.run(common + [str(tests / "test_voliro_dynamics.cpp"), "-o", executable], check=True, cwd=root)
             rows = []
-            for gains in itertools.product([6, 8, 12], [0, .3, 1], [.3, .6], [1, 2]):
+            for gains in itertools.product([.08, .1, .15], [.2, .4, .6], [.001, .003], [3, 4]):
                 output = subprocess.check_output([executable, "--tune", *map(str, gains)], text=True)
                 matches = re.findall(r"finite=(\d) peak=([\d.]+)deg final=([\d.inf]+)deg", output)
                 score = max(float(value[2]) for value in matches) if len(matches) == 3 and all(value[0] == "1" for value in matches) else float("inf")

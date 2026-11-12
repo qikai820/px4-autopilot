@@ -42,6 +42,7 @@ void ActuatorEffectivenessVoliroT::updateSetpoint(const Vector<float, NUM_AXES> 
 	if (mode_fresh && tilt_status.fallback && PX4_ISFINITE(tilt_status.tilt_observed)) {
 		_fallback_observation_fresh = tilt_status.observation_valid && tilt_status.timestamp_sample != 0
 					      && tilt_status.timestamp_sample <= now && now - tilt_status.timestamp_sample <= 100000;
+
 		// Do not return to vector allocation when a status message is lost, the
 		// observation becomes invalid, or the enable parameter is changed.
 		if (!_fallback_latched || _fallback_observation_fresh) {
@@ -56,7 +57,20 @@ void ActuatorEffectivenessVoliroT::updateSetpoint(const Vector<float, NUM_AXES> 
 	voliro_t::Result r;
 	float tail_request = 0.f;
 	const float center_tilt = _tilt + math::constrain(-_tilt,
-				 -math::radians(math::max(_rate.get(), 1.f)) * dt, math::radians(math::max(_rate.get(), 1.f)) * dt);
+				  -math::radians(math::max(_rate.get(), 1.f)) * dt, math::radians(math::max(_rate.get(), 1.f)) * dt);
+	vehicle_control_mode_s control_mode{};
+	const bool airmode = _armed && _control_mode_sub.copy(&control_mode)
+			     && vector_control::voliroManualAirmode(control_mode, now, _airmode.get());
+	vehicle_land_detected_s land{};
+	const bool airborne = airmode && _land_sub.copy(&land) && land.timestamp > 0 && land.timestamp <= now
+			      && now - land.timestamp <= 1000000 && !land.landed && !land.maybe_landed && !land.ground_contact;
+	const float force_budget = vector_control::voliroAirmodeForceBudget(force.norm(), total_max, airborne);
+	_airmode_active = airmode;
+	_airmode_force_limit = force.norm() + force_budget;
+	const float tail_maximum = airmode ? math::min(maximum(4), voliro_t::tailCommand(g, math::min(g.tail_max,
+				   _airmode_force_limit))) : maximum(4);
+	const float tail_minimum = airmode ? math::max(minimum(4), voliro_t::tailCommand(g, -math::min(voliro_t::tailMax(g, -1.f),
+				   _airmode_force_limit))) : minimum(4);
 	const bool fixed_allocation = _fallback_latched || _fixed_tilt_active;
 	const float allocation_tilt = _fallback_latched ? _fallback_tilt : center_tilt;
 
@@ -64,21 +78,31 @@ void ActuatorEffectivenessVoliroT::updateSetpoint(const Vector<float, NUM_AXES> 
 		auto solution = fixed_allocation ? voliro_t::allocateAtTilt(g, force, torque, allocation_tilt)
 				: voliro_t::allocateForcePitch(g, force, torque, math::constrain(_tilt, -angle, angle), angle,
 						math::radians(math::max(_rate.get(), 1.f)) * dt, _dynamics_enabled);
-		tail_request = math::constrain(voliro_t::tailCommand(g, solution.tail), minimum(4), maximum(4));
 
-		if ((_dynamics_enabled || fixed_allocation) && force.norm_squared() > 1e-8f) {
+		if (airmode) {
+			solution = voliro_t::allocateAirmodeAtTilt(g, force, torque, solution.tilt, _airmode.get() == 2);
+			solution = voliro_t::boundAirmodeForce(g, force, solution, solution.tail, force_budget);
+		}
+
+		tail_request = math::constrain(voliro_t::tailCommand(g, solution.tail), tail_minimum, tail_maximum);
+
+		if (airmode || ((_dynamics_enabled || fixed_allocation) && force.norm_squared() > 1e-8f)) {
 			// Preview a COPY: reversal timers and slew advance exactly once, in
 			// updateSetpointAfterSlew. Keep the unconstrained request for that step.
 			auto tail_preview = _tail_motor;
 			const voliro_t::TailMotor::Settings settings{_tail_slew.get(), _tail_deadband.get(),
 					_tail_hysteresis.get(), _tail_confirm.get(), _tail_wait.get()};
-			const float tail_command = tail_preview.update(tail_request, dt, settings);
+			float tail_command = tail_preview.update(tail_request, dt, settings);
+
+			if (airmode) { tail_command = tail_preview.limitMagnitude(tail_maximum, -tail_minimum); }
+
 			const float available_tail = voliro_t::tailThrust(g, tail_command);
 
 			if (fabsf(available_tail - solution.tail) > 1e-4f) {
-				solution = fixed_allocation ? voliro_t::refitAtTiltForTail(g, force, torque, allocation_tilt, available_tail)
+				solution = airmode ? voliro_t::boundAirmodeForce(g, force, solution, available_tail, force_budget)
+					   : fixed_allocation ? voliro_t::refitAtTiltForTail(g, force, torque, allocation_tilt, available_tail)
 					   : voliro_t::refitForTail(g, force, torque, available_tail, math::constrain(_tilt, -angle, angle),
-								      angle, math::radians(math::max(_rate.get(), 1.f)) * dt);
+								    angle, math::radians(math::max(_rate.get(), 1.f)) * dt);
 			}
 		}
 
@@ -87,7 +111,7 @@ void ActuatorEffectivenessVoliroT::updateSetpoint(const Vector<float, NUM_AXES> 
 				     : _reaction_requested;
 		r = voliro_t::allocateRollYaw(g, solution, torque, _reaction_filtered);
 
-		if (fixed_allocation && force.norm_squared() <= 1e-12f) { r = {}; }
+		if (!airmode && fixed_allocation && force.norm_squared() <= 1e-12f) { r = {}; }
 	}
 
 	// Center conservatively while allocating at the observed angle. A stuck
@@ -110,8 +134,8 @@ void ActuatorEffectivenessVoliroT::updateSetpoint(const Vector<float, NUM_AXES> 
 	}
 
 	_tail_request = tail_request;
-	_tail_minimum = minimum(4);
-	_tail_maximum = maximum(4);
+	_tail_minimum = tail_minimum;
+	_tail_maximum = tail_maximum;
 }
 
 void ActuatorEffectivenessVoliroT::updateSetpointAfterSlew(float dt, int matrix_index,
@@ -136,7 +160,10 @@ void ActuatorEffectivenessVoliroT::updateSetpointAfterSlew(float dt, int matrix_
 		actuator_sp(4) = math::constrain(_tail_motor.update(_tail_request, dt, settings),
 						 _tail_minimum, _tail_maximum);
 
+		if (_airmode_active) { actuator_sp(4) = _tail_motor.limitMagnitude(_tail_maximum, -_tail_minimum); }
+
 	} else {
+		_airmode_active = false;
 		_tail_motor.reset();
 		_reaction_filter.reset();
 		_actuator_prediction.reset();
@@ -153,6 +180,24 @@ void ActuatorEffectivenessVoliroT::updateSetpointAfterSlew(float dt, int matrix_
 		achieved.thrust[i] = actuator_sp(i) * fabsf(actuator_sp(i)) * max_thrust;
 	}
 
+	if (_airmode_active && armed) {
+		float sum = 0.f;
+
+		for (int i = 0; i < 4; ++i) { sum += achieved.thrust[i]; }
+
+		const float constraint_tilt = _fallback_latched ? _fallback_tilt : achieved.tilt;
+		const float limit = voliro_t::frontSumForForceLimit(constraint_tilt, achieved.thrust[4], _airmode_force_limit);
+
+		if (sum > limit && sum > 1e-6f) {
+			const float factor = sqrtf(limit / sum);
+
+			for (int i = 0; i < 4; ++i) {
+				actuator_sp(i) *= factor;
+				achieved.thrust[i] *= factor * factor;
+			}
+		}
+	}
+
 	// Include tail protection, all motor slew limits and actual servo command
 	// in the residual used by the rate controller's anti-windup logic.
 	voliro_t::forward(_geometry, achieved);
@@ -166,7 +211,7 @@ void ActuatorEffectivenessVoliroT::updateSetpointAfterSlew(float dt, int matrix_
 	_force_residual = _requested_force - available.force;
 	_torque_residual = _requested_torque - available.torque;
 
-	if (_dynamics_enabled || _tilt_monitor_enable.get() || _fallback_latched || _fixed_tilt_active) {
+	if (_dynamics_enabled || _airmode.get() != 0 || _tilt_monitor_enable.get() || _fallback_latched || _fixed_tilt_active) {
 		float commands[5] {};
 
 		for (int i = 0; i < 5; ++i) { commands[i] = PX4_ISFINITE(actuator_sp(i)) ? actuator_sp(i) : 0.f; }

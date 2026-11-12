@@ -5,7 +5,7 @@
 #include "../../control_allocator/VehicleActuatorEffectiveness/VoliroTActuatorDynamics.hpp"
 #include "../../control_allocator/VehicleActuatorEffectiveness/VoliroTTailMotor.hpp"
 #include "../../vector_att_control/VectorAttitude/VectorAttitude.hpp"
-#include <lib/vector_control/VectorAngularAccelerationControl.hpp>
+#include "VoliroRateTest.hpp"
 #include <geo/geo.h>
 #include <cassert>
 #include <cstdio>
@@ -221,8 +221,8 @@ static void test_closed_loop_fault(bool stuck)
 	VectorAttitude attitude; attitude.setFullAttitude(true);
 	attitude.setProportionalGain(Vector3f(4.f, 4.f, 2.f), 1.f);
 	attitude.setRateLimit(Vector3f(2.f, 2.f, 2.f));
-	vector_control::AngularAccelerationControl rate;
-	rate.configure(Vector3f(8.f, 12.f, 8.f), Vector3f(1.f, .3f, 1.f), Vector3f(.3f, .3f, .3f), 2.f, 2.f);
+	VectorRateCore rate;
+	configureBaselineRate(rate);
 	Monitor monitor; Monitor::Settings settings;
 	settings.x = g.x; settings.z = g.z; settings.tail = g.tail; settings.mass = mass; settings.inertia = inertia;
 	Vector3f p(0.f, 0.f, -2.f), velocity{}, acceleration{}, omega{}, angular_acceleration{}, shortfall{}, torque_shortfall{};
@@ -284,8 +284,7 @@ static void test_closed_loop_fault(bool stuck)
 		}
 
 		attitude.setAttitudeSetpoint(target, 0.f);
-		const Vector3f torque = inertia.emult(rate.update(attitude.update(q) - omega, angular_acceleration, {},
-						      torque_shortfall.edivide(inertia), dt, false)) + omega.cross(inertia.emult(omega));
+		const Vector3f torque = baselineRateTorque(rate, omega, attitude.update(q), angular_acceleration, {}, torque_shortfall, inertia, dt, q);
 		const Vector3f body_force = Dcmf(q).transpose() * force;
 		auto solution = monitor.fault() ? voliro_t::allocateAtTilt(g, body_force, torque, monitor.observed())
 				: voliro_t::allocateForcePitch(g, body_force, torque, servo_command, math::radians(160.f), settings.servo_rate * dt, true);

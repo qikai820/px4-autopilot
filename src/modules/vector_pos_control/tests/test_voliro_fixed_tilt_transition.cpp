@@ -6,7 +6,7 @@
 #include <lib/vector_control/VoliroFixedTiltTransition.hpp>
 #include <lib/vector_control/VoliroTiltMonitor.hpp>
 #include <lib/vector_control/VectorAttitudeReference.hpp>
-#include <lib/vector_control/VectorAngularAccelerationControl.hpp>
+#include "VoliroRateTest.hpp"
 #include <geo/geo.h>
 #include <cassert>
 #include <cstdio>
@@ -66,8 +66,8 @@ static Metrics simulate(float degrees, bool staged, float motor_tau = 0.f, float
 	VectorAttitude attitude; attitude.setFullAttitude(true);
 	attitude.setProportionalGain(Vector3f(4.f, 4.f, 2.f), 1.f);
 	attitude.setRateLimit(Vector3f(math::radians(120.f), math::radians(160.f), math::radians(80.f)));
-	vector_control::AngularAccelerationControl rate;
-	rate.configure(Vector3f(8.f, 12.f, 8.f), Vector3f(1.f, .3f, 1.f), Vector3f(.3f, .3f, .3f), 2.f, 2.f);
+	VectorRateCore rate;
+	configureBaselineRate(rate);
 	vector_control::AttitudeReference reference;
 	vector_control::AttitudeReference::Settings settings;
 	settings.pitch_rate = math::radians(30.f);
@@ -122,7 +122,7 @@ static Metrics simulate(float degrees, bool staged, float motor_tau = 0.f, float
 			ref_valid = !fixed;
 			if (ref_valid) {
 				assert(reference.update(raw_force, .7f, 0.f, requested ? 0.f : pitch,
-						       reference.pitchAuthority(q), 4.f * dt, settings, ref));
+						       reference.pitchAuthority(q, 1.f / 3.f), 4.f * dt, settings, ref));
 				target = ref.attitude; force = ref.force * total; ref_shortfall = raw_force - ref.force;
 			} else {
 				vehicle_attitude_setpoint_s asp{}; position.getAttitudeSetpoint(asp, 0.f);
@@ -134,13 +134,12 @@ static Metrics simulate(float degrees, bool staged, float motor_tau = 0.f, float
 		}
 		if (k % 2 == 0) {
 			attitude.setAttitudeSetpoint(target, 0.f);
-			attitude.setTaskReference(Vector3f(2.f, 2.f, 1.f), .7f, ref_valid ? ref.omega_ned : Vector3f{});
+			attitude.setTaskReference(Vector3f(4.f, 4.f, 2.f), .7f, ref_valid ? ref.omega_ned : Vector3f{}, ref_valid, 1.f / 3.f);
 			rate_sp = attitude.update(q);
 		}
 		const Vector3f omega_ff = ref_valid ? Vector3f(Dcmf(q).transpose() * ref.omega_ned) : Vector3f{};
 		const Vector3f alpha_ff = ref_valid ? Vector3f(Dcmf(q).transpose() * ref.alpha_ned - omega.cross(omega_ff)) : Vector3f{};
-		const Vector3f torque = inertia.emult(alpha_ff + rate.update(rate_sp - omega, alpha, alpha_ff,
-					       torque_shortfall.edivide(inertia), dt, false)) + omega.cross(inertia.emult(omega));
+		const Vector3f torque = baselineRateTorque(rate, omega, rate_sp, alpha, alpha_ff, torque_shortfall, inertia, dt, q);
 		const Vector3f body_force = Dcmf(q).transpose() * force;
 		const float center = servo + math::constrain(-servo, -servo_rate * dt, servo_rate * dt);
 		auto solution = fixed ? voliro_t::allocateAtTilt(g, body_force, torque, center)

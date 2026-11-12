@@ -9,6 +9,7 @@
 #pragma pop_macro("ERROR")
 #include <matrix/matrix/math.hpp>
 #include <cassert>
+#include <string>
 
 /** In-process JSBSim plant. The runner removes network input/output blocks
  * from a temporary model copy; this never connects to a vehicle or bridge. */
@@ -20,7 +21,7 @@ public:
 	{
 		_fdm.SetDebugLevel(0);
 		_fdm.Setdt(dt); // initialize FCS lag coefficients at the actual step size
-		assert(_fdm.LoadModel(SGPath(model), SGPath(model), SGPath(systems), "voliro_t", false));
+		assert(_fdm.LoadModel(SGPath(model), SGPath(std::string(model) + "/engine"), SGPath(systems), "voliro_t", false));
 		const matrix::Eulerf euler(q);
 		_fdm.GetIC()->SetAltitudeASLFtIC(10000.);
 		_fdm.GetIC()->SetPhiRadIC(euler.phi());

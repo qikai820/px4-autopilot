@@ -1,16 +1,34 @@
 /**
- * Voliro T dynamics control mode
+ * Voliro T large-angle reference control mode
  *
- * Requires calibrated VEC_IXX/IYY/IZZ and VEC_TQ_R/P/Y. Applied at module
- * startup only. Reboot after changes so tasks, controllers and allocation agree.
- * Legacy VC_* parameters retain their meaning in mode 0.
+ * Both modes retain VC_* attitude/rate gain strength and normalized-torque PID
+ * with the same per-axis integral limits. Mode 1 maps attitude gains to task
+ * directions and adds fresh angular references. Inertia is used for acceleration
+ * feedforward and optional VEC_GYRO_FF, not to scale PID feedback. Applied at
+ * startup only; reboot so tasks, controllers and allocation agree.
  *
  * @value 0 Legacy quaternion and normalized-torque rate PID
- * @value 1 Task-frame attitude and inertia-normalized rate control
+ * @value 1 Task-frame attitude and reference feedforward with mode-0 rate PID
  * @reboot_required true
  * @group Voliro Dynamics
  */
 PARAM_DEFINE_INT32(VT_CTRL_MODE, 0);
+
+/**
+ * Near-vertical feedback bandwidth scale
+ *
+ * Mode 1 retains VC_* attitude strength through 45 deg independent pitch.
+ * Smoothly reduces outer attitude gains to this fraction at 75..105 deg,
+ * where tail reversal around zero trim adds delay. Pitch integral accumulation
+ * is slowed by the same fraction; its state and per-axis limits are NOT scaled.
+ * Base VC_* rate gains remain unchanged. Independent-pitch reference speed
+ * is limited by the same schedule; its consistent derivatives feed forward.
+ * @min 0.1
+ * @max 1
+ * @decimal 3
+ * @group Voliro Dynamics
+ */
+PARAM_DEFINE_FLOAT(VT_ATT_SCALE, 0.333333f);
 
 /**
  * Voliro T maximum reverse tail thrust
@@ -38,167 +56,142 @@ PARAM_DEFINE_FLOAT(CA_CT_T5RMAX, 0.0f);
 PARAM_DEFINE_FLOAT(VT_POS_AW, 1.0f);
 
 /**
- * Task-frame bank attitude gain
+ * Unused legacy Voliro feedback setting
  *
- * Used by VT_CTRL_MODE=1 only.
- * @unit 1/s
- * @min 0.1
- * @max 10
- * @decimal 3
- * @group Voliro Dynamics
+ * Retained for parameter-file compatibility. Both modes now use VC_* attitude
+ * and rate PID gains, VC_RR/PR/YR_INT_LIM, and saturation-direction gating.
+ * This parameter has no control effect.
+ * @group Voliro Legacy
  */
 PARAM_DEFINE_FLOAT(VT_BANK_P, 2.0f);
 
 /**
- * Task-frame pitch attitude gain
+ * Unused legacy Voliro feedback setting
  *
- * Used by VT_CTRL_MODE=1 only.
- * @unit 1/s
- * @min 0.1
- * @max 10
- * @decimal 3
- * @group Voliro Dynamics
+ * Retained for parameter-file compatibility. Both modes now use VC_* attitude
+ * and rate PID gains, VC_RR/PR/YR_INT_LIM, and saturation-direction gating.
+ * This parameter has no control effect.
+ * @group Voliro Legacy
  */
 PARAM_DEFINE_FLOAT(VT_PITCH_P, 2.0f);
 
 /**
- * Task-frame heading attitude gain
+ * Unused legacy Voliro feedback setting
  *
- * Used by VT_CTRL_MODE=1 only.
- * @unit 1/s
- * @min 0.1
- * @max 10
- * @decimal 3
- * @group Voliro Dynamics
+ * Retained for parameter-file compatibility. Both modes now use VC_* attitude
+ * and rate PID gains, VC_RR/PR/YR_INT_LIM, and saturation-direction gating.
+ * This parameter has no control effect.
+ * @group Voliro Legacy
  */
 PARAM_DEFINE_FLOAT(VT_HEAD_P, 1.0f);
 
 /**
- * Body X rate feedback to angular acceleration
+ * Unused legacy Voliro feedback setting
  *
- * Used by VT_CTRL_MODE=1 only.
- * @unit 1/s
- * @min 0.1
- * @max 40
- * @decimal 3
- * @group Voliro Dynamics
+ * Retained for parameter-file compatibility. Both modes now use VC_* attitude
+ * and rate PID gains, VC_RR/PR/YR_INT_LIM, and saturation-direction gating.
+ * This parameter has no control effect.
+ * @group Voliro Legacy
  */
 PARAM_DEFINE_FLOAT(VT_RATE_PX, 8.0f);
 
 /**
- * Body X rate integral to angular acceleration
+ * Unused legacy Voliro feedback setting
  *
- * Used by VT_CTRL_MODE=1 only.
- * Gain unit: 1/s^2 (inverse squared seconds).
- * @min 0
- * @max 20
- * @decimal 3
- * @group Voliro Dynamics
+ * Retained for parameter-file compatibility. Both modes now use VC_* attitude
+ * and rate PID gains, VC_RR/PR/YR_INT_LIM, and saturation-direction gating.
+ * This parameter has no control effect.
+ * @group Voliro Legacy
  */
 PARAM_DEFINE_FLOAT(VT_RATE_IX, 1.0f);
 
 /**
- * Body X angular acceleration feedback gain
+ * Unused legacy Voliro feedback setting
  *
- * Used by VT_CTRL_MODE=1 only.
- * @min 0
- * @max 3
- * @decimal 3
- * @group Voliro Dynamics
+ * Retained for parameter-file compatibility. Both modes now use VC_* attitude
+ * and rate PID gains, VC_RR/PR/YR_INT_LIM, and saturation-direction gating.
+ * This parameter has no control effect.
+ * @group Voliro Legacy
  */
 PARAM_DEFINE_FLOAT(VT_RATE_DX, 0.3f);
 
 /**
- * Body Y rate feedback to angular acceleration
+ * Unused legacy Voliro feedback setting
  *
- * Used by VT_CTRL_MODE=1 only.
- * @unit 1/s
- * @min 0.1
- * @max 40
- * @decimal 3
- * @group Voliro Dynamics
+ * Retained for parameter-file compatibility. Both modes now use VC_* attitude
+ * and rate PID gains, VC_RR/PR/YR_INT_LIM, and saturation-direction gating.
+ * This parameter has no control effect.
+ * @group Voliro Legacy
  */
 PARAM_DEFINE_FLOAT(VT_RATE_PY, 12.0f);
 
 /**
- * Body Y rate integral to angular acceleration
+ * Unused legacy Voliro feedback setting
  *
- * Used by VT_CTRL_MODE=1 only.
- * Gain unit: 1/s^2 (inverse squared seconds).
- * @min 0
- * @max 20
- * @decimal 3
- * @group Voliro Dynamics
+ * Retained for parameter-file compatibility. Both modes now use VC_* attitude
+ * and rate PID gains, VC_RR/PR/YR_INT_LIM, and saturation-direction gating.
+ * This parameter has no control effect.
+ * @group Voliro Legacy
  */
 PARAM_DEFINE_FLOAT(VT_RATE_IY, 0.3f);
 
 /**
- * Body Y angular acceleration feedback gain
+ * Unused legacy Voliro feedback setting
  *
- * Used by VT_CTRL_MODE=1 only.
- * @min 0
- * @max 3
- * @decimal 3
- * @group Voliro Dynamics
+ * Retained for parameter-file compatibility. Both modes now use VC_* attitude
+ * and rate PID gains, VC_RR/PR/YR_INT_LIM, and saturation-direction gating.
+ * This parameter has no control effect.
+ * @group Voliro Legacy
  */
 PARAM_DEFINE_FLOAT(VT_RATE_DY, 0.3f);
 
 /**
- * Body Z rate feedback to angular acceleration
+ * Unused legacy Voliro feedback setting
  *
- * Used by VT_CTRL_MODE=1 only.
- * @unit 1/s
- * @min 0.1
- * @max 40
- * @decimal 3
- * @group Voliro Dynamics
+ * Retained for parameter-file compatibility. Both modes now use VC_* attitude
+ * and rate PID gains, VC_RR/PR/YR_INT_LIM, and saturation-direction gating.
+ * This parameter has no control effect.
+ * @group Voliro Legacy
  */
 PARAM_DEFINE_FLOAT(VT_RATE_PZ, 8.0f);
 
 /**
- * Body Z rate integral to angular acceleration
+ * Unused legacy Voliro feedback setting
  *
- * Used by VT_CTRL_MODE=1 only.
- * Gain unit: 1/s^2 (inverse squared seconds).
- * @min 0
- * @max 20
- * @decimal 3
- * @group Voliro Dynamics
+ * Retained for parameter-file compatibility. Both modes now use VC_* attitude
+ * and rate PID gains, VC_RR/PR/YR_INT_LIM, and saturation-direction gating.
+ * This parameter has no control effect.
+ * @group Voliro Legacy
  */
 PARAM_DEFINE_FLOAT(VT_RATE_IZ, 1.0f);
 
 /**
- * Body Z angular acceleration feedback gain
+ * Unused legacy Voliro feedback setting
  *
- * Used by VT_CTRL_MODE=1 only.
- * @min 0
- * @max 3
- * @decimal 3
- * @group Voliro Dynamics
+ * Retained for parameter-file compatibility. Both modes now use VC_* attitude
+ * and rate PID gains, VC_RR/PR/YR_INT_LIM, and saturation-direction gating.
+ * This parameter has no control effect.
+ * @group Voliro Legacy
  */
 PARAM_DEFINE_FLOAT(VT_RATE_DZ, 0.3f);
 
 /**
- * Angular acceleration integral limit
+ * Unused legacy Voliro feedback setting
  *
- * Used by VT_CTRL_MODE=1 only.
- * @unit rad/s^2
- * @min 0
- * @max 20
- * @decimal 3
- * @group Voliro Dynamics
+ * Retained for parameter-file compatibility. Both modes now use VC_* attitude
+ * and rate PID gains, VC_RR/PR/YR_INT_LIM, and saturation-direction gating.
+ * This parameter has no control effect.
+ * @group Voliro Legacy
  */
 PARAM_DEFINE_FLOAT(VT_RATE_ILIM, 2.0f);
 
 /**
- * Allocation residual back-calculation gain
+ * Unused legacy Voliro feedback setting
  *
- * Used by VT_CTRL_MODE=1 only.
- * @unit 1/s
- * @min 0
- * @max 20
- * @decimal 3
- * @group Voliro Dynamics
+ * Retained for parameter-file compatibility. Both modes now use VC_* attitude
+ * and rate PID gains, VC_RR/PR/YR_INT_LIM, and saturation-direction gating.
+ * This parameter has no control effect.
+ * @group Voliro Legacy
  */
 PARAM_DEFINE_FLOAT(VT_RATE_AW, 2.0f);
 

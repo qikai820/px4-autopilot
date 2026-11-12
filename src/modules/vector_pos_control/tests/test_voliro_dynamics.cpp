@@ -5,7 +5,7 @@
 #include "../../control_allocator/VehicleActuatorEffectiveness/VoliroTTailMotor.hpp"
 #include "../../control_allocator/VehicleActuatorEffectiveness/VoliroTActuatorDynamics.hpp"
 #include <lib/vector_control/VectorAttitudeReference.hpp>
-#include <lib/vector_control/VectorAngularAccelerationControl.hpp>
+#include "VoliroRateTest.hpp"
 #include <lib/mathlib/math/filter/AlphaFilter.hpp>
 #include <geo/geo.h>
 #include <cassert>
@@ -18,11 +18,12 @@
 #include <memory>
 static const char *native_model = nullptr, *native_systems = nullptr;
 static matrix::Vector3f native_inertia{};
+static float native_mass{5.04f};
 static voliro_t::Geometry native_geometry{};
 #endif
 
 using namespace matrix;
-struct Tuning { float py{12.f}, iy{.3f}, dy{.3f}, pitch_p{2.f}; };
+struct Tuning { float py{.1f}, iy{.4f}, dy{.001f}, pitch_p{3.f}; };
 static Tuning tuning;
 
 struct Metrics {
@@ -37,7 +38,11 @@ struct Metrics {
 static Metrics simulate(bool dynamics, float degrees, float motor_tau, float inertia_scale, bool transition, FILE *csv = nullptr,
 			float predicted_motor_tau = 0.f, bool asymmetric_tail = false, bool feedforward_loss = false, bool reverse_pitch = false)
 {
-	constexpr float dt = .0025f, mass = 5.04f, total_thrust = 168.f;
+	constexpr float dt = .0025f, total_thrust = 168.f;
+	float mass = 5.04f;
+#ifdef VECTOR_TEST_JSBSIM
+	if (native_model) { mass = native_mass; }
+#endif
 	constexpr float gravity = CONSTANTS_ONE_G;
 	const float hover = mass * gravity / total_thrust;
 	Vector3f inertia(.18f, .12f, .43f);
@@ -61,13 +66,14 @@ static Metrics simulate(bool dynamics, float degrees, float motor_tau, float ine
 	position.setTiltLimit(math::radians(20.f));
 	VectorAttitude attitude;
 	attitude.setFullAttitude(true);
-	attitude.setProportionalGain(Vector3f(5.5f, 3.f, 1.5f), 1.f);
+	attitude.setProportionalGain(Vector3f(5.5f, 3.f, 2.8f), 1.f);
 	attitude.setRateLimit(Vector3f(math::radians(120.f), math::radians(160.f), math::radians(80.f)));
 	VectorRateCore legacy_rate;
-	legacy_rate.setPidGains(Vector3f(.26f, .11f, .1f), Vector3f(.2f, .2f, .1f), Vector3f(.002f, .001f, 0.f));
-	legacy_rate.setIntegratorLimit(Vector3f(.3f, .3f, .3f));
-	vector_control::AngularAccelerationControl rate;
-	rate.configure(Vector3f(8.f, tuning.py, 8.f), Vector3f(1.f, tuning.iy, 1.f), Vector3f(.3f, tuning.dy, .3f), 2.f, 2.f);
+	configureBaselineRate(legacy_rate);
+	VectorRateCore rate;
+	configureBaselineRate(rate);
+	rate.setPidGains(Vector3f(.26f, tuning.py, .3f), Vector3f(.2f, tuning.iy, .1f), Vector3f(.003f, tuning.dy, 0.f));
+
 	vector_control::AttitudeReference reference;
 	vector_control::AttitudeReference::Settings reference_settings;
 	reference_settings.pitch_rate = math::radians(30.f);
@@ -133,7 +139,7 @@ static Metrics simulate(bool dynamics, float degrees, float motor_tau, float ine
 			const Vector3f raw_force(out.thrust);
 
 			if (dynamics) {
-				assert(reference.update(raw_force, heading, 0.f, demanded_pitch, reference.pitchAuthority(q), 4.f * dt, reference_settings, ref));
+				assert(reference.update(raw_force, heading, 0.f, demanded_pitch, reference.pitchAuthority(q, 1.f / 3.f), 4.f * dt, reference_settings, ref));
 				qd = ref.attitude; force = ref.force;
 				reference_shortfall = raw_force - force;
 
@@ -149,8 +155,8 @@ static Metrics simulate(bool dynamics, float degrees, float motor_tau, float ine
 			attitude.setAttitudeSetpoint(qd, 0.f);
 
 			if (dynamics) {
-				attitude.setTaskReference(Vector3f(2.f, tuning.pitch_p, 1.f), ref.heading,
-							  feedforward_available ? ref.omega_ned : Vector3f{});
+				attitude.setTaskReference(Vector3f(5.5f, tuning.pitch_p, 2.8f), ref.heading,
+							  feedforward_available ? ref.omega_ned : Vector3f{}, feedforward_available, 1.f / 3.f);
 			}
 
 			rate_sp = attitude.update(q);
@@ -161,8 +167,7 @@ static Metrics simulate(bool dynamics, float degrees, float motor_tau, float ine
 		if (dynamics) {
 			const Vector3f omega_ff = feedforward_available ? Vector3f(Dcmf(q).transpose() * ref.omega_ned) : Vector3f{};
 			const Vector3f alpha_ff = feedforward_available ? Vector3f(Dcmf(q).transpose() * ref.alpha_ned - omega.cross(omega_ff)) : Vector3f{};
-			torque = inertia.emult(alpha_ff + rate.update(rate_sp - omega, angular_acceleration, alpha_ff,
-					       torque_shortfall.edivide(inertia), dt, false)) + omega.cross(inertia.emult(omega));
+			torque = baselineRateTorque(rate, omega, rate_sp, angular_acceleration, alpha_ff, torque_shortfall, inertia, dt, q);
 
 		} else {
 			legacy_rate.setSaturationStatus(Vector3<bool>(torque_shortfall(0) > 1e-5f, torque_shortfall(1) > 1e-5f, torque_shortfall(2) > 1e-5f),
@@ -244,7 +249,11 @@ static Metrics simulate(bool dynamics, float degrees, float motor_tau, float ine
 				(double)rate_sp(1), (double)commands[4], (double)torque_shortfall(1), (double)rate.integral()(1));
 		}
 
-		if (!q.isAllFinite() || !p.isAllFinite() || p.norm() > 100.f || omega.norm() > 30.f) { metrics.finite = false; break; }
+		if (!q.isAllFinite() || !p.isAllFinite() || p.norm() > 100.f || omega.norm() > 30.f) {
+			printf("Divergence at %.3fs: |p|=%.3f |omega|=%.3f integral=%.4f/%.4f/%.4f\n", (double)time,
+			       (double)p.norm(), (double)omega.norm(), (double)rate.integral()(0), (double)rate.integral()(1), (double)rate.integral()(2));
+			metrics.finite = false; break;
+		}
 	}
 
 	metrics.final_position = final_samples ? sqrtf(position_energy / final_samples) : INFINITY;
@@ -272,15 +281,27 @@ static void requireStable(const Metrics &metrics, bool transition, bool feedforw
 int main(int argc, char *argv[])
 {
 	setvbuf(stdout, nullptr, _IOLBF, 0);
+	if ((argc == 7 || argc == 11) && strcmp(argv[1], "--case") == 0) {
+		if (argc == 11) { tuning = {strtof(argv[7], nullptr), strtof(argv[8], nullptr), strtof(argv[9], nullptr), strtof(argv[10], nullptr)}; }
+		FILE *csv = fopen(argv[6], "w");
+		assert(csv);
+		const auto metrics = simulate(true, strtof(argv[2], nullptr), strtof(argv[3], nullptr),
+					      strtof(argv[4], nullptr), atoi(argv[5]), csv);
+		fclose(csv);
+		requireStable(metrics, atoi(argv[5]));
+		return 0;
+	}
 #ifdef VECTOR_TEST_JSBSIM
 
-	if (argc == 11 && strcmp(argv[1], "--jsbsim") == 0) {
+	if (argc == 12 && strcmp(argv[1], "--jsbsim") == 0) {
 		native_model = argv[2]; native_systems = argv[3];
-		native_inertia = Vector3f(strtof(argv[4], nullptr), strtof(argv[5], nullptr), strtof(argv[6], nullptr));
-		native_geometry = {strtof(argv[7], nullptr), strtof(argv[8], nullptr), strtof(argv[9], nullptr), strtof(argv[10], nullptr),
+		native_mass = strtof(argv[4], nullptr);
+		native_inertia = Vector3f(strtof(argv[5], nullptr), strtof(argv[6], nullptr), strtof(argv[7], nullptr));
+		native_geometry = {strtof(argv[8], nullptr), strtof(argv[9], nullptr), strtof(argv[10], nullptr), strtof(argv[11], nullptr),
 				   39.5f, 10.f, .02f, 6.f
 				  };
 		puts("Native JSBSim plant; current XML inertia/geometry, 6 N reverse tail; no network I/O");
+		simulate(false, 0.f, 0.f, 1.f, false); // baseline comparison, same unmodified plant
 		simulate(false, 90.f, 0.f, 1.f, false);
 
 		for (float angle : {0.f, -160.f, -140.f, -100.f, -90.f, -85.f, 85.f, 90.f, 100.f, 140.f, 160.f}) {

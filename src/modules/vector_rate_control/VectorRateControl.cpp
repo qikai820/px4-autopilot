@@ -32,6 +32,7 @@
  ****************************************************************************/
 
 #include "VectorRateControl.hpp"
+#include <lib/vector_control/VoliroManualAirmode.hpp>
 #include <lib/vector_control/VectorGeometry.hpp>
 
 #include <drivers/drv_hrt.h>
@@ -40,6 +41,7 @@
 #include <mathlib/math/Functions.hpp>
 #include <px4_platform_common/events.h>
 #include <lib/vector_control/VectorReferenceValidity.hpp>
+#include <lib/vector_control/VectorReferenceGains.hpp>
 
 using namespace matrix;
 using namespace time_literals;
@@ -67,6 +69,7 @@ VectorRateControl::~VectorRateControl()
 int VectorRateControl::print_status()
 {
 	PX4_INFO("Voliro dynamics: %s (startup setting)", _dynamics_enabled ? "enabled" : "disabled");
+	PX4_INFO("Rate feedback: mode-0 VC_* normalized-torque PID and per-axis integral limits");
 	return 0;
 }
 
@@ -106,10 +109,6 @@ VectorRateControl::parameters_updated()
 				  radians(_param_mc_acro_y_max.get()));
 
 	_output_lpf_yaw.setCutoffFreq(_param_mc_yaw_tq_cutoff.get());
-	_acceleration_control.configure(Vector3f(_param_rate_px.get(), _param_rate_py.get(), _param_rate_pz.get()),
-					Vector3f(_param_rate_ix.get(), _param_rate_iy.get(), _param_rate_iz.get()),
-					Vector3f(_param_rate_dx.get(), _param_rate_dy.get(), _param_rate_dz.get()),
-					_param_rate_ilim.get(), _param_rate_aw.get());
 }
 
 void
@@ -222,7 +221,6 @@ VectorRateControl::Run()
 
 				if (vehicle_rates_setpoint.reset_integral) {
 					_rate_control.resetIntegral();
-					_acceleration_control.reset();
 				}
 			}
 		}
@@ -233,7 +231,6 @@ VectorRateControl::Run()
 			// reset integral if disarmed
 			if (!_vehicle_control_mode.flag_armed || _vehicle_status.vehicle_type != vehicle_status_s::VEHICLE_TYPE_ROTARY_WING) {
 				_rate_control.resetIntegral();
-				_acceleration_control.reset();
 			}
 
 			// update saturation status from control allocation feedback
@@ -260,23 +257,30 @@ VectorRateControl::Run()
 			}
 
 			// run rate controller
-			Vector3f torque_setpoint{};
+			Vector3f alpha_ff{}, gyro{}, unallocated_torque{};
+			bool feedforward_valid = false;
+			Vector3f integral_rate_scale(1.f, 1.f, 1.f);
 			const Vector3f inertia(math::max(_param_vector_ixx.get(), .001f), math::max(_param_vector_iyy.get(), .001f),
 					       math::max(_param_vector_izz.get(), .001f));
 			const Vector3f scale = vector_control::torqueScale(_param_vector_tq_r.get(), _param_vector_tq_p.get(), _param_vector_tq_y.get());
 
 			if (_dynamics_enabled) {
 				vehicle_attitude_s attitude{};
-				const bool feedforward_valid = _vehicle_control_mode.flag_multicopter_position_control_enabled
-							       && _vector_reference.valid
-							       && _vector_attitude_sub.copy(&attitude) && hrt_elapsed_time(&attitude.timestamp) < 100_ms
-							       && vector_control::referenceMatches(hrt_absolute_time(), _rates_timestamp,
-									       _vector_reference.timestamp, _vector_reference.timestamp_sample,
-									       _vector_reference.quat_reset_counter, attitude.quat_reset_counter)
-							       && Quatf(attitude.q).isAllFinite() && fabsf(Quatf(attitude.q).norm_squared() - 1.f) < .01f
-							       && Vector3f(_vector_reference.omega_ned).isAllFinite()
-							       && Vector3f(_vector_reference.alpha_ned).isAllFinite();
-				Vector3f alpha_ff{}, unallocated_torque{};
+				const bool attitude_valid = _vector_attitude_sub.copy(&attitude) && hrt_elapsed_time(&attitude.timestamp) < 100_ms
+							    && Quatf(attitude.q).isAllFinite() && fabsf(Quatf(attitude.q).norm_squared() - 1.f) < .01f;
+
+				if (attitude_valid) {
+					integral_rate_scale(1) = vector_control::referenceFeedbackScale(Quatf(attitude.q), _param_vertical_gain_scale.get());
+				}
+
+				feedforward_valid = _vehicle_control_mode.flag_multicopter_position_control_enabled
+						    && _vector_reference.valid
+						    && attitude_valid
+						    && vector_control::referenceMatches(hrt_absolute_time(), _rates_timestamp,
+								    _vector_reference.timestamp, _vector_reference.timestamp_sample,
+								    _vector_reference.quat_reset_counter, attitude.quat_reset_counter)
+						    && Vector3f(_vector_reference.omega_ned).isAllFinite()
+						    && Vector3f(_vector_reference.alpha_ned).isAllFinite();
 
 				if (feedforward_valid) {
 					const Dcmf world_to_body = Dcmf(Quatf(attitude.q)).transpose();
@@ -289,32 +293,43 @@ VectorRateControl::Run()
 					unallocated_torque = Vector3f(_allocation_feedback.unallocated_torque).emult(scale);
 				}
 
-				const Vector3f alpha_fb = _acceleration_control.update(_rates_setpoint - rates, angular_accel, alpha_ff,
-							  unallocated_torque.edivide(inertia), dt, _maybe_landed || _landed || !_vehicle_control_mode.flag_armed);
-				const Vector3f gyro = rates.cross(inertia.emult(rates));
-				const Vector3f torque = inertia.emult(alpha_ff + alpha_fb) + gyro;
-				torque_setpoint = torque.edivide(scale);
-
-				if (hrt_elapsed_time(&_last_vector_status) >= 20_ms) {
-					vector_rate_control_status_s status{};
-					status.timestamp = hrt_absolute_time();
-					status.timestamp_sample = angular_velocity.timestamp_sample;
-					(_rates_setpoint - rates).copyTo(status.rate_error);
-					alpha_ff.copyTo(status.alpha_feedforward); alpha_fb.copyTo(status.alpha_feedback);
-					_acceleration_control.integral().copyTo(status.alpha_integral);
-					gyro.copyTo(status.torque_gyro); torque.copyTo(status.torque_command);
-					unallocated_torque.copyTo(status.torque_unallocated);
-					status.feedforward_valid = feedforward_valid;
-					_vector_status_pub.publish(status);
-					_last_vector_status = status.timestamp;
-				}
-
-			} else {
-				torque_setpoint = _rate_control.update(rates, _rates_setpoint, angular_accel, dt, _maybe_landed || _landed);
 			}
 
-			if (!_dynamics_enabled && _param_vector_gyro_ff.get()) {
-				torque_setpoint += rates.cross(inertia.emult(rates)).edivide(scale);
+			if (_param_vector_airframe.get() == 17
+			    && vector_control::voliroManualAirmode(_vehicle_control_mode, hrt_absolute_time(), _param_vector_airmode.get())) {
+				integral_rate_scale(1) = math::min(integral_rate_scale(1),
+								   vector_control::voliroAirmodeIntegralScale(-_thrust_setpoint(2), _param_airmode_hover.get()));
+			}
+
+			// Use exactly the mode-0 VC_* PID and per-axis integral limits in both
+			// modes. No model-residual back-calculation or inertia-scaled feedback.
+			const Vector3f accel_to_torque = feedforward_valid ? inertia.edivide(scale) : Vector3f{};
+			Vector3f torque_setpoint = _rate_control.update(rates, _rates_setpoint, angular_accel, dt,
+						   _maybe_landed || _landed, alpha_ff, accel_to_torque, integral_rate_scale);
+			const Vector3f accel_torque = inertia.emult(alpha_ff);
+			const Vector3f pid_output = torque_setpoint - accel_torque.edivide(scale);
+
+			if (_param_vector_gyro_ff.get()) {
+				gyro = rates.cross(inertia.emult(rates));
+				torque_setpoint += gyro.edivide(scale);
+			}
+
+			if (_dynamics_enabled && hrt_elapsed_time(&_last_vector_status) >= 20_ms) {
+				vector_rate_control_status_s status{};
+				status.timestamp = hrt_absolute_time();
+				status.timestamp_sample = angular_velocity.timestamp_sample;
+				(_rates_setpoint - rates).copyTo(status.rate_error);
+				alpha_ff.copyTo(status.alpha_feedforward);
+				pid_output.emult(scale).edivide(inertia).copyTo(status.alpha_feedback);
+				_rate_control.integral().emult(scale).edivide(inertia).copyTo(status.alpha_integral);
+				pid_output.copyTo(status.pid_output);
+				_rate_control.integral().copyTo(status.integral_output);
+				accel_torque.copyTo(status.torque_accel_feedforward);
+				gyro.copyTo(status.torque_gyro); torque_setpoint.emult(scale).copyTo(status.torque_command);
+				unallocated_torque.copyTo(status.torque_unallocated);
+				status.feedforward_valid = feedforward_valid;
+				_vector_status_pub.publish(status);
+				_last_vector_status = status.timestamp;
 			}
 
 			// apply low-pass filtering on yaw axis to reduce high frequency torque caused by rotor acceleration
@@ -323,13 +338,6 @@ VectorRateControl::Run()
 			// publish rate controller status
 			rate_ctrl_status_s rate_ctrl_status{};
 			_rate_control.getRateControlStatus(rate_ctrl_status);
-
-			if (_dynamics_enabled) {
-				const Vector3f integral = _acceleration_control.integral().emult(inertia).edivide(scale);
-				rate_ctrl_status.rollspeed_integ = integral(0);
-				rate_ctrl_status.pitchspeed_integ = integral(1);
-				rate_ctrl_status.yawspeed_integ = integral(2);
-			}
 
 			rate_ctrl_status.timestamp = hrt_absolute_time();
 			_controller_status_pub.publish(rate_ctrl_status);
