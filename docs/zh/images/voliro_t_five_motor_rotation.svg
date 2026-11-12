@@ -34,5 +34,5 @@
   <rect x="35" y="532" width="930" height="103" rx="14" fill="#e8eef6"/>
   <text x="55" y="564" class="note">前部两组共轴：M1 与 M2 同轴反转；M3 与 M4 同轴反转。四台电机由 S1 同步倾转。</text>
   <text x="55" y="593" class="note">M5 建议定义：正升力 ↻ CW、反推力 ↺ CCW；实际旋向必须按桨叶手性及台架推力确认。</text>
-  <text x="55" y="620" class="note">前部左右中心距 0.90 m；前电机连线至 M5 为 0.78 m；图形仅表达拓扑，非比例工程图。</text>
+  <text x="55" y="620" class="note">主桨 MSC 21×6.3 · 2 CW + 2 CCW；中心距 0.90 m，前后 0.78 m，上下间距 0.11 m。</text>
 </svg>

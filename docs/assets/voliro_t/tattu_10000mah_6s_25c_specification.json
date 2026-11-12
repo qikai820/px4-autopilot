@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "brand": "Tattu",
+  "series": "经典版",
+  "capacity_mah": 10000,
+  "nominal_voltage_v": 22.2,
+  "cell_series_count": 6,
+  "label_discharge_c": 25,
+  "dimensions_mm": [
+    177,
+    65,
+    56
+  ],
+  "dimension_order": "as printed in the supplied image",
+  "label_mass_kg": 1.275,
+  "derived_nominal_energy_wh": 222,
+  "derived_c_rating_current_a": 250,
+  "source_kind": "user_supplied_product_image",
+  "source_image": "docs/assets/voliro_t/tattu_10000mah_6s_25c_reference.png",
+  "source_sha256": "0590e572965a9af4c2030cacdc642befbaacaadd3b0a8fca8f1e5487e105197f",
+  "manufacturer_datasheet_verified": false,
+  "mass_measured": false,
+  "installed_pack_count": 1,
+  "installed_series_parallel_topology": null,
+  "power_distribution": null,
+  "connector_model": null,
+  "limitations": [
+    "Image label values have not been verified against a manufacturer datasheet or actual pack",
+    "25C x 10Ah = 250A is arithmetic, not an installed continuous-current measurement",
+    "222Wh is nominal arithmetic, not measured usable energy",
+    "Do not add pack mass to the existing 4.70kg total without a full mass inventory",
+    "No firmware battery parameter or simulation supply constant changed from this documentation update"
+  ],
+  "installed_pack_count_source": "Original 2026-11-10 hardware DOCX records a single pack; the new product image does not independently reconfirm installation count",
+  "previous_label_mass_kg": 1.36,
+  "previous_dimensions_mm": [
+    177,
+    66,
+    58
+  ],
+  "historical_position_from_front_rotor_line_m": 0.08,
+  "original_hardware_document": "VoliroT_硬件与动力学设计说明_20261110_H60_PWM修订.docx",
+  "visual_installation": {
+    "date": "2026-11-11",
+    "source": "User instruction: battery below the model, front face aligned with front carbon cross-tube",
+    "length_axis": "body X fore-aft",
+    "alignment_reference": "front cross-tube centreline",
+    "center_aft_of_front_cross_tube_m": 0.0885,
+    "center_body_frd_m": [
+      -0.0185,
+      0,
+      0.075
+    ],
+    "clearance_below_bottom_plate_m": 0.004,
+    "vertical_clearance_measured": false,
+    "mass_cg_inertia_updated": false,
+    "distributed_drag_updated": false
+  }
+}
