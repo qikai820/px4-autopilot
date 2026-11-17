@@ -26,6 +26,8 @@ set VEHICLE_TYPE vector
 
 # --- Airframe type: MorphQuad (CA_AIRFRAME = 16) ---
 param set-default CA_AIRFRAME 16
+# Common vector reference with spatial force capability; Voliro uses VT_CTRL_MODE.
+param set-default VEC_REF_EN 1
 
 # --- Control allocation method: Pseudo-inverse ---
 param set-default CA_METHOD 0

@@ -98,6 +98,8 @@ static Metrics simulate(float degrees, bool staged, float motor_tau = 0.f, float
 			const uint64_t now = 1000000 + uint64_t(k) * 2500;
 			vector_control::VoliroTiltMonitor::Sample sample;
 			sample.acceleration_timestamp = sample.angular_timestamp = sample.command_timestamp = now;
+			sample.velocity_timestamp = now;
+			sample.speed = v.norm();
 			sample.specific_force = actual.force / mass; sample.rates = omega;
 			sample.angular_acceleration = alpha; sample.command = servo;
 			monitor.update(monitor_settings, sample, now, true, true, true);

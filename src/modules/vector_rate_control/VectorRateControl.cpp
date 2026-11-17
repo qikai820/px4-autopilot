@@ -57,7 +57,8 @@ VectorRateControl::VectorRateControl(bool vtol) :
 	_vehicle_status.vehicle_type = vehicle_status_s::VEHICLE_TYPE_ROTARY_WING;
 
 	parameters_updated();
-	_dynamics_enabled = _param_control_mode.get() == 1 && _param_vector_airframe.get() == 17;
+	_reference_enabled = vector_control::referenceEnabled(_param_vector_airframe.get(), _param_control_mode.get(),
+			     _param_spatial_reference.get());
 	_controller_status_pub.advertise();
 }
 
@@ -68,8 +69,9 @@ VectorRateControl::~VectorRateControl()
 
 int VectorRateControl::print_status()
 {
-	PX4_INFO("Voliro dynamics: %s (startup setting)", _dynamics_enabled ? "enabled" : "disabled");
-	PX4_INFO("Rate feedback: mode-0 VC_* normalized-torque PID and per-axis integral limits");
+	PX4_INFO("Vector reference: %s (startup setting)", _reference_enabled ? "enabled" : "disabled");
+	PX4_INFO("Rate feedback: VC_* normalized-torque PID; Voliro reaction P minimum %.3f",
+		 (double)_param_reaction_p_scale.get());
 	return 0;
 }
 
@@ -217,7 +219,7 @@ VectorRateControl::Run()
 				_rates_timestamp = vehicle_rates_setpoint.timestamp;
 				_vector_reference = {};
 
-				if (_dynamics_enabled) { _vector_reference_sub.copy(&_vector_reference); }
+				if (_reference_enabled) { _vector_reference_sub.copy(&_vector_reference); }
 
 				if (vehicle_rates_setpoint.reset_integral) {
 					_rate_control.resetIntegral();
@@ -264,12 +266,12 @@ VectorRateControl::Run()
 					       math::max(_param_vector_izz.get(), .001f));
 			const Vector3f scale = vector_control::torqueScale(_param_vector_tq_r.get(), _param_vector_tq_p.get(), _param_vector_tq_y.get());
 
-			if (_dynamics_enabled) {
+			if (_reference_enabled) {
 				vehicle_attitude_s attitude{};
 				const bool attitude_valid = _vector_attitude_sub.copy(&attitude) && hrt_elapsed_time(&attitude.timestamp) < 100_ms
 							    && Quatf(attitude.q).isAllFinite() && fabsf(Quatf(attitude.q).norm_squared() - 1.f) < .01f;
 
-				if (attitude_valid) {
+				if (attitude_valid && vector_control::capabilities(_param_vector_airframe.get()).forcePlane()) {
 					integral_rate_scale(1) = vector_control::referenceFeedbackScale(Quatf(attitude.q), _param_vertical_gain_scale.get());
 				}
 
@@ -301,8 +303,27 @@ VectorRateControl::Run()
 								   vector_control::voliroAirmodeIntegralScale(-_thrust_setpoint(2), _param_airmode_hover.get()));
 			}
 
-			// Use exactly the mode-0 VC_* PID and per-axis integral limits in both
-			// modes. No model-residual back-calculation or inertia-scaled feedback.
+			// Shape only Voliro's reaction-axis P bandwidth. Prefer the final servo
+			// command, which also reflects fixed-tilt/fault fallback. If telemetry
+			// goes stale, retain the last valid axis rather than raising gain.
+			if (_reference_enabled && _param_vector_airframe.get() == 17) {
+				vector_actuator_status_s actuator{};
+				float tilt = _rate_control.reactionFeedbackTilt();
+
+				if (_reaction_actuator_sub.copy(&actuator) && actuator.timestamp != 0
+				    && actuator.timestamp <= hrt_absolute_time() && hrt_elapsed_time(&actuator.timestamp) < 100_ms
+				    && PX4_ISFINITE(actuator.tilt_command)) {
+					tilt = actuator.tilt_command;
+				}
+
+				// Parameter opt-out and changed torque units also apply during dropout.
+				_rate_control.setReactionFeedback(tilt, _param_reaction_p_scale.get(), scale);
+
+			} else {
+				_rate_control.setReactionFeedback(0.f, 1.f, scale);
+			}
+
+			// Retain normalized VC_* PID, integral limits and directional anti-windup.
 			const Vector3f accel_to_torque = feedforward_valid ? inertia.edivide(scale) : Vector3f{};
 			Vector3f torque_setpoint = _rate_control.update(rates, _rates_setpoint, angular_accel, dt,
 						   _maybe_landed || _landed, alpha_ff, accel_to_torque, integral_rate_scale);
@@ -314,7 +335,7 @@ VectorRateControl::Run()
 				torque_setpoint += gyro.edivide(scale);
 			}
 
-			if (_dynamics_enabled && hrt_elapsed_time(&_last_vector_status) >= 20_ms) {
+			if (_reference_enabled && hrt_elapsed_time(&_last_vector_status) >= 20_ms) {
 				vector_rate_control_status_s status{};
 				status.timestamp = hrt_absolute_time();
 				status.timestamp_sample = angular_velocity.timestamp_sample;
@@ -328,12 +349,14 @@ VectorRateControl::Run()
 				gyro.copyTo(status.torque_gyro); torque_setpoint.emult(scale).copyTo(status.torque_command);
 				unallocated_torque.copyTo(status.torque_unallocated);
 				status.feedforward_valid = feedforward_valid;
+				status.reaction_p_scale = _rate_control.reactionFeedbackScale();
+				status.reaction_tilt = _rate_control.reactionFeedbackTilt();
 				_vector_status_pub.publish(status);
 				_last_vector_status = status.timestamp;
 			}
 
 			// apply low-pass filtering on yaw axis to reduce high frequency torque caused by rotor acceleration
-			if (!_dynamics_enabled) { torque_setpoint(2) = _output_lpf_yaw.update(torque_setpoint(2), dt); }
+			if (!_reference_enabled) { torque_setpoint(2) = _output_lpf_yaw.update(torque_setpoint(2), dt); }
 
 			// publish rate controller status
 			rate_ctrl_status_s rate_ctrl_status{};

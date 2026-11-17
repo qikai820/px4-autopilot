@@ -64,7 +64,8 @@ VectorAttitudeControl::VectorAttitudeControl(bool vtol) :
 	_vtol(vtol)
 {
 	parameters_updated();
-	_dynamics_enabled = _param_control_mode.get() == 1 && _param_vector_airframe.get() == 17;
+	_reference_enabled = vector_control::referenceEnabled(_param_vector_airframe.get(), _param_control_mode.get(),
+			     _param_spatial_reference.get());
 	// Rate of change 5% per second -> 1.6 seconds to ramp to default 8% MPC_MANTHR_MIN
 	_manual_throttle_minimum.setSlewRate(0.05f);
 	// Rate of change 50% per second -> 2 seconds to ramp to 100%
@@ -80,7 +81,7 @@ VectorAttitudeControl::~VectorAttitudeControl()
 
 int VectorAttitudeControl::print_status()
 {
-	PX4_INFO("Voliro dynamics: %s (startup setting)", _dynamics_enabled ? "enabled" : "disabled");
+	PX4_INFO("Vector reference: %s (startup setting)", _reference_enabled ? "enabled" : "disabled");
 	return 0;
 }
 
@@ -162,7 +163,7 @@ VectorAttitudeControl::generate_attitude_setpoint(const Quatf &q, float dt)
 		_yaw_setpoint_stabilized = NAN;
 	}
 
-	const float yaw = _dynamics_enabled ? vector_control::forcePlaneHeading(q) : Eulerf(q).psi();
+	const float yaw = _reference_enabled ? vector_control::forcePlaneHeading(q) : Eulerf(q).psi();
 	const float yaw_stick_input = math::expo_deadzone(_manual_control_setpoint.yaw, .6f, _param_man_deadzone.get());
 	_stick_yaw.generateYawSetpoint(attitude_setpoint.yaw_sp_move_rate, _yaw_setpoint_stabilized, yaw_stick_input, yaw, dt,
 				       _unaided_heading);
@@ -296,7 +297,7 @@ VectorAttitudeControl::Run()
 
 			if (_vehicle_local_position_sub.copy(&vehicle_local_position)) {
 				_heading_good_for_control = vehicle_local_position.heading_good_for_control;
-				_unaided_heading = _dynamics_enabled ? NAN : vehicle_local_position.unaided_heading;
+				_unaided_heading = _reference_enabled ? NAN : vehicle_local_position.unaided_heading;
 			}
 		}
 
@@ -320,7 +321,7 @@ VectorAttitudeControl::Run()
 				_man_roll_input_filter.reset(0.f);
 				_man_pitch_input_filter.reset(0.f);
 				_yaw_setpoint_stabilized = NAN;
-				_stick_yaw.reset(_dynamics_enabled ? vector_control::forcePlaneHeading(q) : Eulerf(q).psi(), _unaided_heading);
+				_stick_yaw.reset(_reference_enabled ? vector_control::forcePlaneHeading(q) : Eulerf(q).psi(), _unaided_heading);
 			}
 
 			// Check for new attitude setpoint
@@ -335,7 +336,7 @@ VectorAttitudeControl::Run()
 					_last_attitude_setpoint = vehicle_attitude_setpoint.timestamp;
 					_vector_reference = {};
 
-					if (_dynamics_enabled) { _vector_reference_sub.copy(&_vector_reference); }
+					if (_reference_enabled) { _vector_reference_sub.copy(&_vector_reference); }
 				}
 			}
 
@@ -359,7 +360,7 @@ VectorAttitudeControl::Run()
 				_quat_reset_counter = v_att.quat_reset_counter;
 			}
 
-			const bool reference_valid = _dynamics_enabled && _vehicle_control_mode.flag_multicopter_position_control_enabled
+			const bool reference_valid = _reference_enabled && _vehicle_control_mode.flag_multicopter_position_control_enabled
 						     && _vector_reference.valid
 						     && vector_control::referenceMatches(hrt_absolute_time(), _last_attitude_setpoint,
 								     _vector_reference.timestamp, _vector_reference.timestamp_sample,
@@ -372,14 +373,14 @@ VectorAttitudeControl::Run()
 			// gains back to the legacy body-axis controller at a large attitude.
 			float feedback_heading = NAN;
 
-			if (_dynamics_enabled) {
+			if (_reference_enabled) {
 				feedback_heading = reference_valid ? _vector_reference.heading
 						   : vector_control::forcePlaneHeading(_attitude_control.attitudeSetpoint());
 
 				if (!PX4_ISFINITE(feedback_heading)) { feedback_heading = vector_control::forcePlaneHeading(q); }
 			}
 
-			if (_dynamics_enabled && PX4_ISFINITE(feedback_heading)) {
+			if (_reference_enabled && vector_control::capabilities(_param_vector_airframe.get()).forcePlane() && PX4_ISFINITE(feedback_heading)) {
 				// Preserve the tuned mode-0 attitude strength, rotating its roll,
 				// pitch and yaw gains into bank/pitch/heading task directions.
 				_attitude_control.setTaskReference(Vector3f(_param_mc_roll_p.get(), _param_mc_pitch_p.get(), _param_mc_yaw_p.get()),
@@ -387,7 +388,7 @@ VectorAttitudeControl::Run()
 								   _param_vertical_gain_scale.get());
 
 			} else {
-				_attitude_control.clearTaskReference();
+				_attitude_control.setAngularReference(Vector3f(_vector_reference.omega_ned), reference_valid);
 			}
 
 			Vector3f rates_sp = _attitude_control.update(q);
@@ -395,7 +396,7 @@ VectorAttitudeControl::Run()
 			const hrt_abstime now = hrt_absolute_time();
 			autotune_attitude_control_status_s pid_autotune;
 
-			if (!_dynamics_enabled && _autotune_attitude_control_status_sub.copy(&pid_autotune)) {
+			if (!_reference_enabled && _autotune_attitude_control_status_sub.copy(&pid_autotune)) {
 				if ((pid_autotune.state == autotune_attitude_control_status_s::STATE_ROLL
 				     || pid_autotune.state == autotune_attitude_control_status_s::STATE_PITCH
 				     || pid_autotune.state == autotune_attitude_control_status_s::STATE_YAW
@@ -413,7 +414,7 @@ VectorAttitudeControl::Run()
 			_thrust_setpoint_body.copyTo(rates_setpoint.thrust_body);
 			rates_setpoint.timestamp = hrt_absolute_time();
 
-			if (_dynamics_enabled) {
+			if (_reference_enabled) {
 				vector_rate_reference_s reference{};
 				reference.timestamp = rates_setpoint.timestamp;
 				reference.timestamp_sample = v_att.timestamp_sample;
@@ -436,7 +437,7 @@ VectorAttitudeControl::Run()
 			_man_roll_input_filter.reset(0.f);
 			_man_pitch_input_filter.reset(0.f);
 			_yaw_setpoint_stabilized = NAN;
-			_stick_yaw.reset(_dynamics_enabled ? vector_control::forcePlaneHeading(q) : Eulerf(q).psi(), _unaided_heading);
+			_stick_yaw.reset(_reference_enabled ? vector_control::forcePlaneHeading(q) : Eulerf(q).psi(), _unaided_heading);
 		}
 
 		if (_landed) {

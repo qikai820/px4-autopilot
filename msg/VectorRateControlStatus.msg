@@ -11,3 +11,6 @@ float32[3] torque_gyro # Nm, body FRD
 float32[3] torque_command # Nm, before allocation
 float32[3] torque_unallocated # Nm, final-command allocator residual
 bool feedforward_valid
+
+float32 reaction_p_scale # Applied Voliro reaction-axis P multiplier; 1 for unmodified feedback
+float32 reaction_tilt # Servo-command axis used for the P projection [rad]

@@ -330,7 +330,7 @@ bool VectorPosition::_dockBrakeControl(float dt)
 
 void VectorPosition::_accelerationControl()
 {
-	if (!_multicopter_fallback && (_vector_airframe == vector_control::morphquad || _vector_airframe == vector_control::voliro_t)) {
+	if (!_multicopter_fallback && vector_control::capabilities(_vector_airframe).vectorThrust()) {
 		// Same velocity PID and hover-thrust calibration as MC, with a free force direction.
 		_thr_sp = (_acc_sp - Vector3f(0.f, 0.f, CONSTANTS_ONE_G)) * (_hover_thrust / CONSTANTS_ONE_G);
 		_thr_sp(2) = math::min(_thr_sp(2), -_lim_thr_min);
@@ -399,7 +399,7 @@ void VectorPosition::getLocalPositionSetpoint(vehicle_local_position_setpoint_s 
 
 void VectorPosition::getAttitudeSetpoint(vehicle_attitude_setpoint_s &attitude_setpoint, float pitch_setpoint) const
 {
-	if (!_multicopter_fallback && (_vector_airframe == vector_control::morphquad || _vector_airframe == vector_control::voliro_t)) {
+	if (!_multicopter_fallback && vector_control::capabilities(_vector_airframe).vectorThrust()) {
 		vector_control::attitudeForForce(_thr_sp, _yaw_sp, _vector_airframe, _lim_tilt,
 						 pitch_setpoint).copyTo(attitude_setpoint.q_d);
 

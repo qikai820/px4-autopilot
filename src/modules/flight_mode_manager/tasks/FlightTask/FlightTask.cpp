@@ -137,7 +137,28 @@ void FlightTask::_evaluateVehicleLocalPosition()
 			vehicle_attitude_s attitude{};
 			const bool fresh = _vector_attitude_sub.copy(&attitude) && attitude.timestamp <= _time_stamp_current
 					   && _time_stamp_current - attitude.timestamp < _timeout;
-			_yaw = fresh ? vector_control::forcePlaneHeading(matrix::Quatf(attitude.q)) : NAN;
+			if (fresh && vector_control::capabilities(_param_vector_airframe.get()).independentRoll()) {
+				if (_spatial_heading_reset_counter != attitude.quat_reset_counter) {
+					_spatial_heading += matrix::Eulerf(matrix::Quatf(attitude.delta_q_reset)).psi();
+					_spatial_heading_reset_counter = attitude.quat_reset_counter;
+				}
+
+				vector_attitude_reference_s reference{};
+				const bool reference_fresh = _vector_reference_sub.copy(&reference) && reference.valid
+							     && reference.timestamp <= _time_stamp_current
+							     && _time_stamp_current - reference.timestamp < _timeout
+							     && reference.quat_reset_counter == attitude.quat_reset_counter
+							     && PX4_ISFINITE(reference.heading);
+				const bool previous_fresh = PX4_ISFINITE(_spatial_heading) && _spatial_heading_timestamp != 0
+							    && _time_stamp_current - _spatial_heading_timestamp < _timeout;
+				const float hint = reference_fresh ? reference.heading : previous_fresh ? _spatial_heading : _yaw;
+				_spatial_heading = vector_control::spatialHeading(matrix::Quatf(attitude.q), hint);
+				_spatial_heading_timestamp = _time_stamp_current;
+				_yaw = _spatial_heading;
+
+			} else {
+				_yaw = fresh ? vector_control::forcePlaneHeading(matrix::Quatf(attitude.q)) : NAN;
+			}
 			// unaided_heading uses the conventional Euler chart. Mixing it with
 			// force-plane heading would falsely trigger StickYaw convergence resets.
 			_unaided_yaw = NAN;

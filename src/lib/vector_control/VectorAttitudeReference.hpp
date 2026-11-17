@@ -20,18 +20,21 @@ public:
 		float heading_acceleration{math::radians(90.f)};
 		float tracking_frequency{8.f}; // rad/s, reference model (not closed-loop bandwidth)
 		float thrust_limit{1.f};
+		ForceSpace force_space{ForceSpace::LongitudinalPlane};
 	};
 
 	struct Output {
 		matrix::Quatf attitude{};
 		matrix::Vector3f force{}, omega_ned{}, alpha_ned{};
 		float heading{0.f};
+		float heading_rate{0.f}; // distinct from omega_ned.z during combined rotations
 		float bank{0.f};
 		float pitch{0.f};
 	};
 
 	void reset() { _initialized = false; _heading = {}; _bank = {}; _pitch = {}; }
 	bool initialized() const { return _initialized; }
+	float heading() const { return _heading.position; }
 	matrix::Quatf attitude() const
 	{
 		return matrix::Quatf(matrix::Eulerf(0.f, 0.f, _heading.position))
@@ -50,16 +53,25 @@ public:
 		       * referenceFeedbackScale(actual, vertical_scale);
 	}
 
-	bool initialize(const matrix::Quatf &q, float bank_limit)
+	bool initialize(const matrix::Quatf &q, float bank_limit, float heading_hint = NAN)
 	{
-		const float heading = forcePlaneHeading(q);
+		const bool spatial = PX4_ISFINITE(heading_hint);
+		const float heading = spatial ? spatialHeading(q, heading_hint) : forcePlaneHeading(q);
 
 		if (!PX4_ISFINITE(heading)) { reset(); return false; }
 
 		const matrix::Dcmf r(q);
 		_heading = {heading, 0.f, 0.f};
-		_bank = {math::constrain(asinf(math::constrain(r(2, 1), -1.f, 1.f)), -bank_limit, bank_limit), 0.f, 0.f};
-		_pitch = {atan2f(-r(2, 0), r(2, 2)), 0.f, 0.f};
+		if (spatial) {
+			const float cs = cosf(heading), sn = sinf(heading);
+			const float bank = atan2f(r(2, 1), -sn * r(0, 1) + cs * r(1, 1));
+			_bank = {math::constrain(bank, -bank_limit, bank_limit), 0.f, 0.f};
+			_pitch = {atan2f(cs * r(0, 2) + sn * r(1, 2), cs * r(0, 0) + sn * r(1, 0)), 0.f, 0.f};
+
+		} else {
+			_bank = {math::constrain(asinf(math::constrain(r(2, 1), -1.f, 1.f)), -bank_limit, bank_limit), 0.f, 0.f};
+			_pitch = {atan2f(-r(2, 0), r(2, 2)), 0.f, 0.f};
+		}
 		_initialized = true;
 		return true;
 	}
@@ -77,15 +89,20 @@ public:
 						* matrix::Quatf(matrix::Eulerf(_bank.position, 0.f, 0.f))
 						* matrix::Quatf(matrix::Eulerf(0.f, _pitch.position, 0.f));
 			// Discard derivatives at a discontinuous estimator frame reset.
-			initialize(delta * q, bank_limit);
+			// Preserve the spatial bank branch after passing +/-90 degrees.
+			const float heading_hint = bank_limit > M_PI_2_F
+						   ? _heading.position + matrix::Eulerf(delta).psi() : NAN;
+			initialize(delta * q, bank_limit, heading_hint);
 		}
 	}
 
 	bool update(const matrix::Vector3f &force, float heading_target, float heading_rate_ff, float pitch_target,
-		    float pitch_authority, float dt, const Settings &s, Output &out)
+		    float pitch_authority, float dt, const Settings &s, Output &out, float roll_target = 0.f)
 	{
 		if (!_initialized || !force.isAllFinite() || !PX4_ISFINITE(pitch_target)
-		    || !PX4_ISFINITE(dt) || dt <= 0.f || dt > .04f || force(2) >= -1e-5f) {
+		    || !PX4_ISFINITE(dt) || dt <= 0.f || dt > .04f || force(2) >= -1e-5f
+		    || (s.force_space == ForceSpace::Spatial && !PX4_ISFINITE(roll_target))
+		    || s.force_space == ForceSpace::FixedAxis) {
 			return false;
 		}
 
@@ -96,15 +113,17 @@ public:
 		// Heading maneuvers need pitch/force recovery margin at the ends of the
 		// common-tilt envelope. Slow the heading reference near those endpoints;
 		// retain the full bank stabilization response.
-		const float heading_authority = math::constrain((s.pitch_limit - fabsf(_pitch.position)) / math::radians(20.f), .2f, 1.f);
+		const bool force_plane = s.force_space == ForceSpace::LongitudinalPlane;
+		const float heading_authority = force_plane ? math::constrain((s.pitch_limit - fabsf(_pitch.position)) / math::radians(20.f), .2f, 1.f) : 1.f;
 		advance(_heading, heading_error, yaw_ff, s.heading_rate * heading_authority,
 			s.heading_acceleration * heading_authority, s.tracking_frequency, dt);
 		_heading.position = matrix::wrap_pi(_heading.position);
 
 		const float cs = cosf(_heading.position), sn = sinf(_heading.position);
 		const float lateral = -sn * force(0) + cs * force(1);
-		const float bank_target = math::constrain(atan2f(lateral, -force(2)), -s.bank_limit, s.bank_limit);
-		advance(_bank, bank_target - _bank.position, 0.f, s.bank_rate, s.bank_acceleration, s.tracking_frequency, dt, s.bank_limit);
+		const float bank_target = math::constrain(force_plane ? atan2f(lateral, -force(2)) : roll_target, -s.bank_limit, s.bank_limit);
+		const float bank_authority = force_plane ? 1.f : math::constrain(pitch_authority, .2f, 1.f);
+		advance(_bank, bank_target - _bank.position, 0.f, s.bank_rate * bank_authority, s.bank_acceleration, s.tracking_frequency, dt, s.bank_limit);
 		limitPosition(_bank, s.bank_limit);
 		const float pitch = math::constrain(pitch_target, -s.pitch_limit, s.pitch_limit);
 		advance(_pitch, pitch - _pitch.position, 0.f, s.pitch_rate * math::constrain(pitch_authority, .2f, 1.f),
@@ -121,17 +140,17 @@ public:
 				+ z.cross(x) * (_heading.rate * _bank.rate)
 				+ (z * _heading.rate + x * _bank.rate).cross(y) * _pitch.rate;
 
-		// Produce force and attitude from the SAME limited bank. Preserve vertical
-		// lift and longitudinal force; report the lateral shortfall to the caller.
+		// Plane vehicles couple force to the limited bank; spatial vehicles keep
+		// all three force components independent of their attitude trajectory.
 		const float longitudinal = cs * force(0) + sn * force(1);
 		const float limited_lateral = -force(2) * tanf(_bank.position);
-		out.force = matrix::Vector3f(cs * longitudinal - sn * limited_lateral,
-					     sn * longitudinal + cs * limited_lateral, force(2));
+		out.force = force_plane ? matrix::Vector3f(cs * longitudinal - sn * limited_lateral,
+					     sn * longitudinal + cs * limited_lateral, force(2)) : force;
 		const float norm = out.force.norm();
 
 		if (norm > s.thrust_limit && norm > 1e-5f) { out.force *= s.thrust_limit / norm; }
 
-		out.heading = _heading.position; out.bank = _bank.position; out.pitch = _pitch.position;
+		out.heading = _heading.position; out.heading_rate = _heading.rate; out.bank = _bank.position; out.pitch = _pitch.position;
 		return out.attitude.isAllFinite() && out.force.isAllFinite() && out.omega_ned.isAllFinite() && out.alpha_ned.isAllFinite();
 	}
 

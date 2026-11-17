@@ -6,6 +6,8 @@ float32 tilt_expected # rad, lag/rate model with the observation filter
 float32 tilt_observed # rad, acceleration and pitch-dynamics observation; held when invalid
 float32 tilt_error # rad, observed - expected; NaN when invalid
 float32 error_duration # s, continuous valid time above threshold
+float32 speed # m/s, NED ground-speed magnitude used by the observation envelope
+bool motion_valid # fresh velocity within VT_TILT_VMAX, or speed gating disabled
 bool enabled
 bool armed
 bool observation_valid

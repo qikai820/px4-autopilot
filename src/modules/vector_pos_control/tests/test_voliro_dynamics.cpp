@@ -167,6 +167,7 @@ static Metrics simulate(bool dynamics, float degrees, float motor_tau, float ine
 		if (dynamics) {
 			const Vector3f omega_ff = feedforward_available ? Vector3f(Dcmf(q).transpose() * ref.omega_ned) : Vector3f{};
 			const Vector3f alpha_ff = feedforward_available ? Vector3f(Dcmf(q).transpose() * ref.alpha_ned - omega.cross(omega_ff)) : Vector3f{};
+			rate.setReactionFeedback(servo, .5f, Vector3f(10.f, 10.f, 10.f));
 			torque = baselineRateTorque(rate, omega, rate_sp, angular_acceleration, alpha_ff, torque_shortfall, inertia, dt, q);
 
 		} else {

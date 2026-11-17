@@ -1,18 +1,34 @@
 /**
  * Voliro T large-angle reference control mode
  *
- * Both modes retain VC_* attitude/rate gain strength and normalized-torque PID
- * with the same per-axis integral limits. Mode 1 maps attitude gains to task
- * directions and adds fresh angular references. Inertia is used for acceleration
+ * Both modes use VC_* normalized-torque PID with the same integral limits.
+ * Mode 1 maps attitude gains to task directions, shapes reaction-axis rate P
+ * with VT_RCT_P_SCALE and adds fresh angular references. Inertia is used for acceleration
  * feedforward and optional VEC_GYRO_FF, not to scale PID feedback. Applied at
  * startup only; reboot so tasks, controllers and allocation agree.
  *
  * @value 0 Legacy quaternion and normalized-torque rate PID
- * @value 1 Task-frame attitude and reference feedforward with mode-0 rate PID
+ * @value 1 Task-frame attitude, reaction-axis P shaping and reference feedforward
  * @reboot_required true
  * @group Voliro Dynamics
  */
 PARAM_DEFINE_INT32(VT_CTRL_MODE, 0);
+
+/**
+ * Voliro reaction-axis proportional feedback scale
+ *
+ * In VT_CTRL_MODE=1, reduce only the rate PID proportional torque along the
+ * common rotor axis. Smoothly blend from 1 at 10 deg tilt to this scale at
+ * 30 deg, retaining this scale through inverted tilts. Upright vertical
+ * thrust retains original gains. Integral, derivative and feedforward
+ * torques, and the original control allocation, are unchanged.
+ * 1 disables the shaping. Applied only to CA_AIRFRAME=17.
+ * @min 0.1
+ * @max 1
+ * @decimal 3
+ * @group Voliro Dynamics
+ */
+PARAM_DEFINE_FLOAT(VT_RCT_P_SCALE, 0.5f);
 
 /**
  * Near-vertical feedback bandwidth scale

@@ -120,7 +120,7 @@ private:
 	uORB::Publication<vehicle_attitude_setpoint_s>  _vehicle_attitude_setpoint_pub;
 	uORB::Publication<vector_rate_reference_s> _vector_rate_reference_pub{ORB_ID(vector_rate_reference)};
 	vector_attitude_reference_s _vector_reference{};
-	bool _dynamics_enabled{false}; // latched at startup (VT_CTRL_MODE requires reboot)
+	bool _reference_enabled{false}; // latched at startup (VT_CTRL_MODE / VEC_REF_EN require reboot)
 
 	manual_control_setpoint_s       _manual_control_setpoint {};    /**< manual control setpoint */
 	vehicle_control_mode_s          _vehicle_control_mode {};       /**< vehicle control mode */
@@ -156,6 +156,7 @@ private:
 
 	DEFINE_PARAMETERS(
 		(ParamInt<px4::params::VT_CTRL_MODE>) _param_control_mode,
+		(ParamBool<px4::params::VEC_REF_EN>) _param_spatial_reference,
 		(ParamInt<px4::params::CA_AIRFRAME>) _param_vector_airframe,
 		(ParamFloat<px4::params::VT_ATT_SCALE>) _param_vertical_gain_scale,
 		(ParamInt<px4::params::VC_AIRMODE>)         _param_mc_airmode,

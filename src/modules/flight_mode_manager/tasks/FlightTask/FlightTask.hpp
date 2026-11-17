@@ -52,6 +52,7 @@
 #include <uORB/topics/vehicle_command.h>
 #include <uORB/topics/vehicle_constraints.h>
 #include <uORB/topics/vehicle_attitude.h>
+#include <uORB/topics/vector_attitude_reference.h>
 #include <uORB/topics/home_position.h>
 #include <lib/geo/geo.h>
 #include <lib/vector_control/VectorGeometry.hpp>
@@ -64,7 +65,7 @@ public:
 	{
 		_resetSetpoints();
 		_constraints = empty_constraints;
-		_vector_heading_enabled = _param_vt_control_mode.get() == 1 && _param_vector_airframe.get() == 17;
+		_vector_heading_enabled = vector_control::referenceEnabled(_param_vector_airframe.get(), _param_vt_control_mode.get(), _param_spatial_reference.get());
 	}
 
 	virtual ~FlightTask() = default;
@@ -160,6 +161,10 @@ protected:
 	uORB::SubscriptionData<vehicle_local_position_s> _sub_vehicle_local_position{ORB_ID(vehicle_local_position)};
 	uORB::SubscriptionData<home_position_s> _sub_home_position{ORB_ID(home_position)};
 	uORB::Subscription _vector_attitude_sub{ORB_ID(vehicle_attitude)};
+	uORB::Subscription _vector_reference_sub{ORB_ID(vector_attitude_reference)};
+	float _spatial_heading{NAN};
+	hrt_abstime _spatial_heading_timestamp{0};
+	uint8_t _spatial_heading_reset_counter{0};
 	bool _vector_heading_enabled{false};
 	uORB::Subscription _vehicle_local_position_setpoint_sub{ORB_ID(vehicle_local_position_setpoint)};
 
@@ -249,6 +254,7 @@ protected:
 
 	DEFINE_PARAMETERS_CUSTOM_PARENT(ModuleParams,
 					(ParamInt<px4::params::VT_CTRL_MODE>) _param_vt_control_mode,
+					(ParamBool<px4::params::VEC_REF_EN>) _param_spatial_reference,
 					(ParamInt<px4::params::CA_AIRFRAME>) _param_vector_airframe,
 					(ParamFloat<px4::params::MPC_XY_VEL_MAX>) _param_mpc_xy_vel_max,
 					(ParamFloat<px4::params::MPC_Z_VEL_MAX_DN>) _param_mpc_z_vel_max_dn,

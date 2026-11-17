@@ -102,6 +102,10 @@ public:
 				const matrix::Vector3f &integral_rate_scale = matrix::Vector3f(1.f, 1.f, 1.f));
 
 	const matrix::Vector3f &integral() const { return _rate_int; }
+	/** Opt-in Voliro reaction-axis P bandwidth; scale=1 restores exact legacy arithmetic. */
+	void setReactionFeedback(float tilt, float scale, const matrix::Vector3f &torque_scale);
+	float reactionFeedbackScale() const { return _reaction_scale; }
+	float reactionFeedbackTilt() const { return _reaction_tilt; }
 
 	/**
 	 * Set the integral term to 0 to prevent windup
@@ -138,6 +142,9 @@ private:
 	matrix::Vector3f _gain_ff; ///< direct rate to torque feed forward gain only useful for helicopters
 
 	// States
+	float _reaction_tilt{0.f};
+	float _reaction_scale{1.f};
+	matrix::Vector3f _reaction_torque_scale{1.f, 1.f, 1.f};
 	matrix::Vector3f _rate_int; ///< integral term of the rate controller
 
 	// Feedback from control allocation

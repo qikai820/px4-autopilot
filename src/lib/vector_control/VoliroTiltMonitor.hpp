@@ -23,12 +23,15 @@ public:
 		matrix::Vector3f inertia{.1f, .1f, .2f};
 		float servo_rate{math::radians(90.f)}, servo_tau{0.f};
 		float error_limit{math::radians(10.f)}, error_time{.5f};
+		float max_speed{5.f}; // ground speed envelope; zero retains the legacy observation
 	};
 
 	struct Sample {
 		uint64_t acceleration_timestamp{0}, angular_timestamp{0}, command_timestamp{0};
+		uint64_t velocity_timestamp{0};
 		matrix::Vector3f specific_force{}, rates{}, angular_acceleration{};
 		float command{0.f};
+		float speed{NAN};
 	};
 
 	void reset() { *this = VoliroTiltMonitor{}; }
@@ -44,12 +47,24 @@ public:
 		return timestamp != 0 && timestamp <= now && now - timestamp <= max_age;
 	}
 
+	/** This observer attributes specific force to propulsion. At high speed,
+	 * unknown aerodynamic force can look like a stuck tilt mechanism. A speed
+	 * bound is a conservative validity gate, not an aerodynamic compensation or
+	 * an airspeed estimate. Missing velocity is unknown, never a servo fault. */
+	static bool motionObservable(const Settings &s, const Sample &sample, uint64_t now)
+	{
+		return PX4_ISFINITE(s.max_speed) && s.max_speed >= 0.f
+		       && (s.max_speed <= 0.f || (fresh(now, sample.velocity_timestamp)
+						 && PX4_ISFINITE(sample.speed) && sample.speed >= 0.f && sample.speed <= s.max_speed));
+	}
+
 	void update(const Settings &s, const Sample &sample, uint64_t now, bool enabled, bool armed, bool airborne)
 	{
 		if (!armed) { reset(); return; }
 
 		// A parameter change or a mode change must never release an airborne latch.
 		if ((!enabled && !_fault) || !airborne || !fresh(now, sample.acceleration_timestamp)
+		    || !motionObservable(s, sample, now)
 		    || !fresh(now, sample.angular_timestamp) || !fresh(now, sample.command_timestamp)
 		    || !sample.specific_force.isAllFinite() || !sample.rates.isAllFinite()
 		    || !sample.angular_acceleration.isAllFinite() || !PX4_ISFINITE(sample.command)

@@ -51,7 +51,8 @@ VectorPositionControl::VectorPositionControl(bool vtol) :
 {
 	_sample_interval_s.update(0.01f); // 100 Hz default
 	parameters_update(true);
-	_dynamics_enabled = _param_control_mode.get() == 1 && _param_vector_airframe.get() == vector_control::voliro_t;
+	_reference_enabled = vector_control::referenceEnabled(_param_vector_airframe.get(), _param_control_mode.get(),
+			     _param_spatial_reference.get());
 	_tilt_limit_slew_rate.setSlewRate(.2f);
 	_takeoff_status_pub.advertise();
 }
@@ -63,7 +64,7 @@ VectorPositionControl::~VectorPositionControl()
 
 int VectorPositionControl::print_status()
 {
-	PX4_INFO("Voliro dynamics: %s (startup setting)", _dynamics_enabled ? "enabled" : "disabled");
+	PX4_INFO("Vector reference: %s (startup setting)", _reference_enabled ? "enabled" : "disabled");
 	PX4_INFO("RC fixed tilt: %s", _fixed_tilt_mode ? "enabled" : "disabled");
 	PX4_INFO("RC return to level: %s", _fixed_tilt_handover.pending() ? "pending" : "inactive");
 
@@ -80,7 +81,7 @@ int VectorPositionControl::print_status()
 	return 0;
 }
 
-void VectorPositionControl::updateVoliroTiltMonitor(hrt_abstime now)
+void VectorPositionControl::updateVoliroTiltMonitor(hrt_abstime now, const vehicle_local_position_s &local_position)
 {
 	if (_param_vector_airframe.get() != vector_control::voliro_t) { return; }
 
@@ -92,7 +93,13 @@ void VectorPositionControl::updateVoliroTiltMonitor(hrt_abstime now)
 	settings.inertia = Vector3f(_param_inertia_x.get(), _param_inertia_y.get(), _param_inertia_z.get());
 	settings.servo_rate = math::radians(_param_servo_rate.get()); settings.servo_tau = _param_servo_tau.get();
 	settings.error_limit = math::radians(_param_tilt_error.get()); settings.error_time = _param_tilt_error_time.get();
+	settings.max_speed = _param_tilt_max_speed.get();
 	vector_control::VoliroTiltMonitor::Sample sample;
+	sample.velocity_timestamp = local_position.timestamp_sample;
+
+	if (local_position.v_xy_valid && local_position.v_z_valid) {
+		sample.speed = Vector3f(local_position.vx, local_position.vy, local_position.vz).norm();
+	}
 	vehicle_acceleration_s acceleration{};
 	vector_actuator_status_s actuator{};
 
@@ -167,14 +174,19 @@ void VectorPositionControl::updateVoliroTiltMonitor(hrt_abstime now)
 	// Report the RC selection even while disarmed. Activation of fixed-tilt
 	// control is reported separately, after the return-to-level handover.
 	if ((_param_rc_map_vector_sw.get() > 0 || _param_rc_map_level_sw.get() > 0)
-	    && switches.valid && !_vehicle_status.failsafe && !_tilt_monitor.fault()) {
+	    && switches.valid && !_vehicle_status.failsafe) {
 		const RcMode mode = !switches.enabled ? RcMode::Multicopter : switches.level ? RcMode::Level : RcMode::Vector;
 
 		// The first valid sample establishes a baseline; only changes print.
 		if (_last_rc_mode != RcMode::Uninitialized && mode != _last_rc_mode) {
 			const char *mode_name = mode == RcMode::Multicopter ? "Normal" : mode == RcMode::Level ? "Level" : "Vector";
 			// No trailing tab: QGC must display this without custom event metadata.
-			mavlink_log_info(&_mavlink_log_pub, "Voliro: %s mode selected", mode_name);
+			if (_tilt_monitor.fault()) {
+				mavlink_log_critical(&_mavlink_log_pub, "Voliro: tilt fault latched; disarm to reset");
+
+			} else {
+				mavlink_log_info(&_mavlink_log_pub, "Voliro: %s mode selected", mode_name);
+			}
 		}
 
 		_last_rc_mode = mode;
@@ -202,6 +214,8 @@ void VectorPositionControl::updateVoliroTiltMonitor(hrt_abstime now)
 	status.tilt_observed = _tilt_monitor.observed();
 	status.tilt_error = _tilt_monitor.error();
 	status.error_duration = _tilt_monitor.errorDuration();
+	status.speed = sample.speed;
+	status.motion_valid = vector_control::VoliroTiltMonitor::motionObservable(settings, sample, now);
 	status.enabled = _param_tilt_monitor_enable.get();
 	status.armed = _vehicle_control_mode.flag_armed;
 	status.observation_valid = _tilt_monitor.valid();
@@ -578,7 +592,7 @@ void VectorPositionControl::Run()
 		_vehicle_angular_velocity_sub.update(&_vehicle_angular_velocity);
 		_control_allocator_status_sub.update(&_control_allocator_status);
 		_vehicle_status_sub.update(&_vehicle_status);
-		updateVoliroTiltMonitor(hrt_absolute_time());
+		updateVoliroTiltMonitor(hrt_absolute_time(), vehicle_local_position);
 
 		if (_fallback_reset_counter != _vehicle_attitude.quat_reset_counter) {
 			if (_last_attitude_target_valid) {
@@ -603,15 +617,25 @@ void VectorPositionControl::Run()
 
 		VectorPositionStates states{set_vehicle_states(vehicle_local_position, dt)};
 
-		if (_dynamics_enabled) {
-			const float heading = vector_control::forcePlaneHeading(Quatf(_vehicle_attitude.q));
+		if (_reference_enabled) {
+			const bool spatial = vector_control::capabilities(_param_vector_airframe.get()).independentRoll();
+			float heading_hint = _attitude_reference.initialized() ? _attitude_reference.heading() : states.yaw;
+
+			if (_reference_reset_counter != _vehicle_attitude.quat_reset_counter) {
+				heading_hint += Eulerf(Quatf(_vehicle_attitude.delta_q_reset)).psi();
+			}
+
+			const float heading = spatial ? vector_control::spatialHeading(Quatf(_vehicle_attitude.q), heading_hint)
+						     : vector_control::forcePlaneHeading(Quatf(_vehicle_attitude.q));
 
 			if (PX4_ISFINITE(heading)) { states.yaw = heading; }
 
 			if (_reference_reset_counter != _vehicle_attitude.quat_reset_counter) {
 				// The attitude epoch owns reference-frame adaptation. The separate
 				// local-position reset handler adapts the INPUT trajectory only.
-				_attitude_reference.adaptFrame(Quatf(_vehicle_attitude.delta_q_reset), math::radians(_param_mpc_tiltmax_air.get()));
+				const float bank_limit = spatial ? vector_control::spatialAttitudeLimit(_param_spatial_limit.get())
+							: math::radians(_param_mpc_tiltmax_air.get());
+				_attitude_reference.adaptFrame(Quatf(_vehicle_attitude.delta_q_reset), bank_limit);
 				_reference_reset_counter = _vehicle_attitude.quat_reset_counter;
 				_reference_shortfall.zero();
 			}
@@ -971,7 +995,9 @@ void VectorPositionControl::Run()
 			}
 
 			_control.setAllocationShortfall(shortfall + _reference_shortfall);
-			_control.setAllocationAntiWindupGain(_dynamics_enabled ? _param_position_aw.get() : 0.f);
+			const float allocation_aw = vector_control::capabilities(_param_vector_airframe.get()).forcePlane()
+						    ? _param_position_aw.get() : _param_spatial_aw.get();
+			_control.setAllocationAntiWindupGain(_reference_enabled ? allocation_aw : 0.f);
 			// Run position control
 			const bool control_update_success = _control.update(dt);
 
@@ -1058,7 +1084,7 @@ void VectorPositionControl::Run()
 			_control.getAttitudeSetpoint(attitude_setpoint, _voliro_pitch_setpoint);
 			vector_attitude_reference_s reference_message{};
 
-			if (_dynamics_enabled && voliro_pitch_allowed) {
+			if (_reference_enabled && voliro_pitch_allowed) {
 				vector_control::AttitudeReference::Settings settings;
 				settings.bank_limit = math::constrain(_tilt_limit_slew_rate.getState(), 0.f, math::radians(80.f));
 				settings.pitch_limit = math::radians(math::constrain(_param_vt_pitch_max.get(), 0.f, 160.f));
@@ -1115,7 +1141,7 @@ void VectorPositionControl::Run()
 					_reference_shortfall.zero();
 				}
 
-			} else {
+			} else if (!vector_control::capabilities(_param_vector_airframe.get()).independentRoll() || !_reference_enabled) {
 				_attitude_reference.reset();
 				_reference_shortfall.zero();
 			}
@@ -1135,7 +1161,63 @@ void VectorPositionControl::Run()
 
 			// Optional MorphQuad independent attitude inputs; standard flight-task stick mapping remains active.
 
-			if (_param_vector_aux_att.get() && _param_vector_airframe.get() == vector_control::morphquad
+			const bool spatial = vector_control::capabilities(_param_vector_airframe.get()).independentRoll();
+
+			if (spatial && _reference_enabled) {
+				// Same reference model and atomic feedforward chain as the plane
+				// vehicle, with both attitude axes free and no lateral-force projection.
+				const bool allowed = control_update_success && (manual_position || user_hold)
+						     && !_vehicle_status.failsafe && _vehicle_control_mode.flag_armed
+						     && !_vehicle_land_detected.landed && !_vehicle_land_detected.ground_contact;
+				const bool input_valid = allowed && _param_vector_aux_att.get() && rc_input_valid
+							 && switches_valid && vector_enabled && !level_requested;
+				const float limit = vector_control::spatialAttitudeLimit(_param_spatial_limit.get());
+				const float roll_target = input_valid && _param_rc_map_aux1.get() > 0 && PX4_ISFINITE(manual.aux1)
+							 ? math::constrain(manual.aux1, -1.f, 1.f) * limit : 0.f;
+				const float independent_pitch = input_valid && _param_rc_map_aux2.get() > 0 && PX4_ISFINITE(manual.aux2)
+							       ? math::constrain(manual.aux2, -1.f, 1.f) * limit : 0.f;
+				vector_control::AttitudeReference::Settings settings;
+				settings.force_space = vector_control::capabilities(_param_vector_airframe.get()).force_space;
+				settings.bank_limit = settings.pitch_limit = limit;
+				settings.bank_rate = settings.pitch_rate = math::radians(_param_spatial_rate.get());
+				settings.bank_acceleration = settings.pitch_acceleration = math::radians(_param_spatial_acceleration.get());
+				settings.heading_rate = math::radians(_param_spatial_heading_rate.get());
+				settings.heading_acceleration = math::radians(_param_spatial_heading_acceleration.get());
+				settings.tracking_frequency = _param_spatial_frequency.get();
+				settings.thrust_limit = _param_mpc_thr_max.get();
+
+				if (allowed && !_attitude_reference.initialized()) {
+					_attitude_reference.initialize(Quatf(_vehicle_attitude.q), settings.bank_limit, states.yaw);
+				}
+
+				const float authority = _attitude_reference.pitchAuthority(Quatf(_vehicle_attitude.q));
+				vector_control::AttitudeReference::Output reference;
+				const Vector3f raw_force(local_pos_sp.thrust);
+
+				if (allowed && _attitude_reference.update(raw_force, control_setpoint.yaw, control_setpoint.yawspeed,
+								independent_pitch, authority, dt, settings, reference, roll_target)) {
+					reference.attitude.copyTo(attitude_setpoint.q_d);
+					// Keep yaw fallback available if the optional paired message is lost.
+					attitude_setpoint.yaw_sp_move_rate = reference.heading_rate;
+					reference.force.copyTo(local_pos_sp.thrust);
+					_reference_shortfall = raw_force - reference.force;
+					reference_message.valid = true;
+					reference.attitude.copyTo(reference_message.q_d);
+					reference.omega_ned.copyTo(reference_message.omega_ned);
+					reference.alpha_ned.copyTo(reference_message.alpha_ned);
+					raw_force.copyTo(reference_message.force_raw);
+					reference.force.copyTo(reference_message.force_limited);
+					reference_message.heading = reference.heading;
+					reference_message.bank = reference.bank;
+					reference_message.pitch = reference.pitch;
+					reference_message.pitch_authority = authority;
+
+				} else {
+					_attitude_reference.reset();
+					_reference_shortfall.zero();
+				}
+
+			} else if (_param_vector_aux_att.get() && spatial
 			    && _vehicle_control_mode.flag_control_manual_enabled && manual_fresh) {
 				const float limit = math::radians(_param_vector_aux_max.get());
 				const bool configured = _param_rc_map_vector_sw.get() > 0 || _param_rc_map_level_sw.get() > 0;
@@ -1171,7 +1253,7 @@ void VectorPositionControl::Run()
 			_force_pub.publish(force_sp);
 			attitude_setpoint.timestamp = hrt_absolute_time();
 
-			if (_dynamics_enabled) {
+			if (_reference_enabled) {
 				reference_message.timestamp = attitude_setpoint.timestamp;
 				reference_message.timestamp_sample = vehicle_local_position.timestamp_sample;
 				reference_message.quat_reset_counter = _vehicle_attitude.quat_reset_counter;

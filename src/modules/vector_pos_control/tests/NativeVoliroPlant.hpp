@@ -31,11 +31,13 @@ public:
 		assert((orientation().inversed() * q).canonical().imag().norm() < .001f);
 		setCommands(trim_commands, trim_tilt);
 		// Warm actuator states with the rigid body held at its initial state.
-		_fdm.SuspendIntegration();
+		// SuspendIntegration also sets dt to zero, so electric rotor states do
+		// not spin up. Hold the rigid body while retaining the actuator timestep.
+		_fdm.SetHoldDown(true);
 
 		for (int i = 0; i < 1200; ++i) { assert(_fdm.Run()); }
 
-		_fdm.ResumeIntegration();
+		_fdm.SetHoldDown(false);
 	}
 
 	void step(const float commands[5], float tilt, matrix::Quatf &q, matrix::Vector3f &omega,

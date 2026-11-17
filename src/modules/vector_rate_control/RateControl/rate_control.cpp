@@ -37,8 +37,19 @@
 
 #include "rate_control.hpp"
 #include <px4_platform_common/defines.h>
+#include <lib/vector_control/VoliroReactionFeedback.hpp>
 
 using namespace matrix;
+
+void VectorRateCore::setReactionFeedback(float tilt, float scale, const Vector3f &torque_scale)
+{
+	if (!PX4_ISFINITE(tilt) || !PX4_ISFINITE(scale) || !torque_scale.isAllFinite()
+	    || torque_scale.min() <= 0.f) { return; }
+
+	_reaction_tilt = tilt;
+	_reaction_scale = vector_control::reactionProportionalScale(tilt, scale);
+	_reaction_torque_scale = torque_scale;
+}
 
 void VectorRateCore::setPidGains(const Vector3f &P, const Vector3f &I, const Vector3f &D)
 {
@@ -69,8 +80,8 @@ void VectorRateCore::setNegativeSaturationFlag(size_t axis, bool is_saturated)
 }
 
 Vector3f VectorRateCore::update(const Vector3f &rate, const Vector3f &rate_sp, const Vector3f &angular_accel,
-					const float dt, const bool landed, const Vector3f &angular_accel_ff,
-					const Vector3f &accel_to_torque, const Vector3f &integral_rate_scale)
+				const float dt, const bool landed, const Vector3f &angular_accel_ff,
+				const Vector3f &accel_to_torque, const Vector3f &integral_rate_scale)
 {
 	// angular rates error
 	Vector3f rate_error = rate_sp - rate;
@@ -79,9 +90,11 @@ Vector3f VectorRateCore::update(const Vector3f &rate, const Vector3f &rate_sp, c
 	// Both modes use the same normalized-torque feedback, integral limits and
 	// saturation handling. Inertia scales only the optional reference feedforward.
 	// Subtract reference acceleration from D so it does not oppose that reference.
-	const Vector3f torque = _gain_p.emult(rate_error) + _rate_int
-			       - _gain_d.emult(angular_accel - angular_accel_ff) + _gain_ff.emult(rate_sp)
-			       + accel_to_torque.emult(angular_accel_ff);
+	const Vector3f proportional = vector_control::reactionProportionalFeedback(_gain_p.emult(rate_error),
+				      _reaction_tilt, _reaction_scale, _reaction_torque_scale);
+	const Vector3f torque = proportional + _rate_int
+				- _gain_d.emult(angular_accel - angular_accel_ff) + _gain_ff.emult(rate_sp)
+				+ accel_to_torque.emult(angular_accel_ff);
 
 	// update integral only if we are not landed
 	if (!landed) {

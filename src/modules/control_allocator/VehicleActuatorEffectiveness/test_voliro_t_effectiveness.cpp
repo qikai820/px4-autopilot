@@ -16,6 +16,7 @@ static vehicle_land_detected_s input_land{};
 static bool monitor_mode = false;
 static bool tilt_status_available = false;
 static float servo_rate = 90.f;
+static float servo_angle = 120.f;
 static uint64_t test_time = 100000;
 static uint64_t clock_step = 10000;
 static voliro_tilt_status_s input_tilt_status{};
@@ -113,7 +114,7 @@ extern "C" int param_get(param_t p, void *value)
 
 	case px4::params::CA_CT_KM: v = .02f; break;
 
-	case px4::params::CA_CT_ANGLE: v = 120.f; break;
+	case px4::params::CA_CT_ANGLE: v = servo_angle; break;
 
 	case px4::params::CA_CT_RATE: v = servo_rate; break;
 
@@ -749,4 +750,5 @@ int main(int argc, char **argv)
 	std::puts("PASS: vertical reaction/bank filtering, residuals, prediction labeling and disarm reset");
 	test_tilt_fallback();
 	test_fixed_tilt_switch();
+	return 0;
 }

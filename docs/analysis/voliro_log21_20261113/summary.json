@@ -1,0 +1,182 @@
+{
+  "log_file": "/home/qikai820/Documents/QGroundControl Daily/Logs/log_21_2026-11-13-10-29-22.ulg",
+  "software_hash": "159117ad1bd37be5506160ad1868f135691e6420",
+  "hardware": "CUAV_7_NANO",
+  "axis_order": [
+    "body x / roll",
+    "body y / pitch",
+    "body z / yaw"
+  ],
+  "notes": [
+    "Errors are shortest body rotation vectors, not Euler-angle differences.",
+    "Capacity and allocated torque use the logged allocator model; neither is actuator measurement.",
+    "Phase estimates describe closed-loop oscillations; they are not open-loop identification.",
+    "The +45 deg window contains only about three cycles."
+  ],
+  "parameters": {
+    "VT_CTRL_MODE": 1,
+    "VT_REACT_FILT": 2.0,
+    "VT_MOT_TAU": 0.0,
+    "VT_SRV_TAU": 0.0,
+    "VT_ATT_SCALE": 0.33333298563957214,
+    "VC_ROLL_P": 5.5,
+    "VC_PITCH_P": 3.0,
+    "VC_YAW_P": 2.799999952316284,
+    "VC_ROLLRATE_P": 0.25999999046325684,
+    "VC_PITCHRATE_P": 0.10000000149011612,
+    "VC_YAWRATE_P": 0.30000001192092896,
+    "VC_ROLLRATE_I": 0.20000000298023224,
+    "VC_PITCHRATE_I": 0.4000000059604645,
+    "VC_YAWRATE_I": 0.10000000149011612,
+    "CA_CT_KM": 0.019999999552965164,
+    "CA_CT_TMAX": 39.5,
+    "VEC_IXX": 0.18000000715255737,
+    "VEC_IYY": 0.11999999731779099,
+    "VEC_IZZ": 0.3799999952316284,
+    "VEC_TQ_R": 10.0,
+    "VEC_TQ_P": 10.0,
+    "VEC_TQ_Y": 10.0
+  },
+  "windows": [
+    {
+      "window_s": [
+        43,
+        75
+      ],
+      "target_pitch": "-30 deg",
+      "body_rotation_error_peak_abs_deg": [
+        1.1200059568273695,
+        0.6657138628406674,
+        2.9819692183418454
+      ],
+      "body_rotation_error_std_deg": [
+        0.5807510706046514,
+        0.3177514761060289,
+        1.8622472432659167
+      ],
+      "body_rate_peak_abs_deg_s": [
+        10.577400207519531,
+        12.148238182067871,
+        24.155458450317383
+      ],
+      "reaction_peak_abs_requested_nm": 1.2701079845428467,
+      "reaction_peak_abs_filtered_nm": 1.069772720336914,
+      "reaction_peak_abs_allocated_nm": 0.7465659976005554,
+      "reaction_capacity_median_nm": 0.7088561654090881,
+      "any_front_motor_zero_command_sample_pct": 46.628814762242726,
+      "tail_thrust_command_min_max_n": [
+        0.22590303421020508,
+        0.7995826601982117
+      ],
+      "reference_feedforward_valid_sample_pct": 100.0,
+      "dominant_reaction_frequency_hz": 1.28125,
+      "request_to_filtered_phase_deg": -31.520740672272062,
+      "allocated_to_reconstructed_torque_phase_deg": -44.73018450145907
+    },
+    {
+      "window_s": [
+        88,
+        118
+      ],
+      "target_pitch": "+30 deg",
+      "body_rotation_error_peak_abs_deg": [
+        2.5998081676574123,
+        0.3019641203268586,
+        1.471470731098599
+      ],
+      "body_rotation_error_std_deg": [
+        0.9249257659721676,
+        0.05379394668473342,
+        0.6497069972699483
+      ],
+      "body_rate_peak_abs_deg_s": [
+        23.1251277923584,
+        4.449788570404053,
+        13.527918815612793
+      ],
+      "reaction_peak_abs_requested_nm": 0.8507684469223022,
+      "reaction_peak_abs_filtered_nm": 0.6763756275177002,
+      "reaction_peak_abs_allocated_nm": 0.6763755083084106,
+      "reaction_capacity_median_nm": 0.6504444479942322,
+      "any_front_motor_zero_command_sample_pct": 0.0,
+      "tail_thrust_command_min_max_n": [
+        0.36316758394241333,
+        0.5767781734466553
+      ],
+      "reference_feedforward_valid_sample_pct": 100.0,
+      "dominant_reaction_frequency_hz": 1.4,
+      "request_to_filtered_phase_deg": -33.735608985576434,
+      "allocated_to_reconstructed_torque_phase_deg": -62.982075837713474
+    },
+    {
+      "window_s": [
+        125,
+        128
+      ],
+      "target_pitch": "+45 deg",
+      "body_rotation_error_peak_abs_deg": [
+        3.955344458478585,
+        0.7233812210706225,
+        2.6880037310786244
+      ],
+      "body_rotation_error_std_deg": [
+        2.69059928042946,
+        0.3306936757948974,
+        1.7585085774133171
+      ],
+      "body_rate_peak_abs_deg_s": [
+        30.289011001586914,
+        21.691102981567383,
+        19.240482330322266
+      ],
+      "reaction_peak_abs_requested_nm": 1.6574547290802002,
+      "reaction_peak_abs_filtered_nm": 1.3995221853256226,
+      "reaction_peak_abs_allocated_nm": 0.7906296253204346,
+      "reaction_capacity_median_nm": 0.7478051781654358,
+      "any_front_motor_zero_command_sample_pct": 67.17557251908397,
+      "tail_thrust_command_min_max_n": [
+        0.11354882270097733,
+        0.6807851195335388
+      ],
+      "reference_feedforward_valid_sample_pct": 100.0,
+      "dominant_reaction_frequency_hz": 1.0,
+      "request_to_filtered_phase_deg": -29.165662699996158,
+      "allocated_to_reconstructed_torque_phase_deg": -50.79350351312731
+    },
+    {
+      "window_s": [
+        135,
+        142
+      ],
+      "target_pitch": "-45 deg",
+      "body_rotation_error_peak_abs_deg": [
+        3.1444496624625464,
+        1.1616676178764522,
+        3.9558949780807757
+      ],
+      "body_rotation_error_std_deg": [
+        1.7828683437140813,
+        0.39830526345925654,
+        2.1833224688008634
+      ],
+      "body_rate_peak_abs_deg_s": [
+        21.729103088378906,
+        20.619400024414062,
+        28.681840896606445
+      ],
+      "reaction_peak_abs_requested_nm": 1.77895987033844,
+      "reaction_peak_abs_filtered_nm": 1.5257655382156372,
+      "reaction_peak_abs_allocated_nm": 0.7763486504554749,
+      "reaction_capacity_median_nm": 0.7024723887443542,
+      "any_front_motor_zero_command_sample_pct": 50.0,
+      "tail_thrust_command_min_max_n": [
+        0.0,
+        0.994020938873291
+      ],
+      "reference_feedforward_valid_sample_pct": 100.0,
+      "dominant_reaction_frequency_hz": 1.1428571428571428,
+      "request_to_filtered_phase_deg": -27.754728824165237,
+      "allocated_to_reconstructed_torque_phase_deg": -46.37491315595182
+    }
+  ]
+}

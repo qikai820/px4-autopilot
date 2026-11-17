@@ -1,7 +1,8 @@
 /**
  * Independent attitude input in position control modes
  *
- * MorphQuad uses AUX1/AUX2 for roll/pitch in manual position/altitude modes.
+ * MorphQuad uses AUX1/AUX2 for roll/pitch in Position, Position Slow and Hold
+ * with VEC_REF_EN. Its legacy path retains manual position/altitude inputs.
  * Voliro T uses RC AUX1 for body pitch in Position, Position Slow and Hold.
  * When RC_MAP_VECTOR_SW is assigned and off, fixed-servo multicopter mode
  * overrides independent AUX1 pitch; switch on permits AUX1 pitch.
@@ -50,7 +51,9 @@ PARAM_DEFINE_FLOAT(VT_PITCH_RATE, 20.0f);
  * multicopter force-to-attitude control and commands the tilt servo to center.
  * The remaining estimated tilt is compensated. Fallback stays latched until
  * disarm, even if this parameter is disabled in flight. Requires calibrated
- * CA_CT geometry, VEC inertia and MPC_THR_HOVER. External contact is unsupported.
+ * CA_CT geometry, VEC inertia and MPC_THR_HOVER. Observation is inhibited above
+ * VT_TILT_VMAX or without fresh velocity. External contact and unknown wind
+ * forces remain unsupported; ground speed does not measure airspeed.
  * @boolean
  * @group Vector Position Control
  */
@@ -81,6 +84,22 @@ PARAM_DEFINE_FLOAT(VT_TILT_ERR, 10.0f);
  * @group Vector Position Control
  */
 PARAM_DEFINE_FLOAT(VT_TILT_T, 0.5f);
+
+/**
+ * Maximum speed for motion-based tilt observation
+ *
+ * Above this NED ground-speed magnitude, aerodynamic force may be mistaken
+ * for tilt error. Inhibit observation and reset confirmation, preserving an
+ * already latched fault. Requires fresh 3D velocity. Does not limit flight
+ * speed. Zero restores the legacy observation without a speed validity gate.
+ * Wind and external contact can invalidate the model even below this limit.
+ * @unit m/s
+ * @min 0
+ * @max 50
+ * @decimal 1
+ * @group Vector Position Control
+ */
+PARAM_DEFINE_FLOAT(VT_TILT_VMAX, 5.0f);
 
 /**
  * RC channel for vector / fixed-servo multicopter mode
@@ -114,3 +133,85 @@ PARAM_DEFINE_INT32(RC_MAP_VECTOR_SW, 0);
  * @group Radio Switches
  */
 PARAM_DEFINE_INT32(RC_MAP_LEVEL_SW, 0);
+
+/**
+ * Spatial vector attitude reference
+ *
+ * Enables the common smooth attitude/reference-feedforward chain for dual-axis
+ * MorphQuad (CA_AIRFRAME=16). Voliro T retains VT_CTRL_MODE and its force-plane
+ * constraints. Zero preserves the legacy MorphQuad AUX path. Startup only.
+ * @boolean
+ * @reboot_required true
+ * @group Vector Position Control
+ */
+PARAM_DEFINE_INT32(VEC_REF_EN, 0);
+
+/**
+ * Spatial independent roll and pitch limit
+ *
+ * Applied by VEC_REF_EN in Position, Position Slow and Hold. Requires calibrated
+ * gimbal travel and thrust authority. Landing and automatic tasks request level.
+ * Both reference axes use this limit, including rotations beyond 90 degrees.
+ * @unit deg
+ * @min 0
+ * @max 120
+ * @group Vector Position Control
+ */
+PARAM_DEFINE_FLOAT(VEC_ATT_MAX, 20.0f);
+
+/**
+ * Spatial independent attitude reference rate
+ * @unit deg/s
+ * @min 1
+ * @max 90
+ * @group Vector Position Control
+ */
+PARAM_DEFINE_FLOAT(VEC_ATT_RATE, 20.0f);
+
+/**
+ * Spatial independent attitude reference acceleration
+ * @unit deg/s^2
+ * @min 1
+ * @max 360
+ * @group Vector Position Control
+ */
+PARAM_DEFINE_FLOAT(VEC_ATT_ACC, 60.0f);
+
+/**
+ * Spatial attitude reference tracking frequency
+ * @unit rad/s
+ * @min 1
+ * @max 20
+ * @group Vector Position Control
+ */
+PARAM_DEFINE_FLOAT(VEC_REF_FREQ, 8.0f);
+
+/**
+ * Spatial heading reference rate
+ * @unit deg/s
+ * @min 1
+ * @max 180
+ * @group Vector Position Control
+ */
+PARAM_DEFINE_FLOAT(VEC_HEAD_RATE, 45.0f);
+
+/**
+ * Spatial heading reference acceleration
+ * @unit deg/s^2
+ * @min 1
+ * @max 360
+ * @group Vector Position Control
+ */
+PARAM_DEFINE_FLOAT(VEC_HEAD_ACC, 90.0f);
+
+/**
+ * Spatial position integral allocation back-calculation gain
+ *
+ * Used with VEC_REF_EN. Normalized NED force residual is converted to
+ * acceleration before unwinding velocity integration. Voliro keeps VT_POS_AW.
+ * @unit 1/s
+ * @min 0
+ * @max 10
+ * @group Vector Position Control
+ */
+PARAM_DEFINE_FLOAT(VEC_POS_AW, 1.0f);

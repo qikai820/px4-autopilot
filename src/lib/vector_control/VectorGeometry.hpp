@@ -1,12 +1,10 @@
 #pragma once
 #include <matrix/matrix/math.hpp>
 #include <mathlib/mathlib.h>
+#include "VectorCapabilities.hpp"
 
 namespace vector_control
 {
-constexpr int morphquad = 16;
-constexpr int voliro_t = 17;
-
 /** Independent pitch reference rate in rad/s, with parameter inputs in deg/s.
  * Reserve the common tilt's ability to follow the body pitch maneuver. */
 inline float voliroPitchRateLimit(float pitch_rate_deg_s, float servo_rate_deg_s)
@@ -22,6 +20,30 @@ inline float forcePlaneHeading(const matrix::Quatf &q)
 
 	const matrix::Vector3f y = matrix::Dcmf(q).col(1);
 	return y.xy().norm_squared() > .01f ? atan2f(-y(0), y(1)) : NAN;
+}
+
+/** Continue the spatial reference's Rz*Rx*Ry heading through bank +/-90.
+ * Body Y reverses its horizontal projection beyond vertical. Choose the
+ * equivalent heading nearest the previous/reference heading; at vertical
+ * retain that heading because body Y alone cannot distinguish it. */
+inline float spatialHeading(const matrix::Quatf &q, float heading_hint)
+{
+	if (!q.isAllFinite() || fabsf(q.norm_squared() - 1.f) > .01f) { return NAN; }
+
+	if (!PX4_ISFINITE(heading_hint)) { return forcePlaneHeading(q); }
+
+	const matrix::Vector3f y = matrix::Dcmf(q).col(1);
+
+	if (y.xy().norm_squared() <= .01f) { return matrix::wrap_pi(heading_hint); }
+
+	const float heading = atan2f(-y(0), y(1));
+	const float error = matrix::wrap_pi(heading - heading_hint);
+	return fabsf(error) <= M_PI_2_F ? heading : matrix::wrap_pi(heading + M_PI_F);
+}
+
+inline float spatialAttitudeLimit(float degrees)
+{
+	return math::radians(math::constrain(degrees, 0.f, 120.f));
 }
 
 // Align body Z with the requested force in the banked force plane.
@@ -44,7 +66,7 @@ inline float pitchForForce(const matrix::Vector3f &force, float heading, float t
 inline matrix::Quatf attitudeForForce(const matrix::Vector3f &force, float yaw, int airframe, float tilt_limit,
 				      float pitch_setpoint = 0.f)
 {
-	if (airframe == voliro_t) {
+	if (capabilities(airframe).forcePlane()) {
 		// Bank the force plane before applying the independent body pitch.
 		// Rz(yaw)*Ry(pitch)*Rx(roll) becomes singular when the projected
 		// force crosses body Z=0, even at moderate pitch. Rz*Rx*Ry keeps

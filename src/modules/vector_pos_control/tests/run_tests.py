@@ -102,12 +102,16 @@ def main():
     tests = Path(__file__).resolve().parent
     with tempfile.TemporaryDirectory(prefix="vector-control-test-") as temp:
         executable = str(Path(temp) / "test")
-        names = ("test_voliro_fixed_tilt", "test_voliro_fixed_tilt_transition") if args.fixed_only else ("test_vector_pid_baseline", "test_vector_control", "test_vector_reference", "test_voliro_tilt_monitor", "test_voliro_dynamics", "test_voliro_fixed_tilt", "test_voliro_fixed_tilt_transition")
+        names = ("test_voliro_fixed_tilt", "test_voliro_fixed_tilt_transition") if args.fixed_only else ("test_vector_pid_baseline", "test_vector_control", "test_vector_reference", "test_vector_capabilities", "test_voliro_tilt_monitor", "test_voliro_monitor_replay", "test_voliro_dynamics", "test_voliro_fixed_tilt", "test_voliro_fixed_tilt_transition")
+        if not args.fixed_only:
+            names += ("test_voliro_reaction_feedback",)
         if args.native_only:
             names = ()
         for name in names:
             subprocess.run(common + [str(tests / (name + ".cpp")), "-o", executable], check=True, cwd=root)
             arguments = [str(args.csv.resolve())] if name == "test_voliro_dynamics" and args.csv else []
+            if name == "test_voliro_monitor_replay":
+                arguments = [str(tests / "testdata/tilt_monitor_log17.csv")]
             subprocess.run([executable] + arguments, check=True)
         if args.sweep:
             subprocess.run(common + [str(tests / "test_voliro_dynamics.cpp"), "-o", executable], check=True, cwd=root)

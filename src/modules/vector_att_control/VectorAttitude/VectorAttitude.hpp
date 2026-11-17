@@ -81,6 +81,7 @@ public:
 		_attitude_setpoint_q.normalize();
 		_yawspeed_setpoint = yawspeed_setpoint;
 		_task_reference = false;
+		_angular_reference = false;
 	}
 
 	/** Task axes are heading-aligned horizontal X/Y and world down Z.
@@ -94,8 +95,17 @@ public:
 		_task_feedforward_valid = angular_feedforward_valid;
 		_vertical_gain_scale = math::constrain(vertical_gain_scale, .1f, 1.f);
 		_task_reference = true;
+		_angular_reference = false;
 	}
 	void clearTaskReference() { _task_reference = false; }
+	/** Spatial vehicles retain body-axis feedback gains and share the same
+	 * world-frame angular reference transport as constrained vehicles. */
+	void setAngularReference(const matrix::Vector3f &omega_ned, bool valid)
+	{
+		_task_reference = false;
+		_angular_reference = valid;
+		_omega_ned = valid ? omega_ned : matrix::Vector3f{};
+	}
 	const matrix::Quatf &attitudeSetpoint() const { return _attitude_setpoint_q; }
 
 	/**
@@ -108,7 +118,7 @@ public:
 		_attitude_setpoint_q = q_delta * _attitude_setpoint_q;
 		_attitude_setpoint_q.normalize();
 
-		if (_task_reference) {
+		if (_task_reference || _angular_reference) {
 			const matrix::Dcmf delta(q_delta);
 			const matrix::Vector3f heading = delta * matrix::Vector3f(cosf(_task_heading), sinf(_task_heading), 0.f);
 			_task_heading = atan2f(heading(1), heading(0));
@@ -128,6 +138,7 @@ public:
 private:
 	bool _full_attitude{false};
 	bool _task_reference{false};
+	bool _angular_reference{false};
 	bool _task_feedforward_valid{false};
 	matrix::Vector3f _task_gain{}, _omega_ned{};
 	float _task_heading{0.f};

@@ -39,6 +39,7 @@
 #include "RateControl/rate_control.hpp"
 #include <uORB/topics/vector_rate_reference.h>
 #include <uORB/topics/vector_rate_control_status.h>
+#include <uORB/topics/vector_actuator_status.h>
 #include <lib/mathlib/math/filter/AlphaFilter.hpp>
 #include <uORB/topics/vector_force_setpoint.h>
 #include <uORB/topics/vehicle_attitude.h>
@@ -102,7 +103,8 @@ private:
 	void updateActuatorControlsStatus(const vehicle_torque_setpoint_s &vehicle_torque_setpoint, float dt);
 
 	VectorRateCore _rate_control; ///< class for rate control calculations
-	bool _dynamics_enabled{false};
+	bool _reference_enabled{false};
+	uORB::Subscription _reaction_actuator_sub{ORB_ID(vector_actuator_status)};
 	uORB::Subscription _vector_reference_sub{ORB_ID(vector_rate_reference)};
 	uORB::Publication<vector_rate_control_status_s> _vector_status_pub{ORB_ID(vector_rate_control_status)};
 	vector_rate_reference_s _vector_reference{};
@@ -168,10 +170,12 @@ private:
 	uORB::Subscription _vector_attitude_sub{ORB_ID(vehicle_attitude)};
 	DEFINE_PARAMETERS(
 		(ParamInt<px4::params::VT_CTRL_MODE>) _param_control_mode,
+		(ParamBool<px4::params::VEC_REF_EN>) _param_spatial_reference,
 		(ParamInt<px4::params::CA_AIRFRAME>) _param_vector_airframe,
 		(ParamInt<px4::params::VC_AIRMODE>) _param_vector_airmode,
 		(ParamFloat<px4::params::MPC_THR_HOVER>) _param_airmode_hover,
 		(ParamFloat<px4::params::VT_ATT_SCALE>) _param_vertical_gain_scale,
+		(ParamFloat<px4::params::VT_RCT_P_SCALE>) _param_reaction_p_scale,
 		(ParamBool<px4::params::VEC_GYRO_FF>) _param_vector_gyro_ff,
 		(ParamFloat<px4::params::VEC_IXX>) _param_vector_ixx,
 		(ParamFloat<px4::params::VEC_IYY>) _param_vector_iyy,

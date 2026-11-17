@@ -29,6 +29,8 @@ static Monitor::Sample sample(uint64_t now, float actual, float command, const M
 	voliro_t::forward(g, plant);
 	Monitor::Sample result;
 	result.acceleration_timestamp = result.angular_timestamp = result.command_timestamp = now;
+	result.velocity_timestamp = now;
+	result.speed = 0.f;
 	result.specific_force = plant.force / settings.mass;
 	result.rates = Vector3f(.1f, -.05f, -.2f);
 	result.angular_acceleration = (plant.torque - result.rates.cross(settings.inertia.emult(result.rates))).edivide(settings.inertia);
@@ -244,6 +246,8 @@ static void test_closed_loop_fault(bool stuck)
 		if (k % 4 == 0) {
 			Monitor::Sample s;
 			s.acceleration_timestamp = s.angular_timestamp = s.command_timestamp = now;
+			s.velocity_timestamp = now;
+			s.speed = velocity.norm();
 			s.specific_force = specific_force; s.rates = omega; s.angular_acceleration = angular_acceleration;
 			s.command = servo_command;
 			const bool previous_fault = monitor.fault();
@@ -335,9 +339,72 @@ static void test_closed_loop_fault(bool stuck)
 	assert(final_error < .15f && velocity.norm() < .1f && peak_position < 10.f);
 }
 
+static void test_motion_envelope()
+{
+	Monitor::Settings settings;
+	uint64_t now = 1000000;
+	const float stuck = math::radians(25.f);
+
+	for (int kind = 0; kind < 6; ++kind) {
+		Monitor monitor;
+
+		for (int i = 0; i < 200; ++i) {
+			now += 10000;
+			auto s = sample(now, stuck, 0.f, settings);
+
+			if (kind == 0) { s.speed = settings.max_speed + .1f; }
+			if (kind == 1) { s.speed = NAN; }
+			if (kind == 2) { s.speed = -1.f; }
+			if (kind == 3) { s.velocity_timestamp = 0; }
+			if (kind == 4) { s.velocity_timestamp = now - 100001; }
+			if (kind == 5) { s.velocity_timestamp = now + 1; }
+
+			assert(!Monitor::motionObservable(settings, s, now));
+			monitor.update(settings, s, now, true, true, true);
+		}
+
+		assert(!monitor.valid() && !monitor.fault() && monitor.errorDuration() < 1e-6f);
+
+		// Re-entering the envelope starts a fresh warmup/confirmation. Genuine
+		// low-speed actuator mismatch must still be detected and stay latched.
+		for (int i = 0; i < 110; ++i) {
+			now += 10000;
+			auto s = sample(now, stuck, 0.f, settings);
+			s.speed = settings.max_speed;
+			assert(Monitor::motionObservable(settings, s, now));
+			monitor.update(settings, s, now, true, true, true);
+			if (i < 80) { assert(!monitor.fault()); }
+		}
+
+		assert(monitor.fault());
+		now += 10000;
+		auto fast = sample(now, 0.f, 0.f, settings);
+		fast.speed = 20.f;
+		monitor.update(settings, fast, now, false, true, true);
+		assert(monitor.fault() && !monitor.valid());
+		monitor.update(settings, fast, now, false, false, false);
+		assert(!monitor.fault());
+	}
+
+	Monitor legacy;
+	settings.max_speed = 0.f;
+
+	for (int i = 0; i < 110; ++i) {
+		now += 10000;
+		auto s = sample(now, stuck, 0.f, settings);
+		s.velocity_timestamp = 0; s.speed = NAN;
+		assert(Monitor::motionObservable(settings, s, now));
+		legacy.update(settings, s, now, true, true, true);
+	}
+
+	assert(legacy.fault());
+	puts("PASS: tilt observation speed/freshness gates, recovery warmup, real fault latch and legacy opt-out");
+}
+
 int main()
 {
 	test_observation_and_timing();
+	test_motion_envelope();
 	test_healthy_servo_lag();
 	test_fallback_geometry();
 	test_closed_loop_fault(false);

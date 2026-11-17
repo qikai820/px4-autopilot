@@ -107,6 +107,8 @@ matrix::Vector3f VectorAttitude::update(const Quatf &q) const
 		const float gain_scale = vector_control::referenceFeedbackScale(q, _vertical_gain_scale);
 		rate_setpoint = task_to_body * (_task_gain * gain_scale).emult(task_to_body.transpose() * eq)
 				+ Dcmf(q).transpose() * _omega_ned;
+	} else if (_angular_reference) {
+		rate_setpoint += Dcmf(q).transpose() * _omega_ned;
 	}
 
 	// Feed forward the yaw setpoint rate.
@@ -119,7 +121,7 @@ matrix::Vector3f VectorAttitude::update(const Quatf &q) const
 	// Task-axis feedback also runs in Stabilized mode and when the paired
 	// reference is unavailable. Only a valid full angular reference replaces
 	// the yaw-rate feedforward from the standard attitude setpoint.
-	if ((!_task_reference || !_task_feedforward_valid) && std::isfinite(_yawspeed_setpoint)) {
+	if ((!_task_reference || !_task_feedforward_valid) && !_angular_reference && std::isfinite(_yawspeed_setpoint)) {
 		rate_setpoint += q.inversed().dcm_z() * _yawspeed_setpoint;
 	}
 

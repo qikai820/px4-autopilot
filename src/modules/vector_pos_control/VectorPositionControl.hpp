@@ -111,7 +111,7 @@ public:
 
 private:
 	void Run() override;
-	void updateVoliroTiltMonitor(hrt_abstime now);
+	void updateVoliroTiltMonitor(hrt_abstime now, const vehicle_local_position_s &local_position);
 
 	VectorTakeoffHandling _takeoff; /**< state machine and ramp to bring the vehicle off the ground without jumps */
 
@@ -154,7 +154,7 @@ private:
 	vehicle_angular_velocity_s _vehicle_angular_velocity{};
 	control_allocator_status_s _control_allocator_status{};
 	float _voliro_pitch_setpoint{0.f};
-	bool _dynamics_enabled{false};
+	bool _reference_enabled{false};
 	vector_control::AttitudeReference _attitude_reference;
 	matrix::Vector3f _reference_shortfall{};
 	uint8_t _reference_reset_counter{0};
@@ -196,6 +196,14 @@ private:
 	uORB::Publication<vector_force_setpoint_s> _force_pub{ORB_ID(vector_force_setpoint)};
 	DEFINE_PARAMETERS(
 		(ParamInt<px4::params::VT_CTRL_MODE>) _param_control_mode,
+		(ParamBool<px4::params::VEC_REF_EN>) _param_spatial_reference,
+		(ParamFloat<px4::params::VEC_ATT_MAX>) _param_spatial_limit,
+		(ParamFloat<px4::params::VEC_ATT_RATE>) _param_spatial_rate,
+		(ParamFloat<px4::params::VEC_ATT_ACC>) _param_spatial_acceleration,
+		(ParamFloat<px4::params::VEC_REF_FREQ>) _param_spatial_frequency,
+		(ParamFloat<px4::params::VEC_POS_AW>) _param_spatial_aw,
+		(ParamFloat<px4::params::VEC_HEAD_RATE>) _param_spatial_heading_rate,
+		(ParamFloat<px4::params::VEC_HEAD_ACC>) _param_spatial_heading_acceleration,
 		(ParamFloat<px4::params::VT_ATT_SCALE>) _param_vertical_gain_scale,
 		(ParamFloat<px4::params::VT_REF_FREQ>) _param_reference_frequency,
 		(ParamFloat<px4::params::VT_BANK_RATE>) _param_bank_rate,
@@ -207,6 +215,7 @@ private:
 		(ParamBool<px4::params::VT_TILT_EN>) _param_tilt_monitor_enable,
 		(ParamFloat<px4::params::VT_TILT_ERR>) _param_tilt_error,
 		(ParamFloat<px4::params::VT_TILT_T>) _param_tilt_error_time,
+		(ParamFloat<px4::params::VT_TILT_VMAX>) _param_tilt_max_speed,
 		(ParamFloat<px4::params::VT_SRV_TAU>) _param_servo_tau,
 		(ParamFloat<px4::params::CA_CT_RATE>) _param_servo_rate,
 		(ParamFloat<px4::params::CA_CT_X>) _param_front_x,
@@ -223,6 +232,7 @@ private:
 		(ParamFloat<px4::params::VT_PITCH_MAX>) _param_vt_pitch_max,
 		(ParamFloat<px4::params::VT_PITCH_RATE>) _param_vt_pitch_rate,
 		(ParamInt<px4::params::RC_MAP_AUX1>) _param_rc_map_aux1,
+		(ParamInt<px4::params::RC_MAP_AUX2>) _param_rc_map_aux2,
 		(ParamInt<px4::params::RC_MAP_VECTOR_SW>) _param_rc_map_vector_sw,
 		(ParamInt<px4::params::RC_MAP_LEVEL_SW>) _param_rc_map_level_sw,
 		// Position Control
